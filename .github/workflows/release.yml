@@ -82,14 +82,14 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p artifacts
-          mapfile -t dmgs < <(find src-tauri/target -type f -path '*/release/bundle/dmg/*.dmg' -print)
-          if (( ${#dmgs[@]} == 0 )); then
+          dmgs="$(find src-tauri/target -type f -path '*/release/bundle/dmg/*.dmg' -print)"
+          if [[ -z "$dmgs" ]]; then
             echo 'No DMG was produced.' >&2
             exit 1
           fi
-          for dmg in "${dmgs[@]}"; do
-            cp "$dmg" artifacts/
-          done
+          while IFS= read -r dmg; do
+            [[ -n "$dmg" ]] && cp "$dmg" artifacts/
+          done <<< "$dmgs"
           ls -lh artifacts
 
       - name: Upload architecture artifact
