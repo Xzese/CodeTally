@@ -41,12 +41,12 @@ jobs:
       - name: Run backend tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked
 
-  publish:
-    name: Build ${{ matrix.architecture }} release
+  build:
+    name: Build ${{ matrix.architecture }} bundle
     needs: checks
     runs-on: macos-latest
     permissions:
-      contents: write
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -57,10 +57,8 @@ jobs:
             target: x86_64-apple-darwin
 
     steps:
-      - name: Check out repository and tags
+      - name: Check out repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -76,42 +74,91 @@ jobs:
       - name: Install JavaScript dependencies
         run: npm ci
 
-      - name: Require a new version for each release merge
+      - name: Build Tauri bundle
+        run: npm run tauri:build -- --target ${{ matrix.target }}
+
+      - name: Collect DMG artifact
         shell: bash
         run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          mapfile -t dmgs < <(find src-tauri/target -type f -path '*/release/bundle/dmg/*.dmg' -print)
+          if (( ${#dmgs[@]} == 0 )); then
+            echo 'No DMG was produced.' >&2
+            exit 1
+          fi
+          for dmg in "${dmgs[@]}"; do
+            cp "$dmg" artifacts/
+          done
+          ls -lh artifacts
+
+      - name: Upload architecture artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: codetally-${{ matrix.target }}
+          path: artifacts/*.dmg
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out repository and tags
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Download architecture artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: codetally-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: Require a new version for each release
+        shell: bash
+        run: |
+          set -euo pipefail
           APP_VERSION="$(node -p "require('./src-tauri/tauri.conf.json').version")"
           PACKAGE_VERSION="$(node -p "require('./package.json').version")"
           CARGO_VERSION="$(awk -F '"' '/^version = "/ { print $2; exit }' src-tauri/Cargo.toml)"
           RELEASE_TAG="v${APP_VERSION}"
 
           if [[ "${APP_VERSION}" != "${PACKAGE_VERSION}" || "${APP_VERSION}" != "${CARGO_VERSION}" ]]; then
-            echo "::error::Version mismatch: tauri=${APP_VERSION}, npm=${PACKAGE_VERSION}, cargo=${CARGO_VERSION}."
+            echo "Version mismatch: tauri=${APP_VERSION}, npm=${PACKAGE_VERSION}, cargo=${CARGO_VERSION}." >&2
             exit 1
           fi
-
           if git show-ref --tags --verify --quiet "refs/tags/${RELEASE_TAG}"; then
-            TAG_COMMIT="$(git rev-list -n 1 "${RELEASE_TAG}")"
-            if [[ "${TAG_COMMIT}" != "${GITHUB_SHA}" ]]; then
-              echo "::error::${RELEASE_TAG} already belongs to ${TAG_COMMIT}. Bump the app version before merging into release."
-              exit 1
-            fi
+            echo "${RELEASE_TAG} already exists. Bump the app version before releasing again." >&2
+            exit 1
           fi
+          test "$(find artifacts -maxdepth 1 -type f -name '*.dmg' | wc -l | tr -d ' ')" -eq 2
+          {
+            echo "VERSION=${APP_VERSION}"
+            echo "TAG=${RELEASE_TAG}"
+          } >> "$GITHUB_ENV"
 
-      - name: Build and publish GitHub Release
-        uses: tauri-apps/tauri-action@v1.0.0
+      - name: Create release and upload both DMGs
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tagName: v__VERSION__
-          releaseName: CodeTally v__VERSION__
-          releaseBody: |
-            Automated unsigned macOS builds for Apple Silicon and Intel.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cat > release-notes.md <<'EOF'
+          Automated unsigned macOS builds for Apple Silicon and Intel.
 
-            macOS may require users to approve the app in Privacy & Security because these artifacts are not notarized.
-          generateReleaseNotes: true
-          releaseDraft: false
-          prerelease: false
-          releaseCommitish: ${{ github.sha }}
-          uploadUpdaterJson: false
-          retryAttempts: 2
-          args: --target ${{ matrix.target }}
+          macOS may require users to approve the app in Privacy & Security because these artifacts are not notarized.
+          EOF
+          gh release create "$TAG" artifacts/*.dmg \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "CodeTally $VERSION" \
+            --notes-file release-notes.md \
+            --generate-notes
