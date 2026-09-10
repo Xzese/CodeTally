@@ -70,6 +70,19 @@ npm run tauri:build
 
 On macOS, the `.app` and `.dmg` are written below `src-tauri/target/release/bundle/`. You can run the app bundle directly or install it from the disk image.
 
+### Continuous integration
+
+The [CI workflow](.github/workflows/ci.yml) runs on every pull request, pushes to `main` and `release`, and manual dispatch. It checks:
+
+- frontend behavior with Vitest and React Testing Library;
+- TypeScript compilation and the Vite production build;
+- Rust backend tests, including database, scanner, and GitHub sync regressions;
+- release-mode Tauri compilation on native Apple Silicon and Intel macOS runners.
+
+CI uses standard GitHub-hosted runners, read-only repository permissions, and no account credentials. GitHub sync tests use a fake CLI rather than your live account. Superseded runs are cancelled. CI does not publish releases or upload build artifacts; the release workflow below handles distributable bundles.
+
+To prevent merging failing changes, configure repository branch protection or a ruleset to require `Frontend checks`, `Desktop checks (Apple Silicon)`, and `Desktop checks (Intel)` after the workflow has run once. Adding the workflow alone does not enforce merge protection.
+
 ### Automated GitHub releases
 
 The [release workflow](.github/workflows/release.yml) runs whenever a commit is pushed or merged into the `release` branch. It first runs the frontend and backend test suites, then builds separate macOS artifacts for Apple Silicon and Intel. A successful run creates a published GitHub Release, generates release notes, tags the commit as `v<version>`, and attaches the application bundles.
