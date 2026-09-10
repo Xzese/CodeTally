@@ -12,7 +12,7 @@ type Screen = 'dashboard' | 'detail'
 type RepoSort = 'name' | 'loc' | 'source' | 'tests' | 'growth' | 'prs' | 'issues' | 'stars' | 'forks' | 'activity'
 
 const EMPTY_DEPS: DependencyStatus = { gh: false, git: false, tokei: false, gh_authenticated: false, authenticated: false, login: null }
-const DEFAULT_APP_SETTINGS: AppSettings = { activity_refresh_minutes: 2, lines_refresh_minutes: 45, refresh_lines_on_change: true }
+const DEFAULT_APP_SETTINGS: AppSettings = { activity_refresh_minutes: 10, lines_refresh_minutes: 45, refresh_lines_on_change: true }
 
 function toDashboard(raw: DashboardData | null | undefined = {}) {
   return normalizeDashboard(raw ?? {})
@@ -187,11 +187,11 @@ function App() {
       completionMessage = result.message
       completionError = result.errors?.[0] ?? null
       const failure = syncFailure(result)
-      if (failure) setError(failure)
       await loadFinalData()
+      if (failure) setError(failure)
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason))
       if (!automatic) await loadFinalData()
+      setError(reason instanceof Error ? reason.message : String(reason))
     } finally {
       setSyncProgress((previous) => {
         const authoritative = progressHasCounters(completionProgress) ? completionProgress : previous
@@ -291,12 +291,12 @@ function App() {
       completionMessage = result.message
       completionError = result.errors?.[0] ?? null
       const failure = syncFailure(result)
-      if (failure) setError(failure)
       setImportStep('Loading local line history')
       await loadFinalData()
+      if (failure) setError(failure)
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason))
       await loadFinalData()
+      setError(reason instanceof Error ? reason.message : String(reason))
     } finally {
       setSyncProgress((previous) => {
         const authoritative = progressHasCounters(completionProgress) ? completionProgress : previous

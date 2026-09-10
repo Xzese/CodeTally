@@ -1,0 +1,86 @@
+name: Continuous integration
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - release
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Frontend checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install JavaScript dependencies
+        run: npm ci
+
+      - name: Run frontend tests
+        run: npm test -- --run
+
+      - name: Build frontend
+        run: npm run build
+
+  desktop:
+    name: Desktop checks (${{ matrix.architecture }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: Apple Silicon
+            os: macos-latest
+            target: aarch64-apple-darwin
+          - architecture: Intel
+            os: macos-15-intel
+            target: x86_64-apple-darwin
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Rust target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install JavaScript dependencies
+        run: npm ci
+
+      - name: Install Tokei for backend tests
+        run: brew install tokei
+
+      - name: Run backend tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+
+      - name: Build native app
+        run: npm run tauri:build -- --ci --no-bundle --target ${{ matrix.target }} -- --locked

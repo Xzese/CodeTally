@@ -70,6 +70,19 @@ npm run tauri:build
 
 On macOS, the `.app` and `.dmg` are written below `src-tauri/target/release/bundle/`. You can run the app bundle directly or install it from the disk image.
 
+### Continuous integration
+
+The [CI workflow](.github/workflows/ci.yml) runs on every pull request, pushes to `main` and `release`, and manual dispatch. It checks:
+
+- frontend behavior with Vitest and React Testing Library;
+- TypeScript compilation and the Vite production build;
+- Rust backend tests, including database, scanner, and GitHub sync regressions;
+- release-mode Tauri compilation on native Apple Silicon and Intel macOS runners.
+
+CI uses standard GitHub-hosted runners, read-only repository permissions, and no account credentials. GitHub sync tests use a fake CLI rather than your live account. Superseded runs are cancelled. CI does not publish releases or upload build artifacts; the release workflow below handles distributable bundles.
+
+To prevent merging failing changes, configure repository branch protection or a ruleset to require `Frontend checks`, `Desktop checks (Apple Silicon)`, and `Desktop checks (Intel)` after the workflow has run once. Adding the workflow alone does not enforce merge protection.
+
 ### Automated GitHub releases
 
 The [release workflow](.github/workflows/release.yml) runs whenever a commit is pushed or merged into the `release` branch. It first runs the frontend and backend test suites, then builds separate macOS artifacts for Apple Silicon and Intel. A successful run creates a published GitHub Release, generates release notes, tags the commit as `v<version>`, and attaches the application bundles.
@@ -90,11 +103,17 @@ The rightmost **Refresh** control performs an immediate full synchronization of 
 
 Automatic activity refreshes keep repository metadata, pull requests, and issues current while the app is open. The defaults are:
 
-- activity refresh every 2 minutes;
+- activity refresh every 10 minutes;
 - line-count sweep every 45 minutes;
 - refresh a repository's line counts when its GitHub `pushedAt` value changes.
 
-The Settings drawer offers activity intervals of 1, 2, 5, 10, or 15 minutes and line-count intervals of 30, 45, or 60 minutes. These settings are stored in the local database.
+The Settings drawer offers activity intervals of 1, 2, 5, 10, or 15 minutes and line-count intervals of 30, 45, or 60 minutes. These settings are stored in the local database. Previously saved intervals are preserved; installations using a short interval can select 10 or 15 minutes to reduce polling.
+
+Automatic repository discovery and metadata refresh run at most once per hour; manual **Refresh** forces discovery. Activity refreshes combine pull requests, issues, and exact open counts into paginated queries. Open items are refreshed regardless of age, including pull-request CI status. The first activity import fetches closed or merged items updated in the last 30 days; later refreshes fetch changes since each feed's saved checkpoint, with a five-minute overlap. Previously cached history is retained.
+
+Large feeds are processed up to five pages of 100 items per feed per cycle, then resumed from saved progress on the next cycle. Repository processing rotates after an interrupted refresh so later repositories also get a turn. A partial import does not advance the last-successful-sync timestamp.
+
+When GitHub reports a low or exhausted API quota, CodeTally saves a pause until the reset time and stops further requests. Secondary rate limits also trigger a cooldown. Pauses survive restarts, cached data stays readable, and scheduled refreshes resume after the cooldown. Manual refreshes respect the same pause. This reduces API consumption and handles limits shared with other applications using your GitHub account.
 
 The activity sidebar starts on open pull requests. Switching between pull requests and issues resets the state filter to **Open**. On a repository detail page, the feed remains locked to that repository; returning to the portfolio restores the previous dashboard filter.
 
