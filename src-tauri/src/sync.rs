@@ -3,6 +3,7 @@ use crate::db::Database;
 use crate::error::{AppError, AppResult};
 use crate::gitops::{commit_at_or_before, current_commit, current_commit_optional, earliest_commit, ensure_clone, scan_at_commit_with_config};
 use crate::github;
+use crate::github_sync;
 use crate::models::{AppSettings, Repository, Snapshot, SyncProgress, SyncResult};
 use chrono::{DateTime, Duration, Utc};
 use std::collections::BTreeSet;
@@ -95,21 +96,26 @@ impl AppState {
 }
 
 pub fn discover(state: &AppState) -> AppResult<Vec<Repository>> {
-    let user = github::current_user()?;
     let db = state.database();
+    github_sync::ensure_available(&db)?;
+    github_sync::graphql(&db, "query{rateLimit{remaining resetAt}}", serde_json::json!({}))?;
+    github_sync::ensure_available(&db)?;
+    let user = github_sync::guarded(&db, github::current_user)?;
     db.set_metadata("github_login", &user.login)?;
     db.set_metadata("org_discovery_errors", "")?;
-    let mut discovered = github::list_repositories(&user.login)?;
+    let mut discovered = github_sync::guarded(&db, || github::list_repositories(&user.login))?;
     let mut org_errors = Vec::new();
-    match github::list_organizations() {
+    match github_sync::guarded(&db, github::list_organizations) {
         Ok(organizations) => {
             for organization in organizations {
-                match github::list_repositories_for_owner(&organization) {
+                match github_sync::guarded(&db, || github::list_repositories_for_owner(&organization)) {
                     Ok(repositories) => discovered.extend(repositories),
+                    Err(error @ AppError::RateLimited { .. }) => return Err(error),
                     Err(error) => org_errors.push(format!("{organization}: {error}")),
                 }
             }
         }
+        Err(error @ AppError::RateLimited { .. }) => return Err(error),
         Err(error) => org_errors.push(format!("organization discovery: {error}")),
     }
     if !org_errors.is_empty() {
@@ -119,10 +125,12 @@ pub fn discover(state: &AppState) -> AppResult<Vec<Repository>> {
     for repo in discovered.into_iter().filter(|repo| seen.insert(repo.github_id.clone())) {
         db.upsert_repository(&repo)?;
     }
+    if org_errors.is_empty() { db.set_metadata("github_discovered_at", &Utc::now().to_rfc3339())?; }
     db.repositories()
 }
 
 pub fn sync_all(state: &AppState) -> AppResult<SyncResult> {
+    github_sync::ensure_available(&state.database())?;
     let mut result = SyncResult { ok: true, message: "Refresh complete".into(), ..SyncResult::default() };
     state.set_progress(SyncProgress { running: true, phase: "discovering".into(), message: "Discovering repositories".into(), ..SyncProgress::default() });
 
@@ -148,16 +156,36 @@ pub fn sync_all(state: &AppState) -> AppResult<SyncResult> {
             result.errors.extend(org_errors.lines().map(|error| format!("Organization discovery: {error}")));
         }
     }
-    let active: Vec<Repository> = repos.into_iter().filter(|repo| !repo.is_archived).collect();
+    if let Err(error) = github_sync::ensure_available(&state.database()) {
+        result.ok = false;
+        result.errors.push(error.to_string());
+        result.message = error.to_string();
+        finish_progress(state, Some(error.to_string()));
+        return Ok(result);
+    }
+    let mut active: Vec<Repository> = repos.into_iter().filter(|repo| !repo.is_archived).collect();
+    let last = state.database().metadata("github_last_attempted_repository")?.and_then(|s| s.parse::<i64>().ok());
+    if let Some(position) = active.iter().position(|repo| Some(repo.id) == last) {
+        let length = active.len();
+        active.rotate_left((position + 1) % length);
+    }
     let repository_total = active.len() as i64;
     state.set_progress(SyncProgress { running: true, phase: "syncing".into(), current: 0, total: repository_total, repository_current: 0, repository_total, message: "Refreshing GitHub activity and line counts".into(), ..SyncProgress::default() });
     for (index, repo) in active.into_iter().enumerate() {
+        if let Err(error) = github_sync::ensure_available(&state.database()) {
+            result.ok = false;
+            result.errors.push(error.to_string());
+            break;
+        }
+        state.database().set_metadata("github_last_attempted_repository", &repo.id.to_string())?;
         state.set_progress(SyncProgress { running: true, phase: "syncing_repository".into(), current: index as i64, total: repository_total, repository_current: index as i64, repository_total, snapshot_current: 0, snapshot_total: 0, repository_name: Some(repo.name_with_owner.clone()), message: format!("Refreshing activity and line counts for {}", repo.name_with_owner), ..SyncProgress::default() });
         match sync_repo_data(state, &repo, true, true) {
-            Ok((prs, issues, snapshots, repo_errors)) => {
-                result.repositories_synced += 1;
-                result.activity_repositories_synced += 1;
-                result.loc_repositories_synced += 1;
+            Ok((prs, issues, snapshots, repo_errors, loc_completed)) => {
+                if repo_errors.is_empty() {
+                    result.repositories_synced += 1;
+                    result.activity_repositories_synced += 1;
+                }
+                if loc_completed { result.loc_repositories_synced += 1; }
                 result.pull_requests_synced += prs;
                 result.issues_synced += issues;
                 result.snapshots_created += snapshots;
@@ -187,7 +215,7 @@ pub fn sync_all(state: &AppState) -> AppResult<SyncResult> {
     if !result.errors.is_empty() {
         result.message = "Refresh completed with some errors".into();
     }
-    if let Err(error) = state.database().set_metadata(LOC_SWEEP_METADATA_KEY, &Utc::now().to_rfc3339()) {
+    if let Err(error) = if result.ok { state.database().set_metadata(LOC_SWEEP_METADATA_KEY, &Utc::now().to_rfc3339()) } else { Ok(()) } {
         result.ok = false;
         result.errors.push(format!("Line-count sweep timestamp: {error}"));
     }
@@ -199,6 +227,7 @@ pub fn sync_all(state: &AppState) -> AppResult<SyncResult> {
 /// repositories that are new, changed, incomplete, or due for the periodic
 /// verification sweep.
 pub fn sync_activity(state: &AppState) -> AppResult<SyncResult> {
+    github_sync::ensure_available(&state.database())?;
     let mut result = SyncResult { ok: true, message: "Activity refresh complete".into(), ..SyncResult::default() };
     state.set_progress(SyncProgress { running: true, phase: "discovering_activity".into(), message: "Discovering repository activity".into(), ..SyncProgress::default() });
 
@@ -210,7 +239,8 @@ pub fn sync_activity(state: &AppState) -> AppResult<SyncResult> {
         return Ok(result);
     }
 
-    let repos = match discover(state) {
+    let cached = state.database().metadata("github_discovered_at")?.and_then(|s| s.parse::<DateTime<Utc>>().ok()).is_some_and(|t| Utc::now() - t < Duration::hours(1));
+    let repos = match if cached { state.database().repositories() } else { discover(state) } {
         Ok(repos) => repos,
         Err(error) => {
             result.ok = false;
@@ -224,7 +254,19 @@ pub fn sync_activity(state: &AppState) -> AppResult<SyncResult> {
             result.errors.extend(org_errors.lines().map(|error| format!("Organization discovery: {error}")));
         }
     }
-    let active: Vec<Repository> = repos.into_iter().filter(|repo| !repo.is_archived).collect();
+    if let Err(error) = github_sync::ensure_available(&state.database()) {
+        result.ok = false;
+        result.errors.push(error.to_string());
+        result.message = error.to_string();
+        finish_progress(state, Some(error.to_string()));
+        return Ok(result);
+    }
+    let mut active: Vec<Repository> = repos.into_iter().filter(|repo| !repo.is_archived).collect();
+    let last = state.database().metadata("github_last_attempted_repository")?.and_then(|s| s.parse::<i64>().ok());
+    if let Some(position) = active.iter().position(|repo| Some(repo.id) == last) {
+        let length = active.len();
+        active.rotate_left((position + 1) % length);
+    }
     let repository_total = active.len() as i64;
     let now = Utc::now();
     let db = state.database();
@@ -234,16 +276,24 @@ pub fn sync_activity(state: &AppState) -> AppResult<SyncResult> {
     state.set_progress(SyncProgress { running: true, phase: "syncing_activity".into(), current: 0, total: repository_total, repository_current: 0, repository_total, snapshot_current: 0, snapshot_total: 0, message: if sweep_due { "Refreshing activity and due line-count checks".into() } else { "Refreshing GitHub activity".into() }, ..SyncProgress::default() });
 
     for (index, repo) in active.into_iter().enumerate() {
+        if let Err(error) = github_sync::ensure_available(&state.database()) {
+            result.ok = false;
+            result.errors.push(error.to_string());
+            break;
+        }
+        state.database().set_metadata("github_last_attempted_repository", &repo.id.to_string())?;
         let decision = decide_loc_sync_with_settings(&repo, now, last_sweep_at.as_deref(), false, &settings);
         if !decision.run {
             result.loc_repositories_skipped += 1;
         }
         state.set_progress(SyncProgress { running: true, phase: if decision.run { "syncing_repository" } else { "syncing_activity" }.into(), current: index as i64, total: repository_total, repository_current: index as i64, repository_total, snapshot_current: 0, snapshot_total: 0, repository_name: Some(repo.name_with_owner.clone()), message: if decision.run { format!("Refreshing activity and line counts for {}", repo.name_with_owner) } else { format!("Refreshing activity for {}", repo.name_with_owner) }, ..SyncProgress::default() });
         match sync_repo_data(state, &repo, decision.run, decision.force_fetch) {
-            Ok((prs, issues, snapshots, repo_errors)) => {
-                result.repositories_synced += 1;
-                result.activity_repositories_synced += 1;
-                if decision.run {
+            Ok((prs, issues, snapshots, repo_errors, loc_completed)) => {
+                if repo_errors.is_empty() {
+                    result.repositories_synced += 1;
+                    result.activity_repositories_synced += 1;
+                }
+                if loc_completed {
                     result.loc_repositories_synced += 1;
                 }
                 result.pull_requests_synced += prs;
@@ -270,7 +320,7 @@ pub fn sync_activity(state: &AppState) -> AppResult<SyncResult> {
         progress.message = format!("Completed {}/{} repositories", index + 1, repository_total);
         state.set_progress(progress);
     }
-    if sweep_due {
+    if sweep_due && result.ok {
         if let Err(error) = state.database().set_metadata(LOC_SWEEP_METADATA_KEY, &now.to_rfc3339()) {
             result.ok = false;
             result.errors.push(format!("Line-count sweep timestamp: {error}"));
@@ -286,14 +336,17 @@ pub fn sync_activity(state: &AppState) -> AppResult<SyncResult> {
 }
 
 pub fn sync_one(state: &AppState, repository_id: i64) -> AppResult<SyncResult> {
+    github_sync::ensure_available(&state.database())?;
     let repo = state.database().repository(repository_id)?.ok_or(AppError::RepositoryNotFound(repository_id))?;
     state.set_progress(SyncProgress { running: true, phase: "syncing_repository".into(), current: 0, total: 1, repository_current: 0, repository_total: 1, repository_name: Some(repo.name_with_owner.clone()), message: format!("Refreshing activity and line counts for {}", repo.name_with_owner), ..SyncProgress::default() });
     let mut result = SyncResult { ok: true, message: "Repository refresh complete".into(), ..SyncResult::default() };
     match sync_repo_data(state, &repo, true, true) {
-        Ok((prs, issues, snapshots, repo_errors)) => {
-            result.repositories_synced = 1;
-            result.activity_repositories_synced = 1;
-            result.loc_repositories_synced = 1;
+        Ok((prs, issues, snapshots, repo_errors, loc_completed)) => {
+            if repo_errors.is_empty() {
+                result.repositories_synced = 1;
+                result.activity_repositories_synced = 1;
+            }
+            result.loc_repositories_synced = i64::from(loc_completed);
             result.pull_requests_synced = prs;
             result.issues_synced = issues;
             result.snapshots_created = snapshots;
@@ -321,6 +374,7 @@ pub fn sync_one(state: &AppState, repository_id: i64) -> AppResult<SyncResult> {
 }
 
 pub fn backfill_one(state: &AppState, repository_id: i64) -> AppResult<SyncResult> {
+    github_sync::ensure_available(&state.database())?;
     let repo = state.database().repository(repository_id)?.ok_or(AppError::RepositoryNotFound(repository_id))?;
     state.set_progress(SyncProgress { running: true, phase: "backfilling".into(), current: 0, total: 1, repository_current: 0, repository_total: 1, repository_name: Some(repo.name_with_owner.clone()), message: format!("Building line history for {}", repo.name_with_owner), ..SyncProgress::default() });
     let mut result = SyncResult { ok: true, message: "Line history backfill complete".into(), ..SyncResult::default() };
@@ -341,28 +395,33 @@ pub fn backfill_one(state: &AppState, repository_id: i64) -> AppResult<SyncResul
     Ok(result)
 }
 
-fn sync_repo_data(state: &AppState, repo: &Repository, run_loc: bool, force_fetch: bool) -> AppResult<(i64, i64, i64, Vec<String>)> {
+fn sync_repo_data(state: &AppState, repo: &Repository, run_loc: bool, force_fetch: bool) -> AppResult<(i64, i64, i64, Vec<String>, bool)> {
     let db = state.database();
-    let mut pr_count = 0;
-    let mut issue_count = 0;
+    github_sync::ensure_available(&db)?;
+    let mut counts = [0, 0];
     let mut errors = Vec::new();
-    match github::list_pull_requests(repo) {
-        Ok(items) => for item in items { db.upsert_pull_request(&item)?; pr_count += 1; },
-        Err(error) => errors.push(format!("pull requests: {error}")),
+    let activity_fetched = match github_sync::sync_activity_reporting(&db, repo, &mut counts) {
+        Ok((_, _, complete)) => {
+            if !complete { errors.push("Activity import is continuing next cycle".into()); }
+            true
+        }
+        Err(error) => { errors.push(error.to_string()); false }
+    };
+    let mut loc_completed = false;
+    let mut snapshots = 0;
+    if activity_fetched {
+        match github_sync::ensure_available(&db) {
+            Err(error) => errors.push(error.to_string()),
+            Ok(()) if run_loc => match sync_loc(state, repo, force_fetch) {
+                Ok(created) => { snapshots = created; loc_completed = true; }
+                Err(error) => errors.push(error.to_string()),
+            },
+            Ok(()) => {},
+        }
     }
-    match github::list_issues(repo) {
-        Ok(items) => for item in items { db.upsert_issue(&item)?; issue_count += 1; },
-        Err(error) if error.to_string().to_ascii_lowercase().contains("disabled") => {},
-        Err(error) => errors.push(format!("issues: {error}")),
-    }
-    match github::open_counts(repo) {
-        Ok(counts) => db.set_open_counts(repo.id, counts.pull_requests, counts.issues)?,
-        Err(error) => errors.push(format!("open counts: {error}")),
-    }
-    let snapshots = if run_loc { sync_loc(state, repo, force_fetch)? } else { 0 };
     let error_text = if errors.is_empty() { None } else { Some(errors.join("; ")) };
     db.mark_sync(repo.id, error_text.as_deref())?;
-    Ok((pr_count, issue_count, snapshots, errors))
+    Ok((counts[0], counts[1], snapshots, errors, loc_completed))
 }
 
 fn sync_loc(state: &AppState, repo: &Repository, force_fetch: bool) -> AppResult<i64> {
@@ -485,16 +544,18 @@ fn backfill_repo_at_path(state: &AppState, repo: &Repository, path: &Path) -> Ap
 
 fn finish_progress(state: &AppState, error: Option<String>) {
     let prior = state.progress();
+    let pause = github_sync::ensure_available(&state.database()).err().map(|error| error.to_string());
+    let error = pause.clone().or(error);
     state.set_progress(SyncProgress {
         running: false,
-        phase: "idle".into(),
-        current: prior.total,
+        phase: if pause.is_some() { "paused" } else { "idle" }.into(),
+        current: prior.current,
         total: prior.total,
-        repository_current: prior.repository_total,
+        repository_current: prior.repository_current,
         repository_total: prior.repository_total,
         snapshot_current: prior.snapshot_current,
         snapshot_total: prior.snapshot_total,
-        message: if error.is_some() { "Finished with errors".into() } else { "Ready".into() },
+        message: pause.unwrap_or_else(|| if error.is_some() { "Finished with errors".into() } else { "Ready".into() }),
         error,
         repository_name: prior.repository_name,
     });

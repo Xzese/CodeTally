@@ -3,6 +3,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum AppError {
+    #[error("GitHub requests paused until {until}: {reason}")]
+    RateLimited { until: String, reason: String },
     #[error("database error: {0}")]
     Database(#[from] rusqlite::Error),
     #[error("json error: {0}")]

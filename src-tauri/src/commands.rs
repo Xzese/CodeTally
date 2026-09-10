@@ -13,7 +13,7 @@ pub async fn check_dependencies() -> crate::models::DependencyStatus {
 pub async fn get_github_user(state: State<'_, AppState>) -> Result<GithubUser, String> {
     let state = state.inner().clone();
     tokio::task::spawn_blocking(move || {
-        crate::github::current_user().or_else(|_| {
+        crate::github_sync::guarded(&state.database(), crate::github::current_user).or_else(|_| {
             state.database().metadata("github_login")
                 .map_err(|error| error.to_string())?
                 .map(|login| GithubUser { login })
