@@ -85,15 +85,19 @@ To prevent merging failing changes, configure repository branch protection or a 
 
 ### Automated GitHub releases
 
-The [release workflow](.github/workflows/release.yml) runs whenever a commit is pushed or merged into the `release` branch. It first runs the frontend and backend test suites, then builds separate macOS artifacts for Apple Silicon and Intel. A successful run creates a published GitHub Release, generates release notes, tags the commit as `v<version>`, and attaches the application bundles.
+The [release workflow](.github/workflows/release.yml) runs whenever a commit is pushed or merged into the `release` branch. It selects a release version, runs the frontend and backend test suites, then builds separate macOS artifacts for Apple Silicon and Intel. A successful run creates a published GitHub Release, generates release notes, tags the commit as `v<version>`, and attaches both DMGs.
 
-Before merging a release, update the same version in all three files:
+Patch versions are automatic: if the source version is at or below the latest stable `v<major>.<minor>.<patch>` tag, the workflow increments that tag's patch version. For example, after `v0.1.2`, the next release uses `0.1.3` without a source version edit. A higher source version is used as declared, allowing intentional major or minor releases. When making such a change, update the same version in all three files:
 
 - `package.json`
 - `src-tauri/Cargo.toml`
 - `src-tauri/tauri.conf.json`
 
-Keep the root package versions in `package-lock.json` and `src-tauri/Cargo.lock` in sync as well. Each release merge needs a version that has not already been tagged. Once a version has been published, re-running the workflow fails at the existing-tag check, even for the same commit. Recreating the `release` branch also triggers the workflow, so its version must be new before publishing.
+Keep the root package versions in `package-lock.json` and `src-tauri/Cargo.lock` in sync as well. The selected release version is applied to all five files in each build's checkout; the workflow does not commit version bumps back to the branch. The GitHub tag and installed app record the selected version, while the source manifests retain the declared version. Publication runs are serialized so they select versions in order.
+
+Release PRs preview the version and validate manifest consistency without building or publishing. The version is selected again after merging, using the latest tags. Rerunning an already-published commit, including recreating `release` at that commit, succeeds and skips builds and publication once the workflow confirms both macOS DMGs exist. An incomplete release or failed GitHub lookup is reported instead of being silently skipped. Workflow changes take effect after they are merged; rerunning an older failed workflow still uses its original code.
+
+Run the release regression checks with `node --test scripts/release-preflight.check.mjs`.
 
 The generated macOS builds are currently unsigned and not notarized. Users may need to approve the downloaded app in macOS **System Settings → Privacy & Security**. Code signing and notarization can be added later with Apple signing credentials stored as GitHub Actions secrets.
 
