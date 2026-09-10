@@ -93,7 +93,7 @@ Before merging a release, update the same version in all three files:
 - `src-tauri/Cargo.toml`
 - `src-tauri/tauri.conf.json`
 
-Each release merge needs a version that has not already been tagged. Re-running the workflow for the same commit and version is allowed, while attempting to reuse an existing version for a different commit fails before publishing.
+Keep the root package versions in `package-lock.json` and `src-tauri/Cargo.lock` in sync as well. Each release merge needs a version that has not already been tagged. Once a version has been published, re-running the workflow fails at the existing-tag check, even for the same commit. Recreating the `release` branch also triggers the workflow, so its version must be new before publishing.
 
 The generated macOS builds are currently unsigned and not notarized. Users may need to approve the downloaded app in macOS **System Settings → Privacy & Security**. Code signing and notarization can be added later with Apple signing credentials stored as GitHub Actions secrets.
 

@@ -1,6 +1,6 @@
 [package]
 name = "codetally"
-version = "0.1.1"
+version = "0.1.2"
 description = "A local CodeTally dashboard"
 authors = ["CodeTally"]
 edition = "2021"
