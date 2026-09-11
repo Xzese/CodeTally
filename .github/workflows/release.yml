@@ -1,31 +1,17 @@
 name: Release desktop app
 
 on:
-  workflow_run:
-    workflows: [Continuous integration]
-    types: [completed]
-    branches: [main]
-  pull_request:
-    branches:
-      - release
   push:
     branches:
       - release
-  workflow_dispatch:
 
 concurrency:
-  group: release-${{ github.event_name == 'pull_request' && github.ref || 'publication' }}
+  group: release-publication
   cancel-in-progress: false
 
 jobs:
   preflight:
     name: Release version check
-    if: >-
-      github.event_name != 'workflow_run' ||
-      (github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.event == 'push' &&
-       github.event.workflow_run.head_branch == 'main' &&
-       github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -36,7 +22,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@v4
@@ -53,15 +38,13 @@ jobs:
   checks:
     name: Test before release
     needs: preflight
-    if: github.event_name != 'pull_request' && needs.preflight.outputs.publish == 'true'
+    if: needs.preflight.outputs.publish == 'true'
     runs-on: macos-latest
     permissions:
       contents: read
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -104,8 +87,6 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -172,7 +153,6 @@ jobs:
       - name: Check out repository and tags
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           fetch-depth: 0
 
       - name: Set up Node.js
@@ -205,7 +185,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.preflight.outputs.version }}
           TAG: ${{ needs.preflight.outputs.tag }}
-          RELEASE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          RELEASE_SHA: ${{ github.sha }}
         run: |
           cat > release-notes.md <<'EOF'
           Download Apple-Silicon_aarch64 for Macs with Apple M-series chips, or Intel_x64 for Intel Macs.
