@@ -85,7 +85,9 @@ To prevent merging failing changes, configure repository branch protection or a 
 
 ### Automated GitHub releases
 
-The [release workflow](.github/workflows/release.yml) runs whenever a commit is pushed or merged into the `release` branch. It selects a release version, runs the frontend and backend test suites, then builds separate macOS artifacts for Apple Silicon and Intel. A successful run creates a published GitHub Release, generates release notes, tags the commit as `v<version>`, and attaches both DMGs.
+The [release workflow](.github/workflows/release.yml) runs automatically after **Continuous integration** succeeds for a push to `main`. Merging a feature or fix PR into `main` is enough: no separate release PR or version bump is needed. Failed, cancelled, pull-request, and fork CI runs do not trigger publication. Every release job checks out the exact commit that passed CI, even if `main` has advanced by the time the release starts.
+
+The workflow selects a release version, runs the frontend and backend test suites, then builds separate macOS artifacts for Apple Silicon and Intel. A successful run creates a published GitHub Release, generates release notes, tags the tested commit as `v<version>`, and attaches both DMGs. Manual workflow dispatch and pushes to the legacy `release` branch remain supported, but are not needed for normal releases. This automation takes effect when this workflow is merged into `main` and that commit's push CI succeeds.
 
 Patch versions are automatic: if the source version is at or below the latest stable `v<major>.<minor>.<patch>` tag, the workflow increments that tag's patch version. For example, after `v0.1.2`, the next release uses `0.1.3` without a source version edit. A higher source version is used as declared, allowing intentional major or minor releases. When making such a change, update the same version in all three files:
 
@@ -99,7 +101,11 @@ Release PRs preview the version and validate manifest consistency without buildi
 
 Run the release regression checks with `node --test scripts/release-preflight.check.mjs`.
 
-The generated macOS builds are currently unsigned and not notarized. Users may need to approve the downloaded app in macOS **System Settings → Privacy & Security**. Code signing and notarization can be added later with Apple signing credentials stored as GitHub Actions secrets.
+Choose `CodeTally_<version>_Apple-Silicon_aarch64.dmg` for an Apple M-series Mac, or `CodeTally_<version>_Intel_x64.dmg` for an Intel Mac. Check **Apple menu → About This Mac** for your chip or processor.
+
+macOS bundles are ad-hoc signed and their signatures are verified before publication. They are not Developer ID signed or notarized, so macOS may still require approval in **System Settings → Privacy & Security**. Developer ID signing and notarization require Apple signing credentials stored as GitHub Actions secrets.
+
+Older builds such as `v0.1.2` can show “CodeTally is damaged” because the executable's linker signature does not seal the whole app bundle. Install a release containing the bundle-signing fix. Renaming an older download does not repair its signature.
 
 ## Everyday use
 

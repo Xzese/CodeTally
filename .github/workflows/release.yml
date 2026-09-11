@@ -1,6 +1,10 @@
 name: Release desktop app
 
 on:
+  workflow_run:
+    workflows: [Continuous integration]
+    types: [completed]
+    branches: [main]
   pull_request:
     branches:
       - release
@@ -16,6 +20,12 @@ concurrency:
 jobs:
   preflight:
     name: Release version check
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -26,6 +36,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@v4
@@ -49,6 +60,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -83,12 +96,16 @@ jobs:
         include:
           - architecture: Apple Silicon
             target: aarch64-apple-darwin
+            installer: Apple-Silicon_aarch64
           - architecture: Intel
             target: x86_64-apple-darwin
+            installer: Intel_x64
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -112,8 +129,16 @@ jobs:
       - name: Build Tauri bundle
         run: npm run tauri:build -- --target ${{ matrix.target }}
 
+      - name: Verify macOS bundle signature
+        env:
+          TARGET: ${{ matrix.target }}
+        run: codesign --verify --deep --strict --verbose=2 "src-tauri/target/$TARGET/release/bundle/macos/CodeTally.app"
+
       - name: Collect DMG artifact
         shell: bash
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+          INSTALLER: ${{ matrix.installer }}
         run: |
           set -euo pipefail
           mkdir -p artifacts
@@ -122,9 +147,11 @@ jobs:
             echo 'No DMG was produced.' >&2
             exit 1
           fi
-          while IFS= read -r dmg; do
-            [[ -n "$dmg" ]] && cp "$dmg" artifacts/
-          done <<< "$dmgs"
+          if [[ "$(printf '%s\n' "$dmgs" | wc -l | tr -d ' ')" != 1 ]]; then
+            echo 'Expected exactly one DMG per architecture.' >&2
+            exit 1
+          fi
+          cp "$dmgs" "artifacts/CodeTally_${VERSION}_${INSTALLER}.dmg"
           ls -lh artifacts
 
       - name: Upload architecture artifact
@@ -145,6 +172,7 @@ jobs:
       - name: Check out repository and tags
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           fetch-depth: 0
 
       - name: Set up Node.js
@@ -177,15 +205,16 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.preflight.outputs.version }}
           TAG: ${{ needs.preflight.outputs.tag }}
+          RELEASE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
         run: |
           cat > release-notes.md <<'EOF'
-          Automated unsigned macOS builds for Apple Silicon and Intel.
+          Download Apple-Silicon_aarch64 for Macs with Apple M-series chips, or Intel_x64 for Intel Macs.
 
-          macOS may require users to approve the app in Privacy & Security because these artifacts are not notarized.
+          These builds are ad-hoc signed, but not Developer ID signed or notarized. macOS may require approval in System Settings → Privacy & Security.
           EOF
           gh release create "$TAG" artifacts/*.dmg \
             --repo "$GITHUB_REPOSITORY" \
-            --target "$GITHUB_SHA" \
+            --target "$RELEASE_SHA" \
             --title "CodeTally $VERSION" \
             --notes-file release-notes.md \
             --generate-notes
