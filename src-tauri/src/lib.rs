@@ -4,6 +4,7 @@ pub mod db;
 pub mod error;
 pub mod gitops;
 pub mod github;
+pub mod github_sync;
 pub mod models;
 pub mod sync;
 

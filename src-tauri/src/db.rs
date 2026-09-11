@@ -335,7 +335,7 @@ impl Database {
     pub fn mark_sync(&self, id: i64, error: Option<&str>) -> AppResult<()> {
         let conn = self.connect()?;
         conn.execute(
-            "UPDATE repositories SET last_sync_at=?1, last_error=?2 WHERE id=?3",
+            "UPDATE repositories SET last_sync_at=CASE WHEN ?2 IS NULL THEN ?1 ELSE last_sync_at END, last_error=?2 WHERE id=?3",
             params![Utc::now().to_rfc3339(), error, id],
         )?;
         Ok(())

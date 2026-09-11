@@ -198,7 +198,7 @@ pub struct AppSettings {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
-            activity_refresh_minutes: 2,
+            activity_refresh_minutes: 10,
             lines_refresh_minutes: 45,
             refresh_lines_on_change: true,
         }

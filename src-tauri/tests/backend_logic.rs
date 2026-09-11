@@ -322,7 +322,7 @@ fn automatic_loc_cadence_runs_at_the_45_minute_boundary_and_manual_sync_forces_f
 #[test]
 fn cadence_settings_have_expected_defaults_and_validate_supported_intervals() {
     let defaults = AppSettings::default();
-    assert_eq!(defaults.activity_refresh_minutes, 2);
+    assert_eq!(defaults.activity_refresh_minutes, 10);
     assert_eq!(defaults.lines_refresh_minutes, 45);
     assert!(defaults.refresh_lines_on_change);
     assert!(sync::validate_app_settings(&defaults).is_ok());
@@ -425,6 +425,7 @@ fn discovery_includes_org_repositories_deduplicates_ids_and_records_partial_org_
 repo_json='[{"id":"owned-id","name":"portfolio","nameWithOwner":"me/portfolio","url":"https://github.com/me/portfolio","sshUrl":"git@github.com:me/portfolio.git","isPrivate":false,"isFork":false,"isArchived":false,"defaultBranchRef":{"name":"main"},"primaryLanguage":{"name":"Rust"},"createdAt":"2024-01-01T00:00:00Z","updatedAt":"2026-09-01T00:00:00Z","pushedAt":"2026-09-02T00:00:00Z"}]'
 org_json='[{"id":"org-id","name":"shared","nameWithOwner":"org-one/shared","url":"https://github.com/org-one/shared","sshUrl":"git@github.com:org-one/shared.git","isPrivate":true,"isFork":false,"isArchived":false,"defaultBranchRef":{"name":"main"},"primaryLanguage":{"name":"TypeScript"},"createdAt":"2024-01-01T00:00:00Z","updatedAt":"2026-09-01T00:00:00Z","pushedAt":"2026-09-02T00:00:00Z"},{"id":"owned-id","name":"duplicate","nameWithOwner":"org-one/duplicate","url":"https://github.com/org-one/duplicate","sshUrl":"git@github.com:org-one/duplicate.git","isPrivate":false,"isFork":false,"isArchived":false,"defaultBranchRef":{"name":"main"},"primaryLanguage":{"name":"Rust"},"createdAt":"2024-01-01T00:00:00Z","updatedAt":"2026-09-01T00:00:00Z","pushedAt":"2026-09-02T00:00:00Z"}]'
 if [ "$1" = "api" ] && [ "$2" = "user" ]; then printf 'me\n'; exit 0; fi
+if [ "$1" = "api" ] && [ "$2" = "graphql" ]; then printf '{"data":{"rateLimit":{"remaining":5000,"resetAt":"2099-01-01T00:00:00Z"}}}\n'; exit 0; fi
 if [ "$1" = "api" ] && [ "$2" = "--paginate" ]; then printf 'org-one\norg-two\n'; exit 0; fi
 if [ "$1" = "repo" ] && [ "$3" = "me" ]; then printf '%s\n' "$repo_json"; exit 0; fi
 if [ "$1" = "repo" ] && [ "$3" = "org-one" ]; then printf '%s\n' "$org_json"; exit 0; fi
