@@ -85,9 +85,9 @@ To prevent merging failing changes, configure repository branch protection or a 
 
 ### Automated GitHub releases
 
-The [release workflow](.github/workflows/release.yml) runs automatically after **Continuous integration** succeeds for a push to `main`. Merging a feature or fix PR into `main` is enough: no separate release PR or version bump is needed. Failed, cancelled, pull-request, and fork CI runs do not trigger publication. Every release job checks out the exact commit that passed CI, even if `main` has advanced by the time the release starts.
+The [release workflow](.github/workflows/release.yml) runs only when a commit is pushed or merged into the `release` branch. Normal development merges into `main` do not publish releases. Open a pull request from `main` into `release` when the current main build is ready to ship; the pull request runs CI, and merging it starts one release workflow.
 
-The workflow selects a release version, runs the frontend and backend test suites, then builds separate macOS artifacts for Apple Silicon and Intel. A successful run creates a published GitHub Release, generates release notes, tags the tested commit as `v<version>`, and attaches both DMGs. Manual workflow dispatch and pushes to the legacy `release` branch remain supported, but are not needed for normal releases. This automation takes effect when this workflow is merged into `main` and that commit's push CI succeeds.
+The release workflow selects a version, repeats the frontend and backend tests against the release commit, then builds separate macOS artifacts for Apple Silicon and Intel. A successful run creates a published GitHub Release, generates release notes, tags the release commit as `v<version>`, and attaches both DMGs.
 
 Patch versions are automatic: if the source version is at or below the latest stable `v<major>.<minor>.<patch>` tag, the workflow increments that tag's patch version. For example, after `v0.1.2`, the next release uses `0.1.3` without a source version edit. A higher source version is used as declared, allowing intentional major or minor releases. When making such a change, update the same version in all three files:
 
