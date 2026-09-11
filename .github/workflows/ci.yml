@@ -38,6 +38,9 @@ jobs:
       - name: Run frontend tests
         run: npm test -- --run
 
+      - name: Test release preflight
+        run: node --test scripts/release-preflight.check.mjs
+
       - name: Build frontend
         run: npm run build
 

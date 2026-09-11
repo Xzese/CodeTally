@@ -1,18 +1,48 @@
 name: Release desktop app
 
 on:
+  pull_request:
+    branches:
+      - release
   push:
     branches:
       - release
   workflow_dispatch:
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.event_name == 'pull_request' && github.ref || 'publication' }}
   cancel-in-progress: false
 
 jobs:
+  preflight:
+    name: Release version check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      publish: ${{ steps.version.outputs.publish }}
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Test automatic version selection
+        run: node --test scripts/release-preflight.check.mjs
+      - name: Select release version before building
+        id: version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/release-preflight.mjs
+
   checks:
     name: Test before release
+    needs: preflight
+    if: github.event_name != 'pull_request' && needs.preflight.outputs.publish == 'true'
     runs-on: macos-latest
     permissions:
       contents: read
@@ -43,7 +73,7 @@ jobs:
 
   build:
     name: Build ${{ matrix.architecture }} bundle
-    needs: checks
+    needs: [preflight, checks]
     runs-on: macos-latest
     permissions:
       contents: read
@@ -74,6 +104,11 @@ jobs:
       - name: Install JavaScript dependencies
         run: npm ci
 
+      - name: Apply the selected version to both app and lockfiles
+        env:
+          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+        run: node scripts/release-preflight.mjs --set-version
+
       - name: Build Tauri bundle
         run: npm run tauri:build -- --target ${{ matrix.target }}
 
@@ -102,7 +137,7 @@ jobs:
 
   publish:
     name: Publish GitHub Release
-    needs: build
+    needs: [preflight, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -124,32 +159,24 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      - name: Require a new version for each release
+      - name: Verify tag availability and both DMGs
         shell: bash
         run: |
           set -euo pipefail
-          APP_VERSION="$(node -p "require('./src-tauri/tauri.conf.json').version")"
-          PACKAGE_VERSION="$(node -p "require('./package.json').version")"
-          CARGO_VERSION="$(awk -F '"' '/^version = "/ { print $2; exit }' src-tauri/Cargo.toml)"
-          RELEASE_TAG="v${APP_VERSION}"
-
-          if [[ "${APP_VERSION}" != "${PACKAGE_VERSION}" || "${APP_VERSION}" != "${CARGO_VERSION}" ]]; then
-            echo "Version mismatch: tauri=${APP_VERSION}, npm=${PACKAGE_VERSION}, cargo=${CARGO_VERSION}." >&2
-            exit 1
-          fi
+          RELEASE_TAG="$TAG"
           if git show-ref --tags --verify --quiet "refs/tags/${RELEASE_TAG}"; then
-            echo "${RELEASE_TAG} already exists. Bump the app version before releasing again." >&2
+            echo "${RELEASE_TAG} was created during this run. Retry the workflow to select the next version." >&2
             exit 1
           fi
           test "$(find artifacts -maxdepth 1 -type f -name '*.dmg' | wc -l | tr -d ' ')" -eq 2
-          {
-            echo "VERSION=${APP_VERSION}"
-            echo "TAG=${RELEASE_TAG}"
-          } >> "$GITHUB_ENV"
+        env:
+          TAG: ${{ needs.preflight.outputs.tag }}
 
       - name: Create release and upload both DMGs
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+          TAG: ${{ needs.preflight.outputs.tag }}
         run: |
           cat > release-notes.md <<'EOF'
           Automated unsigned macOS builds for Apple Silicon and Intel.
