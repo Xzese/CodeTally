@@ -96,8 +96,10 @@ jobs:
         include:
           - architecture: Apple Silicon
             target: aarch64-apple-darwin
+            installer: Apple-Silicon_aarch64
           - architecture: Intel
             target: x86_64-apple-darwin
+            installer: Intel_x64
 
     steps:
       - name: Check out repository
@@ -127,8 +129,16 @@ jobs:
       - name: Build Tauri bundle
         run: npm run tauri:build -- --target ${{ matrix.target }}
 
+      - name: Verify macOS bundle signature
+        env:
+          TARGET: ${{ matrix.target }}
+        run: codesign --verify --deep --strict --verbose=2 "src-tauri/target/$TARGET/release/bundle/macos/CodeTally.app"
+
       - name: Collect DMG artifact
         shell: bash
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+          INSTALLER: ${{ matrix.installer }}
         run: |
           set -euo pipefail
           mkdir -p artifacts
@@ -137,9 +147,11 @@ jobs:
             echo 'No DMG was produced.' >&2
             exit 1
           fi
-          while IFS= read -r dmg; do
-            [[ -n "$dmg" ]] && cp "$dmg" artifacts/
-          done <<< "$dmgs"
+          if [[ "$(printf '%s\n' "$dmgs" | wc -l | tr -d ' ')" != 1 ]]; then
+            echo 'Expected exactly one DMG per architecture.' >&2
+            exit 1
+          fi
+          cp "$dmgs" "artifacts/CodeTally_${VERSION}_${INSTALLER}.dmg"
           ls -lh artifacts
 
       - name: Upload architecture artifact
@@ -196,9 +208,9 @@ jobs:
           RELEASE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
         run: |
           cat > release-notes.md <<'EOF'
-          Automated unsigned macOS builds for Apple Silicon and Intel.
+          Download Apple-Silicon_aarch64 for Macs with Apple M-series chips, or Intel_x64 for Intel Macs.
 
-          macOS may require users to approve the app in Privacy & Security because these artifacts are not notarized.
+          These builds are ad-hoc signed, but not Developer ID signed or notarized. macOS may require approval in System Settings → Privacy & Security.
           EOF
           gh release create "$TAG" artifacts/*.dmg \
             --repo "$GITHUB_REPOSITORY" \

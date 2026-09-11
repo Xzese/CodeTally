@@ -101,7 +101,11 @@ Release PRs preview the version and validate manifest consistency without buildi
 
 Run the release regression checks with `node --test scripts/release-preflight.check.mjs`.
 
-The generated macOS builds are currently unsigned and not notarized. Users may need to approve the downloaded app in macOS **System Settings → Privacy & Security**. Code signing and notarization can be added later with Apple signing credentials stored as GitHub Actions secrets.
+Choose `CodeTally_<version>_Apple-Silicon_aarch64.dmg` for an Apple M-series Mac, or `CodeTally_<version>_Intel_x64.dmg` for an Intel Mac. Check **Apple menu → About This Mac** for your chip or processor.
+
+macOS bundles are ad-hoc signed and their signatures are verified before publication. They are not Developer ID signed or notarized, so macOS may still require approval in **System Settings → Privacy & Security**. Developer ID signing and notarization require Apple signing credentials stored as GitHub Actions secrets.
+
+Older builds such as `v0.1.2` can show “CodeTally is damaged” because the executable's linker signature does not seal the whole app bundle. Install a release containing the bundle-signing fix. Renaming an older download does not repair its signature.
 
 ## Everyday use
 
