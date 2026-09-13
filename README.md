@@ -82,7 +82,7 @@ On macOS, the `.app` and `.dmg` are written below `src-tauri/target/release/bund
 
 ### Continuous integration
 
-The [CI workflow](.github/workflows/ci.yml) runs on every pull request, pushes to `main` and `release`, and manual dispatch. It checks:
+The [CI workflow](.github/workflows/ci.yml) runs on feature pull requests, pushes to `main`, and manual dispatch. A `main` → `release` pull request skips its duplicate CI jobs because that exact commit has already passed them on `main`; the release workflow validates it again after the merge. It checks:
 
 - frontend behavior with Vitest and React Testing Library;
 - TypeScript compilation and the Vite production build;
@@ -95,7 +95,7 @@ To prevent merging failing changes, configure repository branch protection or a 
 
 ### Automated GitHub releases
 
-The [release workflow](.github/workflows/release.yml) runs only when a commit is pushed or merged into the `release` branch. Normal development merges into `main` do not publish releases. Open a pull request from `main` into `release` when the current main build is ready to ship; the pull request runs CI, and merging it starts one release workflow.
+The [release workflow](.github/workflows/release.yml) runs only when a commit is pushed or merged into the `release` branch. Normal development merges into `main` do not publish releases. Open a pull request from `main` into `release` when the current main build is ready to ship; merging it starts one release workflow.
 
 The release workflow selects a version, repeats the frontend and backend tests against the release commit, then builds separate macOS artifacts for Apple Silicon and Intel. Each build includes a DMG plus a signed updater archive and is mounted, deep-signature verified, architecture checked, launched briefly on a matching runner, detached, and extracted from its updater archive before upload. Cross-architecture builds still receive all structural checks; a live launch is skipped when the runner architecture does not match. A successful run creates a published GitHub Release, generates release notes, tags the release commit as `v<version>`, and attaches both DMGs, updater archives, signatures, and the static `latest.json` updater manifest.
 
@@ -107,7 +107,7 @@ Patch versions are automatic: if the source version is at or below the latest st
 
 Keep the root package versions in `package-lock.json` and `src-tauri/Cargo.lock` in sync as well. The selected release version is applied to all five files in each build's checkout; the workflow does not commit version bumps back to the branch. The GitHub tag and installed app record the selected version, while the source manifests retain the declared version. Publication runs are serialized so they select versions in order.
 
-Release PRs preview the version and validate manifest consistency without building or publishing. The version is selected again after merging, using the latest tags. Rerunning an already-published commit, including recreating `release` at that commit, succeeds and skips builds and publication once the workflow confirms both macOS DMGs exist. An incomplete release or failed GitHub lookup is reported instead of being silently skipped. Workflow changes take effect after they are merged; rerunning an older failed workflow still uses its original code.
+Release PRs do not build or publish releases. The version is selected after merging, using the latest tags. Rerunning an already-published commit, including recreating `release` at that commit, succeeds and skips builds and publication once the workflow confirms both macOS DMGs exist. An incomplete release or failed GitHub lookup is reported instead of being silently skipped. Workflow changes take effect after they are merged; rerunning an older failed workflow still uses its original code.
 
 Run the release regression checks with `node --test scripts/release-preflight.check.mjs`.
 
