@@ -56,20 +56,13 @@ afterEach(() => {
 })
 
 describe('UpdateStatus', () => {
-  it('checks for updates on startup and shows the current status when opened', async () => {
+  it('checks for updates on startup and stays out of the top bar when up to date', async () => {
     invokeMock.mockResolvedValue(upToDate)
-    const user = userEvent.setup()
 
     renderUpdateStatus()
 
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('check_for_updates', undefined))
-    const trigger = screen.getByRole('button', { name: 'Updates' })
-    expect(trigger).toHaveAttribute('aria-expanded', 'false')
-
-    await user.click(trigger)
-    const panel = updatesPanel()
-    expect(within(panel).getByText('Current version:').nextSibling).toHaveTextContent('v0.1.2')
-    await waitFor(() => expect(within(panel).getByText('New version:').nextSibling).toHaveTextContent('No update available'))
+    expect(screen.queryByRole('button', { name: 'Updates' })).not.toBeInTheDocument()
   })
 
   it('announces an available update and installs it through the backend', async () => {
@@ -106,17 +99,17 @@ describe('UpdateStatus', () => {
 
   it('shows a retry error without stale status and recovers after a rejected check', async () => {
     invokeMock
-      .mockResolvedValueOnce(upToDate)
+      .mockResolvedValueOnce(updateAvailable)
       .mockRejectedValueOnce(new Error('network unavailable'))
-      .mockResolvedValueOnce(upToDate)
+      .mockResolvedValueOnce(updateAvailable)
     const user = userEvent.setup()
 
     renderUpdateStatus()
     await waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === 'check_for_updates')).toHaveLength(1))
 
-    await user.click(screen.getByRole('button', { name: 'Updates' }))
+    await user.click(await screen.findByRole('button', { name: 'Update available: v0.2.0' }))
     const panel = updatesPanel()
-    await waitFor(() => expect(within(panel).getByText('New version:').nextSibling).toHaveTextContent('No update available'))
+    await waitFor(() => expect(within(panel).getByText('New version:').nextSibling).toHaveTextContent('v0.2.0'))
 
     await user.click(within(panel).getByRole('button', { name: 'Check for updates' }))
     await waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === 'check_for_updates')).toHaveLength(2))
@@ -125,7 +118,7 @@ describe('UpdateStatus', () => {
 
     await user.click(within(panel).getByRole('button', { name: 'Check for updates' }))
     await waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === 'check_for_updates')).toHaveLength(3))
-    await waitFor(() => expect(within(panel).getByText('New version:').nextSibling).toHaveTextContent('No update available'))
+    await waitFor(() => expect(within(panel).getByText('New version:').nextSibling).toHaveTextContent('v0.2.0'))
     expect(within(panel).queryByRole('alert')).not.toBeInTheDocument()
   })
 
@@ -182,32 +175,42 @@ describe('UpdateStatus', () => {
     unmount()
   })
 
-  it('does not check automatically when the update cadence is never, while manual checks remain available', async () => {
+  it('does not check automatically or show a top-bar control when the update cadence is never', async () => {
     invokeMock.mockResolvedValue(upToDate)
-    const user = userEvent.setup()
 
     renderUpdateStatus('never')
     await flushPromises()
     expect(invokeMock.mock.calls.filter(([command]) => command === 'check_for_updates')).toHaveLength(0)
-
-    await user.click(screen.getByRole('button', { name: 'Updates' }))
-    await user.click(within(updatesPanel()).getByRole('button', { name: 'Check for updates' }))
-    await flushPromises()
-    expect(invokeMock.mock.calls.filter(([command]) => command === 'check_for_updates')).toHaveLength(1)
+    expect(screen.queryByRole('button', { name: 'Updates' })).not.toBeInTheDocument()
   })
 
-  it('closes the panel with Escape and returns focus to the trigger', async () => {
-    invokeMock.mockResolvedValue(upToDate)
+  it('opens on hover or click and closes with pointer exit or Escape', async () => {
+    invokeMock.mockResolvedValue(updateAvailable)
     const user = userEvent.setup()
 
     renderUpdateStatus()
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('check_for_updates', undefined))
-    const trigger = screen.getByRole('button', { name: 'Updates' })
+    const trigger = await screen.findByRole('button', { name: 'Update available: v0.2.0' })
+
+    await user.hover(trigger)
+    const hoveredPanel = updatesPanel()
+    const focusedAction = within(hoveredPanel).getByRole('button', { name: 'Check for updates' })
+    act(() => focusedAction.focus())
+    await user.unhover(trigger)
+    expect(hoveredPanel).toBeInTheDocument()
+    expect(focusedAction).toHaveFocus()
+    await user.tab()
+    await waitFor(() => expect(screen.queryByRole('region', { name: 'Updates' })).not.toBeInTheDocument())
+
     await user.click(trigger)
     expect(updatesPanel()).toBeInTheDocument()
 
     await user.keyboard('{Escape}')
     expect(screen.queryByRole('region', { name: 'Updates' })).not.toBeInTheDocument()
     expect(trigger).toHaveFocus()
+
+    await user.tab()
+    await user.tab({ shift: true })
+    expect(updatesPanel()).toBeInTheDocument()
   })
 })

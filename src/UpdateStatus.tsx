@@ -23,8 +23,10 @@ export default function UpdateStatus({ updateCheckInterval = 'daily' }: Props) {
   const [error, setError] = useState<string | null>(null)
   const [checkFailed, setCheckFailed] = useState(false)
   const [open, setOpen] = useState(false)
+  const [pinned, setPinned] = useState(false)
   const running = useRef(false)
   const mounted = useRef(false)
+  const dismissed = useRef(false)
   const container = useRef<HTMLDivElement>(null)
   const trigger = useRef<HTMLButtonElement>(null)
 
@@ -80,7 +82,10 @@ export default function UpdateStatus({ updateCheckInterval = 'daily' }: Props) {
   useEffect(() => {
     if (!open) return
     const dismiss = (event: PointerEvent) => {
-      if (!container.current?.contains(event.target as Node)) setOpen(false)
+      if (!container.current?.contains(event.target as Node)) {
+        setOpen(false)
+        setPinned(false)
+      }
     }
     document.addEventListener('pointerdown', dismiss)
     return () => document.removeEventListener('pointerdown', dismiss)
@@ -97,17 +102,39 @@ export default function UpdateStatus({ updateCheckInterval = 'daily' }: Props) {
     }
   }
 
-  return <div className="update-status" ref={container} onKeyDown={(event) => {
-    if (event.key === 'Escape') { setOpen(false); trigger.current?.focus() }
-  }}>
+  if (!update?.update_available) return null
+
+  return <div className={open ? 'update-status active' : 'update-status'} ref={container}
+    onMouseEnter={() => { dismissed.current = false; setOpen(true) }}
+    onMouseLeave={() => { dismissed.current = false; if (!pinned && !container.current?.contains(document.activeElement)) setOpen(false) }}
+    onFocusCapture={() => { if (!dismissed.current) setOpen(true) }}
+    onBlurCapture={(event) => {
+      if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+        dismissed.current = false
+        if (!pinned) setOpen(false)
+      }
+    }}
+    onKeyDown={(event) => {
+      if (event.key === 'Escape') { dismissed.current = true; setOpen(false); setPinned(false); trigger.current?.focus() }
+    }}>
     <button ref={trigger} type="button" className={update?.update_available ? 'button compact update-available' : 'icon-button'}
       aria-label={update?.update_available ? `Update available: ${update.latest_version}` : 'Updates'}
       title={update?.update_available ? `CodeTally ${update.latest_version} is available` : 'Updates'}
-      aria-expanded={open} aria-controls="app-update-panel" onClick={() => setOpen(!open)}>
+      aria-expanded={open} aria-controls="app-update-panel" onClick={() => {
+        if (open && pinned) {
+          dismissed.current = true
+          setOpen(false)
+          setPinned(false)
+        } else {
+          dismissed.current = false
+          setOpen(true)
+          setPinned(true)
+        }
+      }}>
       <ArrowUpCircle size={17} />{update?.update_available && <span>Update available</span>}
     </button>
     {open && <section className="update-panel" id="app-update-panel" aria-label="Updates">
-      <div className="update-heading"><strong>Updates</strong><button type="button" className="icon-button" aria-label="Close updates" onClick={() => { setOpen(false); trigger.current?.focus() }}><X size={15} /></button></div>
+      <div className="update-heading"><strong>Updates</strong><button type="button" className="icon-button" aria-label="Close updates" onClick={() => { dismissed.current = true; setOpen(false); setPinned(false); trigger.current?.focus() }}><X size={15} /></button></div>
       {update ? <div className="update-versions" role="status"><p><span>Current version:</span><strong>{update.current_version}</strong></p><p><span>New version:</span><strong className={!checking && !checkFailed && update.update_available ? 'available' : ''}>{checking ? 'Checking…' : checkFailed ? 'Unavailable' : update.update_available ? update.latest_version : 'No update available'}</strong></p></div> : checking ? <p role="status">Checking for updates…</p> : null}
       {error && <p role="alert" className="update-error">{error}</p>}
       <div className="update-actions">{update?.update_available && <button type="button" className="button primary" disabled={installing} onClick={() => void installUpdate()}>{installing ? <LoaderCircle size={14} className="spin" /> : <Download size={14} />}{installing ? 'Installing…' : 'Download update'}</button>}<button type="button" className="button" disabled={checking || installing} onClick={() => void check()}>{checking && <LoaderCircle size={14} className="spin" />}{checking ? 'Checking…' : 'Check for updates'}</button></div>

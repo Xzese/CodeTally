@@ -926,7 +926,7 @@ describe('dashboard UI', () => {
       await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('sync_github_data', undefined))
       await waitFor(() => {
         expect(syncControls()).toHaveLength(1)
-        expect(syncControls()[0]).toHaveAccessibleName(/Updating|Importing/i)
+        expect(syncControls()[0]).toHaveAccessibleName(/Refreshing|Importing/i)
       })
 
       const activeControl = syncControls()[0]
@@ -1350,6 +1350,8 @@ describe('dashboard UI', () => {
     expect(await within(drawer).findByText('0.1.2', { exact: true })).toBeInTheDocument()
     expect(invokeMock).toHaveBeenCalledWith('get_app_info', undefined)
     expect(within(drawer).getByText('com.samfaid.codetally', { exact: true })).toBeInTheDocument()
+    expect(within(drawer).getByRole('heading', { name: 'About me' })).toBeInTheDocument()
+    expect(within(drawer).getByText(/independent UK software developer/i)).toBeInTheDocument()
 
     const repositoryLink = within(drawer).getByRole('link', { name: /GitHub|repository|source/i })
     expect(repositoryLink).toHaveAttribute('href', 'https://github.com/Xzese/CodeTally')
