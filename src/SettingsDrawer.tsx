@@ -1,6 +1,6 @@
 import { createPortal } from 'react-dom'
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react'
-import { AlertCircle, Check, ChevronDown, ChevronUp, ExternalLink, Github, HardDrive, LoaderCircle, ChartNoAxesColumnIncreasing, CodeXml, FlaskConical, GitPullRequest, CircleDot, Sun, Moon, Monitor, X } from 'lucide-react'
+import { AlertCircle, Check, ChevronDown, ChevronUp, Coffee, ExternalLink, Github, Globe2, HardDrive, LoaderCircle, ChartNoAxesColumnIncreasing, CodeXml, FlaskConical, GitPullRequest, CircleDot, Sun, Moon, Monitor, X } from 'lucide-react'
 import { checkForUpdates, getAppInfo, getDatabaseLocation, getRepositorySelection, installAppUpdate, openExternalUrl, revealDatabase, type AppInfo, type AppUpdate } from './api'
 import type { AppSettings, MenuBarMetric, RepositorySelection, ThemeMode, UpdateCheckInterval } from './types'
 import type { NormalizedMetrics } from './utils'
@@ -29,6 +29,8 @@ const UPDATE_CHECK_OPTIONS: { key: UpdateCheckInterval; label: string }[] = [
   { key: 'never', label: 'Never' }
 ]
 const METRIC_ICONS = { total_lines: ChartNoAxesColumnIncreasing, source_lines: CodeXml, test_lines: FlaskConical, open_prs: GitPullRequest, open_issues: CircleDot }
+const WEBSITE_URL = 'https://samfaid.com/'
+const BUY_ME_A_COFFEE_URL = 'https://www.buymeacoffee.com/samfaid'
 
 function Help({ label, children }: { label: string; children: ReactNode }) {
   const id = useId()
@@ -117,7 +119,7 @@ export default function SettingsDrawer({ settings, loaded, metrics, saving, erro
   const [appInfo, setAppInfo] = useState<AppInfo | null>(null)
   const [appInfoLoading, setAppInfoLoading] = useState(true)
   const [appInfoError, setAppInfoError] = useState<string | null>(null)
-  const [repositoryLinkError, setRepositoryLinkError] = useState<string | null>(null)
+  const [aboutLinkError, setAboutLinkError] = useState<string | null>(null)
   const [appUpdate, setAppUpdate] = useState<AppUpdate | null>(null)
   const [appUpdateLoading, setAppUpdateLoading] = useState(true)
   const [appUpdateError, setAppUpdateError] = useState<string | null>(null)
@@ -204,14 +206,13 @@ export default function SettingsDrawer({ settings, loaded, metrics, saving, erro
     }
   }
 
-  const handleOpenRepository = async (event: MouseEvent<HTMLAnchorElement>) => {
+  const handleOpenAboutLink = async (event: MouseEvent<HTMLAnchorElement>, url: string) => {
     event.preventDefault()
-    if (!appInfo?.repository_url) return
-    setRepositoryLinkError(null)
+    setAboutLinkError(null)
     try {
-      await openExternalUrl(appInfo.repository_url)
+      await openExternalUrl(url)
     } catch (reason) {
-      setRepositoryLinkError(reason instanceof Error ? reason.message : String(reason))
+      setAboutLinkError(reason instanceof Error ? reason.message : String(reason))
     }
   }
 
@@ -339,8 +340,12 @@ export default function SettingsDrawer({ settings, loaded, metrics, saving, erro
         {appUpdateError && <div className="settings-about-state error" role="alert"><AlertCircle size={14} /><span>{appUpdateError}</span><button className="button secondary compact" type="button" onClick={() => void checkAppUpdate()}>Try again</button></div>}
         {appUpdate && <div className="settings-about-update-actions">{appUpdate.update_available && <button type="button" className="button primary compact" disabled={appUpdateInstalling} onClick={() => void handleInstallUpdate()}>{appUpdateInstalling ? <LoaderCircle size={14} className="spin" /> : <ExternalLink size={14} />} {appUpdateInstalling ? 'Installing…' : 'Download update'}</button>}<button type="button" className="button secondary compact" disabled={appUpdateInstalling || appUpdateLoading} onClick={() => void checkAppUpdate()}>Check for updates</button></div>}
         {releaseLinkError && <div className="settings-error settings-about-link-error" role="alert"><AlertCircle size={14} /><span>{releaseLinkError}</span></div>}
-        {appInfo.repository_url && <a className="button secondary compact settings-about-repository" href={appInfo.repository_url} onClick={handleOpenRepository}><Github size={14} /> View on GitHub <ExternalLink size={12} /></a>}
-        {repositoryLinkError && <div className="settings-error settings-about-link-error" role="alert"><AlertCircle size={14} /><span>{repositoryLinkError}</span></div>}
+        <div className="settings-about-links">
+          {appInfo.repository_url && <a className="button secondary compact settings-about-link" href={appInfo.repository_url} onClick={(event) => void handleOpenAboutLink(event, appInfo.repository_url)}><Github size={14} /> View on GitHub <ExternalLink size={12} /></a>}
+          <a className="button secondary compact settings-about-link" href={WEBSITE_URL} onClick={(event) => void handleOpenAboutLink(event, WEBSITE_URL)}><Globe2 size={14} /> Visit samfaid.com <ExternalLink size={12} /></a>
+        </div>
+        <a className="settings-coffee-button" href={BUY_ME_A_COFFEE_URL} onClick={(event) => void handleOpenAboutLink(event, BUY_ME_A_COFFEE_URL)}><Coffee size={19} /><span>Buy me a coffee</span><ExternalLink size={13} /></a>
+        {aboutLinkError && <div className="settings-error settings-about-link-error" role="alert"><AlertCircle size={14} /><span>{aboutLinkError}</span></div>}
       </div> : null}
     </section>
   </aside></div>

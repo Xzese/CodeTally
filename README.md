@@ -131,7 +131,7 @@ Automatic PR & issue refreshes keep repository metadata, pull requests, and issu
 
 Settings apply automatically when you change a control and are stored in the local database. The status at the top shows when changes are being saved and provides a retry if saving fails. Rapid changes are saved in order, and the drawer stays open. Supporting explanations are available from the **?** buttons by hovering, focusing, or clicking.
 
-**Settings → About CodeTally** displays the installed app name, version, bundle identifier, a link to the project repository, and the latest update status.
+**Settings → About CodeTally** displays the installed app name, version, bundle identifier, latest update status, and links to the project repository and [samfaid.com](https://samfaid.com/). You can also open the app's [Buy Me a Coffee](https://www.buymeacoffee.com/samfaid) page from there.
 
 The **Background & refresh** section lets you choose how often CodeTally refreshes pull requests and issues (15, 30, 60, or 120 minutes; 30 by default) and Lines of Code (6, 12, or 24 hours; daily by default). You can also enter a custom interval. Your change saves when you leave the field or press Enter.
 

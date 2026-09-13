@@ -477,7 +477,13 @@ td:first-child { padding-left: 18px; }
 .settings-about-details > div + div { border-top: 1px solid var(--line); }
 .settings-about-details dt { color: var(--muted); font-size: 11px; }
 .settings-about-details dd { min-width: 0; margin: 0; color: var(--control-text); font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; text-align: right; overflow-wrap: anywhere; }
-.settings-about-repository { justify-self: start; text-decoration: none; }
+.settings-about-links { display: flex; flex-wrap: wrap; gap: 8px; }
+.settings-about-link { text-decoration: none; }
+.settings-coffee-button { display: inline-flex; align-items: center; justify-content: center; justify-self: start; gap: 9px; min-height: 42px; padding: 0 16px; border: 1px solid #d1b500; border-radius: 10px; color: #111; background: #ffdd00; box-shadow: 0 1px 1px rgb(0 0 0 / 12%); font-size: 13px; font-weight: 650; text-decoration: none; transition: background .12s, border-color .12s, transform .12s; }
+.settings-coffee-button:hover { border-color: #b99f00; background: #ffe329; }
+.settings-coffee-button:active { transform: translateY(1px); }
+.settings-coffee-button:focus-visible { outline: 3px solid color-mix(in srgb, var(--control-accent) 55%, transparent); outline-offset: 2px; }
+.settings-coffee-button svg:last-child { margin-left: 2px; opacity: .62; }
 .settings-about-state { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 11px; line-height: 1.4; }
 .settings-about-state svg { flex: 0 0 auto; color: var(--blue); }
 .settings-about-state.error { align-items: flex-start; color: var(--red); }

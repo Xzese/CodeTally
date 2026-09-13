@@ -1341,7 +1341,7 @@ describe('dashboard UI', () => {
     }
   })
 
-  it('shows the app version and About details and opens the CodeTally repository', async () => {
+  it('shows the app version and About links', async () => {
     const user = await renderDashboard()
 
     await user.click(screen.getByRole('button', { name: 'Settings' }))
@@ -1355,6 +1355,16 @@ describe('dashboard UI', () => {
     expect(repositoryLink).toHaveAttribute('href', 'https://github.com/Xzese/CodeTally')
     await user.click(repositoryLink)
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('open_external_url', { url: 'https://github.com/Xzese/CodeTally' }))
+
+    const websiteLink = within(drawer).getByRole('link', { name: /Visit samfaid\.com/i })
+    expect(websiteLink).toHaveAttribute('href', 'https://samfaid.com/')
+    await user.click(websiteLink)
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('open_external_url', { url: 'https://samfaid.com/' }))
+
+    const coffeeLink = within(drawer).getByRole('link', { name: /Buy me a coffee/i })
+    expect(coffeeLink).toHaveAttribute('href', 'https://www.buymeacoffee.com/samfaid')
+    await user.click(coffeeLink)
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('open_external_url', { url: 'https://www.buymeacoffee.com/samfaid' }))
   })
 
   it('checks for updates when About opens and installs an available release', async () => {
