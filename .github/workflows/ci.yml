@@ -17,6 +17,10 @@ concurrency:
 jobs:
   frontend:
     name: Frontend checks
+    # A main → release PR contains a commit that has already passed this same
+    # suite on the push to main. The release workflow validates it again after
+    # the PR merges, so avoid a second identical CI run here.
+    if: github.event_name != 'pull_request' || github.head_ref != 'main' || github.base_ref != 'release'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -45,6 +49,7 @@ jobs:
 
   desktop:
     name: Desktop checks (${{ matrix.architecture }})
+    if: github.event_name != 'pull_request' || github.head_ref != 'main' || github.base_ref != 'release'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     strategy:
