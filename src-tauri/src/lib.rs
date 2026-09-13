@@ -6,7 +6,9 @@ pub mod gitops;
 pub mod github;
 pub mod github_sync;
 pub mod models;
+pub mod native;
 pub mod sync;
+pub mod updates;
 
 use models::SyncProgress;
 use std::io;
@@ -80,6 +82,7 @@ fn copy_directory_contents_if_missing(source: &Path, destination: &Path) -> io::
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let app_data_dir = app.path().app_data_dir().map_err(|error| error.to_string())?;
             migrate_legacy_app_data(&app_data_dir).map_err(|error| error.to_string())?;
@@ -89,6 +92,7 @@ pub fn run() {
             let db_path = app_data_dir.join(APP_DATABASE_FILE);
             let database = db::Database::new(&db_path);
             database.init().map_err(|error| error.to_string())?;
+            let settings = sync::app_settings(&database).map_err(|error| error.to_string())?;
             if let Some(parent) = app_data_dir.parent() {
                 let legacy_cache_dir = parent.join(LEGACY_APP_DATA_DIRECTORY).join("repositories");
                 database
@@ -96,16 +100,34 @@ pub fn run() {
                     .map_err(|error| error.to_string())?;
             }
             app.manage(AppState { db_path, cache_dir, progress: Arc::new(Mutex::new(SyncProgress::default())), job_lock: Arc::new(Mutex::new(())) });
+            native::apply_activation_policy(app.handle(), &settings)?;
+            native::setup(app.handle())?;
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let state = window.state::<AppState>();
+                if sync::app_settings(&state.database()).map(|settings| settings.run_in_background).unwrap_or(true) {
+                    if window.hide().is_ok() { api.prevent_close(); }
+                } else {
+                    window.app_handle().exit(0);
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             commands::check_dependencies,
+            commands::check_for_updates,
+            commands::install_update,
             commands::get_github_user,
             commands::discover_repositories,
             commands::sync_github_data,
             commands::sync_activity,
             commands::get_app_settings,
+            commands::get_app_info,
+            commands::get_repository_selection,
             commands::set_app_settings,
+            commands::get_database_location,
+            commands::reveal_database,
             commands::sync_repository,
             commands::backfill_loc,
             commands::get_sync_progress,
@@ -116,6 +138,14 @@ pub fn run() {
             commands::get_activity_feed,
             commands::open_external_url
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running CodeTally");
+        .build(tauri::generate_context!())
+        .expect("error while building CodeTally")
+        .run(|app, event| {
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = event {
+                native::show_window(app);
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = (app, event);
+        });
 }

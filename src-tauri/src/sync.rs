@@ -20,6 +20,8 @@ pub struct AppState {
 
 pub const LOC_SWEEP_METADATA_KEY: &str = "last_loc_sweep_at";
 pub const APP_SETTINGS_METADATA_KEY: &str = "app_settings";
+pub const REFRESH_CADENCE_V2_METADATA_KEY: &str = "refresh_cadence_v2";
+pub const REFRESH_CADENCE_V3_METADATA_KEY: &str = "refresh_cadence_v3";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LocSyncDecision {
@@ -29,23 +31,50 @@ pub struct LocSyncDecision {
 
 pub fn app_settings(db: &Database) -> AppResult<AppSettings> {
     let Some(value) = db.metadata(APP_SETTINGS_METADATA_KEY)? else { return Ok(AppSettings::default()); };
-    let settings = serde_json::from_str::<AppSettings>(&value).unwrap_or_default();
+    let mut settings = serde_json::from_str::<AppSettings>(&value).unwrap_or_default();
+    if db.metadata(REFRESH_CADENCE_V2_METADATA_KEY)?.is_none() {
+        // Move installations that were still on the previous defaults to the
+        // quieter cadence once. Explicit custom values remain untouched.
+        if settings.activity_refresh_minutes == 10 { settings.activity_refresh_minutes = 30; }
+        if settings.lines_refresh_minutes == 45 { settings.lines_refresh_minutes = 120; }
+        db.set_metadata(APP_SETTINGS_METADATA_KEY, &serde_json::to_string(&settings)?)?;
+        db.set_metadata(REFRESH_CADENCE_V2_METADATA_KEY, "1")?;
+    }
+    if db.metadata(REFRESH_CADENCE_V3_METADATA_KEY)?.is_none() {
+        // Move the previous code-verification default to daily. Explicitly
+        // shorter custom values remain untouched. Older activity intervals
+        // below the new API-safe minimum are raised to that minimum.
+        if settings.activity_refresh_minutes < 15 { settings.activity_refresh_minutes = 15; }
+        if settings.lines_refresh_minutes == 120 { settings.lines_refresh_minutes = 1440; }
+        db.set_metadata(APP_SETTINGS_METADATA_KEY, &serde_json::to_string(&settings)?)?;
+        db.set_metadata(REFRESH_CADENCE_V3_METADATA_KEY, "1")?;
+    }
     if validate_app_settings(&settings).is_ok() { Ok(settings) } else { Ok(AppSettings::default()) }
 }
 
 pub fn validate_app_settings(settings: &AppSettings) -> AppResult<()> {
-    if !matches!(settings.activity_refresh_minutes, 1 | 2 | 5 | 10 | 15) {
-        return Err(AppError::InvalidArgument("activity_refresh_minutes must be one of 1, 2, 5, 10, or 15".into()));
+    if !(15..=1440).contains(&settings.activity_refresh_minutes) {
+        return Err(AppError::InvalidArgument("activity_refresh_minutes must be a whole number from 15 to 1440".into()));
     }
-    if !matches!(settings.lines_refresh_minutes, 30 | 45 | 60) {
-        return Err(AppError::InvalidArgument("lines_refresh_minutes must be one of 30, 45, or 60".into()));
+    if !(1..=1440).contains(&settings.lines_refresh_minutes) {
+        return Err(AppError::InvalidArgument("lines_refresh_minutes must be a whole number from 1 to 1440".into()));
     }
     Ok(())
 }
 
 pub fn save_app_settings(db: &Database, settings: &AppSettings) -> AppResult<()> {
     validate_app_settings(settings)?;
-    db.set_metadata(APP_SETTINGS_METADATA_KEY, &serde_json::to_string(settings)?)
+    let previous = app_settings(db)?;
+    let mut settings = settings.clone();
+    settings.normalize_menu_bar_metrics();
+    db.set_metadata(APP_SETTINGS_METADATA_KEY, &serde_json::to_string(&settings)?)?;
+    db.set_metadata(REFRESH_CADENCE_V2_METADATA_KEY, "1")?;
+    db.set_metadata(REFRESH_CADENCE_V3_METADATA_KEY, "1")?;
+    if (!previous.include_personal_repositories && settings.include_personal_repositories)
+        || (!previous.include_company_repositories && settings.include_company_repositories) {
+        db.set_metadata("github_discovered_at", "")?;
+    }
+    Ok(())
 }
 
 /// Decide whether an automatic activity refresh should also inspect LOC.
@@ -97,26 +126,31 @@ impl AppState {
 
 pub fn discover(state: &AppState) -> AppResult<Vec<Repository>> {
     let db = state.database();
+    let settings = app_settings(&db)?;
+    if !settings.include_personal_repositories && !settings.include_company_repositories { return db.repositories(); }
     github_sync::ensure_available(&db)?;
     github_sync::graphql(&db, "query{rateLimit{remaining resetAt}}", serde_json::json!({}))?;
     github_sync::ensure_available(&db)?;
     let user = github_sync::guarded(&db, github::current_user)?;
     db.set_metadata("github_login", &user.login)?;
     db.set_metadata("org_discovery_errors", "")?;
-    let mut discovered = github_sync::guarded(&db, || github::list_repositories(&user.login))?;
+    let mut discovered = if app_settings(&db)?.include_personal_repositories { github_sync::guarded(&db, || github::list_repositories(&user.login))? } else { Vec::new() };
     let mut org_errors = Vec::new();
-    match github_sync::guarded(&db, github::list_organizations) {
-        Ok(organizations) => {
-            for organization in organizations {
-                match github_sync::guarded(&db, || github::list_repositories_for_owner(&organization)) {
-                    Ok(repositories) => discovered.extend(repositories),
-                    Err(error @ AppError::RateLimited { .. }) => return Err(error),
-                    Err(error) => org_errors.push(format!("{organization}: {error}")),
+    if app_settings(&db)?.include_company_repositories {
+        match github_sync::guarded(&db, github::list_organizations) {
+            Ok(organizations) => {
+                for organization in organizations {
+                    if !app_settings(&db)?.include_company_repositories { break; }
+                    match github_sync::guarded(&db, || github::list_repositories_for_owner(&organization)) {
+                        Ok(repositories) => discovered.extend(repositories),
+                        Err(error @ AppError::RateLimited { .. }) => return Err(error),
+                        Err(error) => org_errors.push(format!("{organization}: {error}")),
+                    }
                 }
             }
+            Err(error @ AppError::RateLimited { .. }) => return Err(error),
+            Err(error) => org_errors.push(format!("organization discovery: {error}")),
         }
-        Err(error @ AppError::RateLimited { .. }) => return Err(error),
-        Err(error) => org_errors.push(format!("organization discovery: {error}")),
     }
     if !org_errors.is_empty() {
         db.set_metadata("org_discovery_errors", &org_errors.join("\n"))?;
@@ -130,6 +164,11 @@ pub fn discover(state: &AppState) -> AppResult<Vec<Repository>> {
 }
 
 pub fn sync_all(state: &AppState) -> AppResult<SyncResult> {
+    let settings = app_settings(&state.database())?;
+    if !settings.include_personal_repositories && !settings.include_company_repositories {
+        finish_progress(state, None);
+        return Ok(SyncResult { ok: true, message: "No repository groups selected".into(), ..SyncResult::default() });
+    }
     github_sync::ensure_available(&state.database())?;
     let mut result = SyncResult { ok: true, message: "Refresh complete".into(), ..SyncResult::default() };
     state.set_progress(SyncProgress { running: true, phase: "discovering".into(), message: "Discovering repositories".into(), ..SyncProgress::default() });
@@ -150,7 +189,7 @@ pub fn sync_all(state: &AppState) -> AppResult<SyncResult> {
             state.database().repositories()?
         }
     };
-    if let Some(org_errors) = state.database().metadata("org_discovery_errors")? {
+    if let Some(org_errors) = state.database().metadata("org_discovery_errors")?.filter(|_| app_settings(&state.database()).map(|settings| settings.include_company_repositories).unwrap_or(false)) {
         if !org_errors.trim().is_empty() {
             result.ok = false;
             result.errors.extend(org_errors.lines().map(|error| format!("Organization discovery: {error}")));
@@ -163,7 +202,8 @@ pub fn sync_all(state: &AppState) -> AppResult<SyncResult> {
         finish_progress(state, Some(error.to_string()));
         return Ok(result);
     }
-    let mut active: Vec<Repository> = repos.into_iter().filter(|repo| !repo.is_archived).collect();
+    let selected_ids: BTreeSet<i64> = state.database().selected_repositories()?.iter().map(|repo| repo.id).collect();
+    let mut active: Vec<Repository> = repos.into_iter().filter(|repo| selected_ids.contains(&repo.id)).collect();
     let last = state.database().metadata("github_last_attempted_repository")?.and_then(|s| s.parse::<i64>().ok());
     if let Some(position) = active.iter().position(|repo| Some(repo.id) == last) {
         let length = active.len();
@@ -172,6 +212,7 @@ pub fn sync_all(state: &AppState) -> AppResult<SyncResult> {
     let repository_total = active.len() as i64;
     state.set_progress(SyncProgress { running: true, phase: "syncing".into(), current: 0, total: repository_total, repository_current: 0, repository_total, message: "Refreshing GitHub activity and line counts".into(), ..SyncProgress::default() });
     for (index, repo) in active.into_iter().enumerate() {
+        if !state.database().repository_enabled(&repo)? { continue; }
         if let Err(error) = github_sync::ensure_available(&state.database()) {
             result.ok = false;
             result.errors.push(error.to_string());
@@ -227,9 +268,14 @@ pub fn sync_all(state: &AppState) -> AppResult<SyncResult> {
 /// repositories that are new, changed, incomplete, or due for the periodic
 /// verification sweep.
 pub fn sync_activity(state: &AppState) -> AppResult<SyncResult> {
+    let settings = app_settings(&state.database())?;
+    if !settings.include_personal_repositories && !settings.include_company_repositories {
+        finish_progress(state, None);
+        return Ok(SyncResult { ok: true, message: "No repository groups selected".into(), ..SyncResult::default() });
+    }
     github_sync::ensure_available(&state.database())?;
-    let mut result = SyncResult { ok: true, message: "Activity refresh complete".into(), ..SyncResult::default() };
-    state.set_progress(SyncProgress { running: true, phase: "discovering_activity".into(), message: "Discovering repository activity".into(), ..SyncProgress::default() });
+    let mut result = SyncResult { ok: true, message: "PR & issue refresh complete".into(), ..SyncResult::default() };
+    state.set_progress(SyncProgress { running: true, phase: "discovering_activity".into(), message: "Discovering repositories".into(), ..SyncProgress::default() });
 
     if !github::dependency_status().gh_authenticated {
         result.ok = false;
@@ -239,7 +285,8 @@ pub fn sync_activity(state: &AppState) -> AppResult<SyncResult> {
         return Ok(result);
     }
 
-    let cached = state.database().metadata("github_discovered_at")?.and_then(|s| s.parse::<DateTime<Utc>>().ok()).is_some_and(|t| Utc::now() - t < Duration::hours(1));
+    let discovery_cache_minutes = settings.activity_refresh_minutes.max(15).min(60);
+    let cached = state.database().metadata("github_discovered_at")?.and_then(|s| s.parse::<DateTime<Utc>>().ok()).is_some_and(|t| Utc::now() - t < Duration::minutes(discovery_cache_minutes));
     let repos = match if cached { state.database().repositories() } else { discover(state) } {
         Ok(repos) => repos,
         Err(error) => {
@@ -248,7 +295,7 @@ pub fn sync_activity(state: &AppState) -> AppResult<SyncResult> {
             state.database().repositories()?
         }
     };
-    if let Some(org_errors) = state.database().metadata("org_discovery_errors")? {
+    if let Some(org_errors) = state.database().metadata("org_discovery_errors")?.filter(|_| app_settings(&state.database()).map(|settings| settings.include_company_repositories).unwrap_or(false)) {
         if !org_errors.trim().is_empty() {
             result.ok = false;
             result.errors.extend(org_errors.lines().map(|error| format!("Organization discovery: {error}")));
@@ -261,7 +308,8 @@ pub fn sync_activity(state: &AppState) -> AppResult<SyncResult> {
         finish_progress(state, Some(error.to_string()));
         return Ok(result);
     }
-    let mut active: Vec<Repository> = repos.into_iter().filter(|repo| !repo.is_archived).collect();
+    let selected_ids: BTreeSet<i64> = state.database().selected_repositories()?.iter().map(|repo| repo.id).collect();
+    let mut active: Vec<Repository> = repos.into_iter().filter(|repo| selected_ids.contains(&repo.id)).collect();
     let last = state.database().metadata("github_last_attempted_repository")?.and_then(|s| s.parse::<i64>().ok());
     if let Some(position) = active.iter().position(|repo| Some(repo.id) == last) {
         let length = active.len();
@@ -273,9 +321,10 @@ pub fn sync_activity(state: &AppState) -> AppResult<SyncResult> {
     let settings = app_settings(&db)?;
     let last_sweep_at = db.metadata(LOC_SWEEP_METADATA_KEY)?;
     let sweep_due = loc_sweep_due_with_interval(last_sweep_at.as_deref(), now, settings.lines_refresh_minutes);
-    state.set_progress(SyncProgress { running: true, phase: "syncing_activity".into(), current: 0, total: repository_total, repository_current: 0, repository_total, snapshot_current: 0, snapshot_total: 0, message: if sweep_due { "Refreshing activity and due line-count checks".into() } else { "Refreshing GitHub activity".into() }, ..SyncProgress::default() });
+    state.set_progress(SyncProgress { running: true, phase: "syncing_activity".into(), current: 0, total: repository_total, repository_current: 0, repository_total, snapshot_current: 0, snapshot_total: 0, message: if sweep_due { "Refreshing PRs, issues, and due line-count checks".into() } else { "Refreshing PRs and issues".into() }, ..SyncProgress::default() });
 
     for (index, repo) in active.into_iter().enumerate() {
+        if !state.database().repository_enabled(&repo)? { continue; }
         if let Err(error) = github_sync::ensure_available(&state.database()) {
             result.ok = false;
             result.errors.push(error.to_string());
@@ -286,7 +335,7 @@ pub fn sync_activity(state: &AppState) -> AppResult<SyncResult> {
         if !decision.run {
             result.loc_repositories_skipped += 1;
         }
-        state.set_progress(SyncProgress { running: true, phase: if decision.run { "syncing_repository" } else { "syncing_activity" }.into(), current: index as i64, total: repository_total, repository_current: index as i64, repository_total, snapshot_current: 0, snapshot_total: 0, repository_name: Some(repo.name_with_owner.clone()), message: if decision.run { format!("Refreshing activity and line counts for {}", repo.name_with_owner) } else { format!("Refreshing activity for {}", repo.name_with_owner) }, ..SyncProgress::default() });
+        state.set_progress(SyncProgress { running: true, phase: if decision.run { "syncing_repository" } else { "syncing_activity" }.into(), current: index as i64, total: repository_total, repository_current: index as i64, repository_total, snapshot_current: 0, snapshot_total: 0, repository_name: Some(repo.name_with_owner.clone()), message: if decision.run { format!("Refreshing PRs, issues, and line counts for {}", repo.name_with_owner) } else { format!("Refreshing PRs and issues for {}", repo.name_with_owner) }, ..SyncProgress::default() });
         match sync_repo_data(state, &repo, decision.run, decision.force_fetch) {
             Ok((prs, issues, snapshots, repo_errors, loc_completed)) => {
                 if repo_errors.is_empty() {
@@ -327,17 +376,20 @@ pub fn sync_activity(state: &AppState) -> AppResult<SyncResult> {
         }
     }
     if !result.errors.is_empty() {
-        result.message = "Activity refresh completed with some errors".into();
+        result.message = "PR & issue refresh completed with some errors".into();
     } else if result.loc_repositories_synced > 0 {
-        result.message = format!("Activity refresh complete; line counts checked for {} repositories", result.loc_repositories_synced);
+        result.message = format!("PR & issue refresh complete; line counts checked for {} repositories", result.loc_repositories_synced);
     }
     finish_progress(state, result.errors.first().cloned());
     Ok(result)
 }
 
 pub fn sync_one(state: &AppState, repository_id: i64) -> AppResult<SyncResult> {
-    github_sync::ensure_available(&state.database())?;
     let repo = state.database().repository(repository_id)?.ok_or(AppError::RepositoryNotFound(repository_id))?;
+    if !state.database().repository_enabled(&repo)? {
+        return Err(AppError::InvalidArgument("Repository is disabled in settings".into()));
+    }
+    github_sync::ensure_available(&state.database())?;
     state.set_progress(SyncProgress { running: true, phase: "syncing_repository".into(), current: 0, total: 1, repository_current: 0, repository_total: 1, repository_name: Some(repo.name_with_owner.clone()), message: format!("Refreshing activity and line counts for {}", repo.name_with_owner), ..SyncProgress::default() });
     let mut result = SyncResult { ok: true, message: "Repository refresh complete".into(), ..SyncResult::default() };
     match sync_repo_data(state, &repo, true, true) {
@@ -374,8 +426,11 @@ pub fn sync_one(state: &AppState, repository_id: i64) -> AppResult<SyncResult> {
 }
 
 pub fn backfill_one(state: &AppState, repository_id: i64) -> AppResult<SyncResult> {
-    github_sync::ensure_available(&state.database())?;
     let repo = state.database().repository(repository_id)?.ok_or(AppError::RepositoryNotFound(repository_id))?;
+    if !state.database().repository_enabled(&repo)? {
+        return Err(AppError::InvalidArgument("Repository is disabled in settings".into()));
+    }
+    github_sync::ensure_available(&state.database())?;
     state.set_progress(SyncProgress { running: true, phase: "backfilling".into(), current: 0, total: 1, repository_current: 0, repository_total: 1, repository_name: Some(repo.name_with_owner.clone()), message: format!("Building line history for {}", repo.name_with_owner), ..SyncProgress::default() });
     let mut result = SyncResult { ok: true, message: "Line history backfill complete".into(), ..SyncResult::default() };
     match backfill_repo(state, &repo) {

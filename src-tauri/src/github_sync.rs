@@ -4,8 +4,13 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::process::Command;
+use std::time::Duration as StdDuration;
 
 pub const PAUSE_KEY: &str = "github_pause_until";
+// Four total attempts with 250 ms, 500 ms, and 1 s waits between retries.
+const GRAPHQL_TRANSIENT_RETRIES: u32 = 3;
+const GRAPHQL_RETRY_BASE_MILLIS: u64 = 250;
+const GRAPHQL_RETRY_MAX_MILLIS: u64 = 2_000;
 
 pub fn ensure_available(db: &Database) -> AppResult<()> {
     if let Some(until) = db.metadata(PAUSE_KEY)? {
@@ -48,13 +53,42 @@ fn limited(message: &str) -> bool {
 }
 
 pub fn graphql(db: &Database, query: &str, variables: Value) -> AppResult<Value> {
-    ensure_available(db)?;
     let mut args = vec!["api".to_string(), "graphql".into(), "--include".into(), "-f".into(), format!("query={query}")];
     for (key, value) in variables.as_object().expect("object variables") {
         args.extend([if value.is_string() { "-f" } else { "-F" }.into(), format!("{key}={}", value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string()))]);
     }
-    let output = Command::new(github::command_path("gh")).args(args).output()?;
-    parse_response(db, output.status.success(), &String::from_utf8_lossy(&output.stdout), &String::from_utf8_lossy(&output.stderr))
+    let mut retries = 0;
+    loop {
+        ensure_available(db)?;
+        let output = Command::new(github::command_path("gh")).args(&args).output()?;
+        let success = output.status.success();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        match parse_response(db, success, &stdout, &stderr) {
+            Ok(value) => return Ok(value),
+            Err(error) if retries < GRAPHQL_TRANSIENT_RETRIES && transient_network_failure(&error, &stdout, &stderr) => {
+                std::thread::sleep(graphql_retry_delay(retries));
+                retries += 1;
+            },
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn transient_network_failure(error: &AppError, stdout: &str, stderr: &str) -> bool {
+    if matches!(error, AppError::RateLimited { .. }) {
+        return false;
+    }
+    let message = format!("{stdout}\n{stderr}\n{error}").to_ascii_lowercase();
+    if limited(&message) {
+        return false;
+    }
+    message.contains("reset by peer") || message.contains("operation timed out") || message.contains("i/o timeout")
+}
+
+fn graphql_retry_delay(retry: u32) -> StdDuration {
+    let multiplier = 1_u64 << retry.min(3);
+    StdDuration::from_millis((GRAPHQL_RETRY_BASE_MILLIS * multiplier).min(GRAPHQL_RETRY_MAX_MILLIS))
 }
 
 pub fn parse_response(db: &Database, success: bool, stdout: &str, stderr: &str) -> AppResult<Value> {
@@ -66,6 +100,8 @@ pub fn parse_response(db: &Database, success: bool, stdout: &str, stderr: &str) 
     let rate = value.as_ref().ok().and_then(|v| v.pointer("/data/rateLimit"));
     let remaining = rate.and_then(|v| v["remaining"].as_i64()).or_else(|| header("x-ratelimit-remaining").and_then(|s| s.parse::<i64>().ok()));
     let exhausted = remaining.is_some_and(|remaining| remaining <= 100);
+    if let Some(remaining) = remaining { db.set_metadata("github_quota_remaining", &remaining.to_string())?; }
+    if let Some(cost) = rate.and_then(|v| v["cost"].as_i64()) { db.set_metadata("github_last_query_cost", &cost.to_string())?; }
     if let Some(reset) = rate.and_then(|v| v["resetAt"].as_str()) { db.set_metadata("github_quota_reset", reset)?; }
     if exhausted || limited(&message) || headers.lines().next().unwrap_or("").contains("429") {
         let reset = header("x-ratelimit-reset").and_then(|v| v.parse::<i64>().ok()).and_then(|t| DateTime::from_timestamp(t, 0))
@@ -111,14 +147,14 @@ pub(crate) fn sync_activity_reporting(db: &Database, repo: &Repository, counts: 
             let mut cursor: Cursor = db.metadata(&key)?.map(|s| serde_json::from_str(&s)).transpose()?.unwrap_or_default();
             let started = cursor.started_at.clone().unwrap_or_else(|| cycle_started.clone());
             let cutoff = cursor.completed_at.as_deref().and_then(|s| s.parse::<DateTime<Utc>>().ok()).map(|t| t - Duration::minutes(5)).unwrap_or_else(|| started.parse::<DateTime<Utc>>().unwrap_or_else(|_| Utc::now()) - Duration::days(30));
-            let fields = if index == 0 { "number title state isDraft createdAt updatedAt mergedAt closedAt url additions deletions changedFiles commits(last:1){nodes{commit{statusCheckRollup{state}}}}" } else { "number title state createdAt updatedAt closedAt url author{login} labels(first:100){nodes{name}} assignees(first:100){nodes{login}}" };
+            let fields = if index == 0 { "number title state isDraft createdAt updatedAt mergedAt closedAt url author{login} assignees(first:100){nodes{login}} additions deletions changedFiles commits(last:1){nodes{commit{statusCheckRollup{state}}}}" } else { "number title state createdAt updatedAt closedAt url author{login} labels(first:100){nodes{name}} assignees(first:100){nodes{login}}" };
             let states = if open { "[OPEN]" } else if index == 0 { "[CLOSED,MERGED]" } else { "[CLOSED]" };
             for page in 0..5 {
                 let sibling = if index == 0 && page == 0 {
                     let states = if open { "[OPEN]" } else { "[CLOSED]" };
                     format!("sibling:issues(first:100,states:{states},orderBy:{{field:UPDATED_AT,direction:DESC}}){{nodes{{number title state createdAt updatedAt closedAt url author{{login}} labels(first:100){{nodes{{name}}}} assignees(first:100){{nodes{{login}}}}}} pageInfo{{hasNextPage endCursor}}}}")
                 } else { String::new() };
-                let query = format!("query($owner:String!,$name:String!,$after:String){{rateLimit{{remaining resetAt}} repository(owner:$owner,name:$name){{openPRs:pullRequests(states:OPEN){{totalCount}} openIssues:issues(states:OPEN){{totalCount}} {sibling} items:{feed}(first:100,after:$after,states:{states},orderBy:{{field:UPDATED_AT,direction:DESC}}){{nodes{{{fields}}} pageInfo{{hasNextPage endCursor}}}}}}}}");
+                let query = format!("query($owner:String!,$name:String!,$after:String){{rateLimit{{cost remaining resetAt}} repository(owner:$owner,name:$name){{openPRs:pullRequests(states:OPEN){{totalCount}} openIssues:issues(states:OPEN){{totalCount}} {sibling} items:{feed}(first:100,after:$after,states:{states},orderBy:{{field:UPDATED_AT,direction:DESC}}){{nodes{{{fields}}} pageInfo{{hasNextPage endCursor}}}}}}}}");
                 let response = if index == 1 && page == 0 && cursor.after.is_none() && sibling_page.is_some() {
                     sibling_page.take().expect("checked sibling page")
                 } else {
@@ -149,8 +185,13 @@ pub(crate) fn sync_activity_reporting(db: &Database, repo: &Repository, counts: 
                     let mut node = node.clone();
                     if index == 0 {
                         let ci = node.pointer("/commits/nodes/0/commit/statusCheckRollup/state").and_then(Value::as_str).map(|s| match s { "ERROR" | "FAILURE" => "failure".into(), "EXPECTED" | "PENDING" => "pending".into(), _ => s.to_ascii_lowercase() });
+                        if node.get("assignees").and_then(|value| value.get("nodes")).is_none_or(Value::is_null) {
+                            node["assignees"] = json!([]);
+                        } else {
+                            node["assignees"] = node["assignees"]["nodes"].clone();
+                        }
                         let v: crate::models::GithubPullRequestJson = serde_json::from_value(node)?;
-                        db.upsert_pull_request(&PullRequest { repository_id:repo.id, repository:repo.name_with_owner.clone(), number:v.number,title:v.title,state:v.state,is_draft:v.is_draft,created_at:v.created_at,updated_at:v.updated_at,merged_at:v.merged_at,closed_at:v.closed_at,url:v.url,additions:v.additions.unwrap_or(0),deletions:v.deletions.unwrap_or(0),changed_files:v.changed_files.unwrap_or(0),ci_state:ci })?;
+                        db.upsert_pull_request(&PullRequest { repository_id:repo.id, repository:repo.name_with_owner.clone(), number:v.number,title:v.title,state:v.state,is_draft:v.is_draft,created_at:v.created_at,updated_at:v.updated_at,merged_at:v.merged_at,closed_at:v.closed_at,url:v.url,author:v.author.map(|a| a.login),assignees:v.assignees.into_iter().map(|a| a.login).collect(),additions:v.additions.unwrap_or(0),deletions:v.deletions.unwrap_or(0),changed_files:v.changed_files.unwrap_or(0),ci_state:ci })?;
                     } else {
                         node["labels"] = node["labels"]["nodes"].clone();
                         node["assignees"] = node["assignees"]["nodes"].clone();

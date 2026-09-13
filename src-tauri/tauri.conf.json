@@ -31,5 +31,13 @@
     "macOS": {
       "signingIdentity": "-"
     }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEFDMjk1MTk1M0E2QkRERjMKUldUejNXczZsVkVwckVJaGE0dldmVVErdFJRODQ1Z1ZiVkFwb3JjaHlXWU9lblVoL0pFUWgxS3gK",
+      "endpoints": [
+        "https://github.com/Xzese/CodeTally/releases/latest/download/latest.json"
+      ]
+    }
   }
 }

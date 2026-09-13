@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
-import type { ActivityFeed, ActivityItem, AppSettings, DashboardData, DependencyStatus, FeedKind, FeedRequest, GitHubUser, HistoryRequest, LocSnapshot, PullRequest, Issue, SyncProgress, SyncResult } from './types'
+import type { ActivityFeed, ActivityItem, AppSettings, DashboardData, DependencyStatus, FeedKind, FeedRequest, GitHubUser, HistoryRequest, LocSnapshot, PullRequest, Issue, RepositorySelection, SyncProgress, SyncResult } from './types'
 
 export class BackendError extends Error {
   readonly command: string
@@ -61,6 +61,47 @@ export async function setAppSettings(settings: AppSettings): Promise<AppSettings
   return call<AppSettings>('set_app_settings', { settings })
 }
 
+export async function getDatabaseLocation(): Promise<string> {
+  return call<string>('get_database_location')
+}
+
+export interface AppInfo {
+  name: string
+  version: string
+  identifier: string
+  repository_url: string
+}
+
+export async function getAppInfo(): Promise<AppInfo> {
+  return call<AppInfo>('get_app_info')
+}
+
+export async function installAppUpdate(): Promise<void> {
+  return call<void>('install_update')
+}
+
+export async function revealDatabase(): Promise<boolean> {
+  return call<boolean>('reveal_database')
+}
+
+export async function getRepositorySelection(): Promise<RepositorySelection[]> {
+  const raw = await call<unknown>('get_repository_selection')
+  if (!Array.isArray(raw)) throw new Error('The repository selection command returned an invalid payload.')
+  return raw.map((item) => {
+    if (!item || typeof item !== 'object') throw new Error('The repository selection command returned an invalid repository.')
+    const source = item as Record<string, unknown>
+    const group = source.group
+    if (group !== 'personal' && group !== 'company') throw new Error('The repository selection command returned an invalid repository group.')
+    const githubId = source.github_id ?? source.githubId
+    const nameWithOwner = source.name_with_owner ?? source.nameWithOwner
+    const owner = source.owner
+    if ((typeof githubId !== 'string' && typeof githubId !== 'number') || typeof nameWithOwner !== 'string' || typeof owner !== 'string') {
+      throw new Error('The repository selection command returned an invalid repository.')
+    }
+    return { github_id: String(githubId), name_with_owner: nameWithOwner, owner, group }
+  })
+}
+
 export async function getDashboard(): Promise<DashboardData> {
   return call<DashboardData>('get_dashboard')
 }
@@ -80,6 +121,8 @@ export async function getActivityFeed(request: FeedRequest): Promise<PullRequest
     kind: request.kind,
     repository_id: request.repositoryId ?? null,
     state: request.state ?? 'all',
+    ...(request.repositoryIds !== undefined ? { repository_ids: request.repositoryIds } : {}),
+    ...(request.relationship !== undefined && request.relationship !== 'everyone' ? { relationship: request.relationship } : {}),
     limit: 1000
   })
   if (Array.isArray(raw)) return raw as PullRequest[] | Issue[]
@@ -92,6 +135,17 @@ export async function getActivityFeed(request: FeedRequest): Promise<PullRequest
 
 export async function openExternalUrl(url: string): Promise<void> {
   await call('open_external_url', { url })
+}
+
+export interface AppUpdate {
+  current_version: string
+  latest_version: string
+  release_url: string
+  update_available: boolean
+}
+
+export async function checkForUpdates(): Promise<AppUpdate> {
+  return call<AppUpdate>('check_for_updates')
 }
 
 export async function getSyncProgress(): Promise<SyncProgress> {
