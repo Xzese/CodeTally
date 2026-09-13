@@ -188,19 +188,83 @@ pub struct SyncResult {
     pub errors: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MenuBarMetric {
+    #[default]
+    TotalLines,
+    TestLines,
+    SourceLines,
+    OpenPrs,
+    OpenIssues,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ThemeMode {
+    Light,
+    Dark,
+    #[default]
+    System,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
+    #[serde(default)]
+    pub theme_mode: ThemeMode,
     pub activity_refresh_minutes: i64,
     pub lines_refresh_minutes: i64,
     pub refresh_lines_on_change: bool,
+    #[serde(default = "default_run_in_background")]
+    pub run_in_background: bool,
+    #[serde(default)]
+    pub menu_bar_metric: MenuBarMetric,
+    #[serde(default)]
+    pub menu_bar_metrics: Vec<MenuBarMetric>,
+    #[serde(default = "default_run_in_background")]
+    pub show_menu_bar: bool,
+    #[serde(default)]
+    pub include_forks_in_totals: bool,
+    #[serde(default = "default_run_in_background")]
+    pub include_personal_repositories: bool,
+    #[serde(default = "default_run_in_background")]
+    pub include_company_repositories: bool,
+    #[serde(default)]
+    pub excluded_repository_ids: Vec<String>,
 }
+
+impl AppSettings {
+    /// Empty arrays are legacy preferences; always expose a nonempty canonical selection.
+    pub fn effective_menu_bar_metrics(&self) -> Vec<MenuBarMetric> {
+        if self.menu_bar_metrics.is_empty() { return vec![self.menu_bar_metric]; }
+        [MenuBarMetric::TotalLines, MenuBarMetric::SourceLines, MenuBarMetric::TestLines,
+            MenuBarMetric::OpenPrs, MenuBarMetric::OpenIssues]
+            .into_iter().filter(|metric| self.menu_bar_metrics.contains(metric)).collect()
+    }
+
+    pub fn normalize_menu_bar_metrics(&mut self) {
+        self.menu_bar_metrics = self.effective_menu_bar_metrics();
+        self.menu_bar_metric = self.menu_bar_metrics[0];
+    }
+}
+
+fn default_run_in_background() -> bool { true }
 
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
-            activity_refresh_minutes: 10,
-            lines_refresh_minutes: 45,
+            theme_mode: ThemeMode::default(),
+            activity_refresh_minutes: 30,
+            lines_refresh_minutes: 120,
             refresh_lines_on_change: true,
+            run_in_background: true,
+            menu_bar_metric: MenuBarMetric::default(),
+            menu_bar_metrics: Vec::new(),
+            show_menu_bar: true,
+            include_forks_in_totals: false,
+            include_personal_repositories: true,
+            include_company_repositories: true,
+            excluded_repository_ids: Vec::new(),
         }
     }
 }
@@ -343,4 +407,12 @@ where
         serde_json::Value::Number(value) => Ok(value.to_string()),
         other => Err(serde::de::Error::custom(format!("expected id string or number, got {other}"))),
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepositorySelection {
+    pub github_id: String,
+    pub name_with_owner: String,
+    pub owner: String,
+    pub group: String,
 }

@@ -1,18 +1,26 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { listen } from '@tauri-apps/api/event'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { AreaChart, CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
-import { AlertCircle, ArrowDown, ArrowLeft, ArrowUp, BarChart3, Check, ChevronDown, ChevronUp, CircleDot, ExternalLink, GitBranch, Github, HardDrive, ListFilter, LoaderCircle, Moon, RefreshCw, Settings, Sun, Terminal, X, Zap } from 'lucide-react'
+import { AlertCircle, ArrowDown, ArrowLeft, ArrowUp, BarChart3, Check, ChevronDown, ChevronUp, CircleDot, ExternalLink, GitBranch, Github, HardDrive, ListFilter, LoaderCircle, RefreshCw, Settings, Terminal, X, Zap } from 'lucide-react'
 import { checkDependencies, discoverRepositories, getActivityFeed, getAppSettings, getDashboard, getGithubUser, getLocHistory, getSyncProgress, openExternalUrl, setAppSettings, syncActivity, syncGithubData } from './api'
 import type { AppSettings, DashboardData, DependencyStatus, FeedKind, Issue, LocSnapshot, PullRequest, Repository, SyncProgress, TimeRange } from './types'
 import { aggregateHistory, filterIssues, filterPullRequests, isDraft, isMerged, sortRepositories, type FeedState } from './model'
 import { activityRepo, exactDate, formatCompact, formatCount, formatSigned, normalizeDashboard, normalizeLabels, relativeTime, repoActivity, repoBaseline30Available, repoChange, repoChangePercent, repoForks, repoLocAvailable, repoName, repoOpenIssues, repoOpenPrs, repoSource, repoStars, repoTests, repoTotal, repositoryId, repositoryLabel } from './utils'
 import codetallyMark from './assets/codetally-mark.png'
+import SettingsDrawer from './SettingsDrawer'
+import { DEFAULT_APP_SETTINGS, normalizeAppSettings } from './settings'
+import GitHubConnection from './GitHubConnection'
+import ActivityRepositoryMenu, { activityScopeRepositories } from './ActivityRepositoryMenu'
 import './styles.css'
 
 type Screen = 'dashboard' | 'detail'
 type RepoSort = 'name' | 'loc' | 'source' | 'tests' | 'growth' | 'prs' | 'issues' | 'stars' | 'forks' | 'activity'
 
 const EMPTY_DEPS: DependencyStatus = { gh: false, git: false, tokei: false, gh_authenticated: false, authenticated: false, login: null }
-const DEFAULT_APP_SETTINGS: AppSettings = { activity_refresh_minutes: 10, lines_refresh_minutes: 45, refresh_lines_on_change: true }
+
+function dependenciesAuthenticated(deps: DependencyStatus): boolean {
+  return deps.gh_authenticated || deps.authenticated === true
+}
 
 function toDashboard(raw: DashboardData | null | undefined = {}) {
   return normalizeDashboard(raw ?? {})
@@ -55,6 +63,7 @@ function progressHasCounters(progress: SyncProgress | null): boolean {
 
 function App() {
   const [deps, setDeps] = useState<DependencyStatus>(EMPTY_DEPS)
+  const [checkingDependencies, setCheckingDependencies] = useState(false)
   const [login, setLogin] = useState('')
   const [dashboard, setDashboard] = useState(toDashboard())
   const [busy, setBusy] = useState(true)
@@ -79,9 +88,26 @@ function App() {
   const [repoSortDirection, setRepoSortDirection] = useState<'asc' | 'desc'>('desc')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [appSettings, setAppSettingsState] = useState<AppSettings>(DEFAULT_APP_SETTINGS)
+  const [settingsLoaded, setSettingsLoaded] = useState(false)
   const [settingsSaving, setSettingsSaving] = useState(false)
   const [settingsError, setSettingsError] = useState<string | null>(null)
-  const [lightMode, setLightMode] = useState(false)
+  const settingsIntentRef = useRef(DEFAULT_APP_SETTINGS)
+  const settingsPersistedRef = useRef(DEFAULT_APP_SETTINGS)
+  const settingsRevisionRef = useRef(0)
+  const selectionRevisionRef = useRef(0)
+  const settingsPendingRef = useRef(false)
+  const settingsWorkerRef = useRef(false)
+  const settingsRefreshRef = useRef(false)
+  const [systemDark, setSystemDark] = useState(() => window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? true)
+  useEffect(() => {
+    const preference = window.matchMedia?.('(prefers-color-scheme: dark)')
+    if (!preference) return
+    const update = () => setSystemDark(preference.matches)
+    update()
+    preference.addEventListener('change', update)
+    return () => preference.removeEventListener('change', update)
+  }, [])
+  const lightMode = appSettings.theme_mode === 'light' || (appSettings.theme_mode === 'system' && !systemDark)
   const [syncPopoverOpen, setSyncPopoverOpen] = useState(false)
   const [syncPopoverPinned, setSyncPopoverPinned] = useState(false)
   const syncPopoverRef = useRef<HTMLDivElement | null>(null)
@@ -97,33 +123,37 @@ function App() {
   const finalRefreshRef = useRef(false)
 
   const activeRepositories = useMemo(() => dashboard.repositories.filter((repo) => !(repo.is_archived ?? repo.isArchived)), [dashboard.repositories])
-  const partialLoc = useMemo(() => activeRepositories.some((repo) => !(repo.is_fork ?? repo.isFork) && !repoLocAvailable(repo)), [activeRepositories])
+  const partialLoc = useMemo(() => activeRepositories.some((repo) => (appSettings.include_forks_in_totals || !(repo.is_fork ?? repo.isFork)) && !repoLocAvailable(repo)), [activeRepositories, appSettings.include_forks_in_totals])
   const selectedRepoId = useMemo(() => selectedRepo ? repositoryId(selectedRepo) : null, [selectedRepo])
   const lastSync = dashboard.last_sync_at
 
-  const applyDashboard = useCallback((raw: DashboardData, reloadFeeds = true) => {
+  const applyDashboard = useCallback((raw: DashboardData, reloadFeeds = true, preserveFeedCache = true) => {
     const next = toDashboard(raw)
     setDashboard((current) => ({
       ...next,
-      pull_requests: current.pull_requests.length ? current.pull_requests : next.pull_requests,
-      issues: current.issues.length ? current.issues : next.issues
+      pull_requests: preserveFeedCache && current.pull_requests.length ? current.pull_requests : next.pull_requests,
+      issues: preserveFeedCache && current.issues.length ? current.issues : next.issues
     }))
     if (reloadFeeds) setFeedRevision((revision) => revision + 1)
     setSelectedRepo((previous) => previous ? next.repositories.find((repo) => String(repositoryId(repo)) === String(repositoryId(previous))) ?? previous : previous)
     if (next.user?.login) setLogin(next.user.login)
     const repositoryErrors = next.repositories.filter((repo) => repo.last_error).map((repo) => `${repositoryLabel(repo)}: ${repo.last_error}`).slice(0, 3)
-    if (next.errors.length || repositoryErrors.length) setError([...next.errors, ...repositoryErrors].join(' '))
+    const errors = [...new Set([...next.errors, ...repositoryErrors])]
+    setError(errors.length ? errors.join(' ') : null)
   }, [])
 
-  const loadData = useCallback(async (showBusy = false): Promise<boolean> => {
+  const loadData = useCallback(async (showBusy = false, preserveFeedCache = true): Promise<boolean> => {
     if (showBusy) setBusy(true)
+    const selectionRevision = selectionRevisionRef.current
+    const dashboardVersion = cachedRefreshVersionRef.current
     const dashboardResult = await Promise.allSettled([getDashboard()])
     let hasCachedRepositories = false
     if (dashboardResult[0].status === 'fulfilled') {
       const next = dashboardResult[0].value
       const historyResult = await Promise.allSettled([getLocHistory({ range: 'ALL' })])
       const history = historyResult[0].status === 'fulfilled' ? historyResult[0].value : []
-      applyDashboard({ ...next, loc_history: next.loc_history ?? next.locHistory ?? next.history ?? history })
+      if (selectionRevision !== selectionRevisionRef.current || dashboardVersion !== cachedRefreshVersionRef.current || settingsRefreshRef.current) { setBusy(false); return false }
+      applyDashboard({ ...next, loc_history: next.loc_history ?? next.locHistory ?? next.history ?? history }, true, preserveFeedCache)
       hasCachedRepositories = next.repositories?.some((repo) => !(repo.is_archived ?? repo.isArchived)) ?? false
       if (historyResult[0].status === 'rejected' && !next.loc_history && !next.locHistory && !next.history) setError('Line history is not available yet. Import a repository to begin collecting snapshots.')
     } else {
@@ -138,11 +168,28 @@ function App() {
     return hasCachedRepositories
   }, [applyDashboard])
 
-  const loadFinalData = useCallback(async () => {
+  const checkSetupConnection = useCallback(async () => {
+    if (checkingDependencies) return
+    setCheckingDependencies(true)
+    setError(null)
+    try {
+      const next = await checkDependencies()
+      setDeps(next)
+      if (next.login) setLogin(next.login)
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : String(reason)
+      setDeps((current) => ({ ...current, error: message }))
+      setError(`Could not check GitHub connection: ${message}`)
+    } finally {
+      setCheckingDependencies(false)
+    }
+  }, [checkingDependencies])
+
+  const loadFinalData = useCallback(async (preserveFeedCache = true) => {
     finalRefreshRef.current = true
     cachedRefreshVersionRef.current += 1
     try {
-      await loadData(false)
+      await loadData(false, preserveFeedCache)
     } finally {
       finalRefreshRef.current = false
     }
@@ -151,10 +198,11 @@ function App() {
   const refreshCachedData = useCallback(async () => {
     if (cachedRefreshRef.current || finalRefreshRef.current) return
     cachedRefreshRef.current = true
+    const selectionRevision = selectionRevisionRef.current
     const requestVersion = ++cachedRefreshVersionRef.current
     try {
       const [dashboardResult, historyResult] = await Promise.allSettled([getDashboard(), getLocHistory({ range: 'ALL' })])
-      if (finalRefreshRef.current || requestVersion !== cachedRefreshVersionRef.current || dashboardResult.status !== 'fulfilled') return
+      if (selectionRevision !== selectionRevisionRef.current || settingsRefreshRef.current || finalRefreshRef.current || requestVersion !== cachedRefreshVersionRef.current || dashboardResult.status !== 'fulfilled') return
       const next = dashboardResult.value
       const history = historyResult.status === 'fulfilled' ? historyResult.value : []
       applyDashboard({ ...next, loc_history: next.loc_history ?? next.locHistory ?? next.history ?? history }, false)
@@ -208,15 +256,56 @@ function App() {
     void loadData(true).then((hasCachedRepositories) => { if (hasCachedRepositories) void refreshData(true) })
   }, [loadData, refreshData])
 
-  useEffect(() => {
-    void getAppSettings().then((settings) => setAppSettingsState({ ...DEFAULT_APP_SETTINGS, ...settings })).catch(() => undefined)
+  const loadSettings = useCallback(async () => {
+    setSettingsError(null)
+    try {
+      const settings = await getAppSettings()
+      if (settingsRevisionRef.current !== 0) return
+      const initial = normalizeAppSettings(settings)
+      settingsIntentRef.current = initial
+      settingsPersistedRef.current = initial
+      setAppSettingsState(initial)
+      setSettingsLoaded(true)
+    } catch (reason) {
+      setSettingsError(`Could not load preferences: ${reason instanceof Error ? reason.message : String(reason)}`)
+    }
   }, [])
 
+  useEffect(() => { void loadSettings() }, [loadSettings])
+
+  // Scheduling belongs to the native process, which keeps running with the window hidden.
   useEffect(() => {
-    const minutes = Math.max(1, Number(appSettings.activity_refresh_minutes) || DEFAULT_APP_SETTINGS.activity_refresh_minutes)
-    const timer = window.setInterval(() => { void refreshData(true) }, minutes * 60 * 1000)
-    return () => window.clearInterval(timer)
-  }, [appSettings.activity_refresh_minutes, refreshData])
+    let alive = true
+    let polling = false
+    let wasRunning = false
+    const poll = async () => {
+      if (polling || syncingRef.current || importingRef.current) return
+      polling = true
+      try {
+        const progress = await getSyncProgress()
+        if (!alive || syncingRef.current || importingRef.current) return
+        setSyncProgress(progress)
+        if (progress.running) {
+          wasRunning = true
+          await refreshCachedData()
+        } else if (wasRunning) {
+          wasRunning = false
+          await loadFinalData()
+        }
+      } catch { /* Keep the cached dashboard available. */ }
+      finally { polling = false }
+    }
+    const reloadCached = () => { void refreshCachedData(); setFeedRevision((revision) => revision + 1); void poll() }
+    let unlisten: (() => void) | undefined
+    void listen('background-sync-completed', () => { wasRunning = false; void loadFinalData(); void poll() }).then((stop) => {
+      if (alive) unlisten = stop
+      else stop()
+    }).catch(() => undefined)
+    const onFocus = reloadCached
+    const timer = window.setInterval(() => void poll(), 2000)
+    window.addEventListener('focus', onFocus)
+    return () => { alive = false; unlisten?.(); window.clearInterval(timer); window.removeEventListener('focus', onFocus) }
+  }, [loadFinalData, refreshCachedData])
 
   useEffect(() => {
     if (!syncing && !importing) return
@@ -359,7 +448,7 @@ function App() {
   const handleFeedKind = useCallback((kind: FeedKind) => {
     setFeedKind(kind)
     setFeedState('open')
-    setFeedRepo(screen === 'detail' && selectedRepo ? String(repositoryId(selectedRepo)) : 'all')
+    if (screen === 'detail' && selectedRepo) setFeedRepo(String(repositoryId(selectedRepo)))
   }, [screen, selectedRepo])
 
   const handleFeedState = useCallback((state: FeedState) => {
@@ -371,10 +460,13 @@ function App() {
     setFeedRepo(repository)
   }, [screen, selectedRepo])
 
+  const scopedFeedRepositories = useMemo(() => activityScopeRepositories(feedRepo, activeRepositories, login), [feedRepo, activeRepositories, login])
+  const feedRepositoryIdsKey = JSON.stringify(scopedFeedRepositories.map((repo) => backendRepositoryId(String(repositoryId(repo)))).filter((id): id is number => id !== null))
+  const groupedFeedScope = feedRepo === 'personal' || feedRepo === 'companies' || feedRepo.startsWith('owner:')
   useEffect(() => {
     const requestId = ++feedRequestRef.current
     let alive = true
-    void getActivityFeed({ kind: feedKind, state: feedState, repositoryId: backendRepositoryId(feedRepo) }).then((items) => {
+    void getActivityFeed({ kind: feedKind, state: feedState, repositoryId: backendRepositoryId(feedRepo), ...(groupedFeedScope ? { repositoryIds: JSON.parse(feedRepositoryIdsKey) as number[] } : {}) }).then((items) => {
       if (!alive || requestId !== feedRequestRef.current) return
       if (feedKind === 'prs') setDashboard((current) => ({ ...current, pull_requests: items as PullRequest[] }))
       else setDashboard((current) => ({ ...current, issues: items as Issue[] }))
@@ -384,7 +476,7 @@ function App() {
       setError(`Unable to load ${feedKind === 'prs' ? 'pull requests' : 'issues'}: ${message}`)
     })
     return () => { alive = false }
-  }, [feedKind, feedRepo, feedRevision, feedState])
+  }, [feedKind, feedRepo, feedRevision, feedState, groupedFeedScope, feedRepositoryIdsKey])
 
   const visibleHistory = useMemo(() => aggregateHistory(
     screen === 'detail' && detailHistory !== null ? detailHistory : dashboard.loc_history,
@@ -394,25 +486,76 @@ function App() {
 
   const metrics = dashboard.metrics
   const sortedRepositories = useMemo(() => sortRepositories(activeRepositories, repoSort, repoSortDirection), [activeRepositories, repoSort, repoSortDirection])
-  const filteredPrs = useMemo(() => filterPullRequests(dashboard.pull_requests, feedState, feedRepo), [dashboard.pull_requests, feedRepo, feedState])
-  const filteredIssues = useMemo(() => filterIssues(dashboard.issues, feedState === 'merged' ? 'all' : feedState, feedRepo), [dashboard.issues, feedRepo, feedState])
-  const isSetup = activeRepositories.length === 0 && !busy
-  const syncActive = syncing || importing
+  const filteredPrs = useMemo(() => filterPullRequests(dashboard.pull_requests, feedState, groupedFeedScope ? 'all' : feedRepo).filter((item) => !groupedFeedScope || scopedFeedRepositories.some((repo) => isRepoActivity(item, repo))), [dashboard.pull_requests, feedRepo, feedState, groupedFeedScope, scopedFeedRepositories])
+  const filteredIssues = useMemo(() => filterIssues(dashboard.issues, feedState === 'merged' ? 'all' : feedState, groupedFeedScope ? 'all' : feedRepo).filter((item) => !groupedFeedScope || scopedFeedRepositories.some((repo) => isRepoActivity(item, repo))), [dashboard.issues, feedRepo, feedState, groupedFeedScope, scopedFeedRepositories])
+  const hasSavedRepositorySelection = !appSettings.include_personal_repositories || !appSettings.include_company_repositories || appSettings.excluded_repository_ids.length > 0
+  const isSetup = activeRepositories.length === 0 && !busy && settingsLoaded && !hasSavedRepositorySelection
+  const syncActive = syncing || importing || Boolean(syncProgress?.running)
   const syncDetailsAvailable = syncActive || Boolean(syncProgress)
   const syncPopoverProgress = syncProgress ?? { running: true, phase: importing ? 'importing' : 'starting', current: 0, total: 0, message: importing ? importStep : 'Starting sync' }
-  const saveSettings = useCallback(async (next: AppSettings) => {
+  const flushSettings = useCallback(async () => {
+    if (settingsWorkerRef.current) return
+    settingsWorkerRef.current = true
     setSettingsSaving(true)
     setSettingsError(null)
     try {
-      const persisted = await setAppSettings(next)
-      setAppSettingsState({ ...DEFAULT_APP_SETTINGS, ...(persisted ?? next) })
-      setSettingsOpen(false)
+      while (settingsPendingRef.current) {
+        settingsPendingRef.current = false
+        const next = settingsIntentRef.current
+        const previous = settingsPersistedRef.current
+        const persisted = await setAppSettings(next)
+        const saved = normalizeAppSettings({ ...next, ...(persisted ?? {}) })
+        settingsPersistedRef.current = saved
+        const oldExcluded = new Set(previous.excluded_repository_ids.map(String))
+        const newExcluded = new Set(saved.excluded_repository_ids.map(String))
+        settingsRefreshRef.current ||= previous.include_personal_repositories !== saved.include_personal_repositories || previous.include_company_repositories !== saved.include_company_repositories || previous.include_forks_in_totals !== saved.include_forks_in_totals || oldExcluded.size !== newExcluded.size || [...oldExcluded].some((id) => !newExcluded.has(id))
+        // Acknowledgements never replace optimistic intent. A newer click may have
+        // arrived while this write was in flight; only flush its latest snapshot.
+        if (settingsPendingRef.current || !settingsRefreshRef.current) continue
+        const revision = settingsRevisionRef.current
+        cachedRefreshVersionRef.current += 1
+        const [raw, history] = await Promise.all([getDashboard(), getLocHistory({ range: 'ALL' })])
+        if (revision !== settingsRevisionRef.current) continue
+        settingsRefreshRef.current = false
+        cachedRefreshVersionRef.current += 1
+        setScreen('dashboard')
+        setSelectedRepo(null)
+        setDetailHistory(null)
+        setDetailPrs([])
+        setDetailIssues([])
+        setFeedRepo('all')
+        setFeedState('open')
+        feedRequestRef.current += 1
+        applyDashboard({ ...raw, loc_history: raw.loc_history ?? raw.locHistory ?? raw.history ?? history }, true, false)
+      }
     } catch (reason) {
+      // Keep the newest complete intent across errors and drawer unmounts. Retry
+      // repeats it, including a cache reload that failed after a successful write.
+      settingsPendingRef.current = true
       setSettingsError(reason instanceof Error ? reason.message : String(reason))
     } finally {
+      settingsWorkerRef.current = false
       setSettingsSaving(false)
     }
-  }, [])
+  }, [applyDashboard])
+
+  const changeSettings = useCallback((update: (current: AppSettings) => AppSettings) => {
+    const previous = settingsIntentRef.current
+    const next = update(previous)
+    const oldExcluded = new Set(previous.excluded_repository_ids.map(String))
+    const newExcluded = new Set(next.excluded_repository_ids.map(String))
+    const selectionChanged = previous.include_personal_repositories !== next.include_personal_repositories || previous.include_company_repositories !== next.include_company_repositories || previous.include_forks_in_totals !== next.include_forks_in_totals || oldExcluded.size !== newExcluded.size || [...oldExcluded].some((id) => !newExcluded.has(id))
+    if (selectionChanged) {
+      selectionRevisionRef.current += 1
+      cachedRefreshVersionRef.current += 1
+      settingsRefreshRef.current = true
+    }
+    settingsIntentRef.current = next
+    settingsRevisionRef.current += 1
+    settingsPendingRef.current = true
+    setAppSettingsState(next)
+    void flushSettings()
+  }, [flushSettings])
 
   return (
     <div className={lightMode ? 'app-shell light' : 'app-shell'}>
@@ -420,8 +563,7 @@ function App() {
         <div className="brand-mark"><img src={codetallyMark} alt="" aria-hidden="true" /><span>CodeTally</span></div>
         <div className="topbar-status">
           {login ? <span className="identity"><span className="status-dot" />{login}</span> : <span className="muted">Local desktop dashboard</span>}
-          <button className="icon-button" title="Toggle theme" onClick={() => setLightMode((light) => !light)}>{lightMode ? <Moon size={17} /> : <Sun size={17} />}</button>
-          <button className="icon-button" title="Settings" onClick={() => { setSettingsError(null); setSettingsOpen(true) }}><Settings size={17} /></button>
+          <button className="icon-button" title="Settings" onClick={() => setSettingsOpen(true)}><Settings size={17} /></button>
           <div
             className={syncDetailsAvailable ? 'sync-popover-wrap active' : 'sync-popover-wrap'}
             ref={syncPopoverRef}
@@ -471,23 +613,26 @@ function App() {
 
       {error && <div className="error-banner"><AlertCircle size={16} /><span>{error}</span><button className="icon-button subtle" onClick={() => setError(null)} aria-label="Dismiss error"><X size={15} /></button></div>}
 
-      {busy && !dashboard.repositories.length ? <LoadingScreen /> : isSetup ? <SetupScreen deps={deps} login={login} error={error} importing={importing} importStep={importStep} onImport={() => void importRepositories()} onRetry={() => void loadData(true)} /> : (
+      {busy && !dashboard.repositories.length ? <LoadingScreen /> : isSetup ? <SetupScreen deps={deps} login={login} error={error} importing={importing} importStep={importStep} checking={checkingDependencies} onImport={() => void importRepositories()} onRetry={checkSetupConnection} /> : (
         <div className="content-shell">
           {screen === 'dashboard' ? (
             <main className="main-column">
-              <div className="page-heading"><div><p className="eyebrow">Portfolio overview</p><h1>Code at a glance</h1></div><span className="small-note"><CircleDot size={13} /> {activeRepositories.length} active repositories</span></div>
-              <SummaryStrip metrics={metrics} partialLoc={partialLoc} />
-              <LocChart history={visibleHistory} metric={metric} range={range} onMetric={setMetric} onRange={setRange} />
-              <RepositoryTable repositories={sortedRepositories} sort={repoSort} direction={repoSortDirection} onSort={(next) => { if (next === repoSort) setRepoSortDirection((current) => current === 'asc' ? 'desc' : 'asc'); else { setRepoSort(next); setRepoSortDirection(next === 'name' ? 'asc' : 'desc') } }} onSelect={(repo) => void openRepository(repo)} />
+              {deps.gh && !dependenciesAuthenticated(deps) && <GitHubConnection deps={deps} login={login} compact checking={checkingDependencies} onRetry={checkSetupConnection} />}
+              {activeRepositories.length === 0 ? <EmptySelectionState onOpenSettings={() => setSettingsOpen(true)} /> : <>
+                <div className="page-heading"><div><p className="eyebrow">Portfolio overview</p><h1>Code at a glance</h1></div><span className="small-note"><CircleDot size={13} /> {activeRepositories.length} active repositories</span></div>
+                <SummaryStrip metrics={metrics} partialLoc={partialLoc} />
+                <LocChart history={visibleHistory} metric={metric} range={range} onMetric={setMetric} onRange={setRange} />
+                <RepositoryTable repositories={sortedRepositories} login={login} sort={repoSort} direction={repoSortDirection} onSort={(next) => { if (next === repoSort) setRepoSortDirection((current) => current === 'asc' ? 'desc' : 'asc'); else { setRepoSort(next); setRepoSortDirection(next === 'name' ? 'asc' : 'desc') } }} onSelect={(repo) => void openRepository(repo)} />
+              </>}
             </main>
           ) : selectedRepo ? (
             <RepositoryDetails repo={selectedRepo} history={visibleHistory} historyLoading={detailLoading} metric={metric} range={range} onMetric={setMetric} onRange={setRange} onBack={backToDashboard} pullRequests={detailPrs} issues={detailIssues} onOpenUrl={(url) => void openUrl(url, setError)} />
           ) : null}
-          <ActivitySidebar kind={feedKind} state={feedState} repository={feedRepo} lockedRepository={screen === 'detail' && selectedRepo ? String(repositoryId(selectedRepo)) : null} repositories={activeRepositories} prs={filteredPrs} issues={filteredIssues} onKind={handleFeedKind} onState={handleFeedState} onRepository={handleFeedRepository} onOpenUrl={(url) => void openUrl(url, setError)} />
+          <ActivitySidebar login={login} kind={feedKind} state={feedState} repository={feedRepo} lockedRepository={screen === 'detail' && selectedRepo ? String(repositoryId(selectedRepo)) : null} repositories={activeRepositories} prs={filteredPrs} issues={filteredIssues} onKind={handleFeedKind} onState={handleFeedState} onRepository={handleFeedRepository} onOpenUrl={(url) => void openUrl(url, setError)} />
         </div>
       )}
 
-      {settingsOpen && <SettingsDrawer settings={appSettings} saving={settingsSaving} error={settingsError} onSave={(next) => void saveSettings(next)} onClose={() => setSettingsOpen(false)} />}
+      {settingsOpen && <SettingsDrawer settings={appSettings} loaded={settingsLoaded} metrics={dashboard.metrics} saving={settingsSaving} error={settingsError} onChange={changeSettings} onRetry={() => void (settingsLoaded ? flushSettings() : loadSettings())} onClose={() => setSettingsOpen(false)} />}
     </div>
   )
 }
@@ -528,15 +673,21 @@ function SyncProgressPanel({ progress }: { progress: SyncProgress }) {
   return <section className="sync-progress-panel" aria-live="polite"><div className="sync-progress-heading"><div><p className="eyebrow">{progress.running ? readablePhase(progress.phase) : 'Last sync'}</p><strong>{progress.message || readablePhase(progress.phase)}</strong>{progress.repository_name && <span>{progress.repository_name}</span>}</div><span className={progress.running ? 'sync-progress-state active' : 'sync-progress-state'}>{progress.running ? 'In progress' : 'Complete'}</span>{progress.error && <div className="sync-progress-error"><AlertCircle size={13} /> {progress.error}</div>}</div><div className="sync-progress-bars"><div className="sync-progress-row"><div><span>Overall repository progress</span><b>{overallLabel}</b></div><ProgressMeter value={counts.repositoriesCurrent} max={counts.repositoriesTotal} label="Overall repository progress" /></div><div className="sync-progress-row samples"><div><span>Current repository samples</span><b>{samplesLabel ?? 'Samples pending'}</b></div><ProgressMeter value={counts.snapshotsCurrent} max={counts.snapshotsTotal} label="Current repository samples processed" /></div></div></section>
 }
 
-function SetupScreen({ deps, login, error, importing, importStep, onImport, onRetry }: { deps: DependencyStatus; login: string; error: string | null; importing: boolean; importStep: string; onImport: () => void; onRetry: () => void }) {
+function SetupScreen({ deps, login, error, importing, importStep, checking, onImport, onRetry }: { deps: DependencyStatus; login: string; error: string | null; importing: boolean; importStep: string; checking: boolean; onImport: () => void; onRetry: () => void | Promise<void> }) {
+  const authenticated = dependenciesAuthenticated(deps)
   const checks = [
     { label: 'Git installed', ok: deps.git, icon: GitBranch },
     { label: 'GitHub CLI installed', ok: deps.gh, icon: Terminal },
-    { label: deps.authenticated ? `Logged in as ${login || deps.login}` : 'GitHub authentication', ok: deps.authenticated, icon: Github },
+    { label: authenticated ? `Logged in as ${login || deps.login}` : 'GitHub authentication', ok: authenticated, icon: Github },
     { label: 'Tokei installed', ok: deps.tokei, icon: Zap }
   ]
   const ready = checks.every((check) => check.ok)
-  return <div className="setup-wrap"><div className="setup-card"><div className="setup-icon"><img src={codetallyMark} alt="" aria-hidden="true" /></div><p className="eyebrow">First run</p><h1>Connect your local toolkit</h1><p className="setup-copy">CodeTally uses the tools already installed on this Mac. Nothing is uploaded and no token is requested.</p><div className="setup-checks">{checks.map(({ label, ok, icon: Icon }) => <div className={ok ? 'setup-check ok' : 'setup-check'} key={label}><span className="check-icon">{ok ? <Check size={15} /> : <Icon size={15} />}</span><span>{label}</span>{ok ? <span className="check-state">Ready</span> : <span className="check-state missing">Missing</span>}</div>)}</div>{error && <div className="setup-error"><AlertCircle size={15} /> {error}</div>}{importing ? <div className="setup-import-note" role="status"><LoaderCircle size={15} className="spin" /><span>{importStep}</span><small>Follow progress from the Importing status in the header.</small></div> : <button className="button primary wide" onClick={ready ? onImport : onRetry}>{ready ? <><HardDrive size={16} /> {error ? 'Retry import' : 'Import repositories'}</> : 'Retry dependency checks'}</button>}</div></div>
+  const missingTools = [!deps.git ? 'Git' : null, !deps.tokei ? 'Tokei' : null].filter((tool): tool is string => Boolean(tool))
+  return <div className="setup-wrap"><div className="setup-card"><div className="setup-icon"><img src={codetallyMark} alt="" aria-hidden="true" /></div><p className="eyebrow">First run</p><GitHubConnection deps={deps} login={login} checking={checking} onRetry={onRetry} /><div className="setup-checks">{checks.map(({ label, ok, icon: Icon }) => <div className={ok ? 'setup-check ok' : 'setup-check'} key={label}><span className="check-icon">{ok ? <Check size={15} /> : <Icon size={15} />}</span><span>{label}</span>{ok ? <span className="check-state">Ready</span> : <span className="check-state missing">Missing</span>}</div>)}</div>{missingTools.length ? <p className="github-missing-tools">Missing local dependencies: {missingTools.join(' and ')}. Install them, then use Check connection to verify again.</p> : null}{error && <div className="setup-error"><AlertCircle size={15} /> {error}</div>}{importing ? <div className="setup-import-note" role="status"><LoaderCircle size={15} className="spin" /><span>{importStep}</span><small>Follow progress from the Importing status in the header.</small></div> : ready ? <button className="button primary wide" onClick={onImport}><HardDrive size={16} /> {error ? 'Retry import' : 'Import repositories'}</button> : null}</div></div>
+}
+
+function EmptySelectionState({ onOpenSettings }: { onOpenSettings: () => void }) {
+  return <section className="empty-selection" aria-labelledby="empty-selection-heading"><div className="empty-selection-icon"><ListFilter size={20} /></div><p className="eyebrow">Portfolio paused</p><h1 id="empty-selection-heading">No repositories selected</h1><p>Choose repositories in Settings to bring them back to the dashboard. Nothing was deleted: your local history and repository cache are retained, and any in-flight work may finish.</p><button className="button primary" type="button" onClick={onOpenSettings}><Settings size={15} /> Open Settings</button></section>
 }
 
 function SummaryStrip({ metrics, partialLoc }: { metrics: ReturnType<typeof toDashboard>['metrics']; partialLoc: boolean }) {
@@ -563,9 +714,103 @@ function LocTooltip({ active, payload, label }: { active?: boolean; payload?: Ar
   return <div className="chart-tooltip"><strong>{exactDate(label)}</strong>{payload.map((entry) => <div key={entry.name} className="tooltip-row"><span><i style={{ background: entry.color }} />{entry.name}</span><b>{formatCount(Number(entry.value ?? 0))}</b></div>)}</div>
 }
 
-function RepositoryTable({ repositories, sort, direction, onSort, onSelect }: { repositories: Repository[]; sort: RepoSort; direction: 'asc' | 'desc'; onSort: (sort: RepoSort) => void; onSelect: (repo: Repository) => void }) {
+function RepositoryTable({ repositories, login, sort, direction, onSort, onSelect }: { repositories: Repository[]; login: string; sort: RepoSort; direction: 'asc' | 'desc'; onSort: (sort: RepoSort) => void; onSelect: (repo: Repository) => void }) {
+  const [hiddenIds, setHiddenIds] = useState<Set<string>>(() => new Set())
+  const visibleRepositories = repositories.filter((repo) => !hiddenIds.has(String(repositoryId(repo))))
+  const setVisible = (ids: string[], visible: boolean) => setHiddenIds((current) => {
+    const next = new Set(current)
+    for (const id of ids) { if (visible) next.delete(id); else next.add(id) }
+    return next
+  })
   const columns: Array<{ key: RepoSort; label: string; title: string }> = [{ key: 'name', label: 'Repository', title: 'Repository' }, { key: 'loc', label: 'Total', title: 'Total lines' }, { key: 'source', label: 'Source', title: 'Source lines' }, { key: 'tests', label: 'Tests', title: 'Test lines' }, { key: 'growth', label: '30d', title: '30-day change' }, { key: 'prs', label: 'PRs', title: 'Open pull requests' }, { key: 'issues', label: 'Issues', title: 'Open issues' }, { key: 'stars', label: 'Stars', title: 'GitHub stars' }, { key: 'forks', label: 'Forks', title: 'GitHub forks' }, { key: 'activity', label: 'Activity', title: 'Last activity' }]
-  return <section className="repos-panel"><div className="panel-heading table-heading"><div><p className="eyebrow">Inventory</p><h2>Repositories</h2></div><span className="small-note">{repositories.length} tracked</span></div>{repositories.length ? <div className="table-scroll"><table><thead><tr>{columns.map((column) => <th key={column.key}><button className={sort === column.key ? 'sort-button active' : 'sort-button'} title={`Sort by ${column.title}`} onClick={() => onSort(column.key)}>{column.label}{sort === column.key && (direction === 'asc' ? <ChevronUp size={13} /> : <ChevronDown size={13} />)}</button></th>)}</tr></thead><tbody>{repositories.map((repo) => { const isPrivate = repo.is_private ?? repo.isPrivate ?? false; return <tr key={String(repositoryId(repo))} onClick={() => onSelect(repo)} tabIndex={0} onKeyDown={(event) => { if (event.key === 'Enter') onSelect(repo) }}><td><div className="repo-cell"><span className="repo-glyph"><GitBranch size={14} /></span><span><strong>{repoName(repo)}</strong><small><span className="repo-meta-text">{repositoryLabel(repo)}{repo.primary_language ?? repo.primaryLanguage ? ` · ${repo.primary_language ?? repo.primaryLanguage}` : ''}</span><em className={`repo-visibility ${isPrivate ? 'private' : 'public'}`}>{isPrivate ? 'Private' : 'Public'}</em></small></span></div></td><td className="number-cell" title={!repoLocAvailable(repo) ? 'Lines are not available for this repository' : undefined}>{repoLocDisplay(repo, repoTotal(repo))}</td><td className="number-cell" title={!repoLocAvailable(repo) ? 'Lines are not available for this repository' : undefined}>{repoLocDisplay(repo, repoSource(repo))}</td><td className="number-cell" title={!repoLocAvailable(repo) ? 'Lines are not available for this repository' : undefined}>{repoLocDisplay(repo, repoTests(repo))}</td><td className={repoGrowthClass(repo)} title={repoGrowthTitle(repo)}>{repoChangeDisplay(repo)}</td><td className="number-cell">{formatCount(repoOpenPrs(repo))}</td><td className="number-cell">{formatCount(repoOpenIssues(repo))}</td><td className="number-cell">{formatCount(repoStars(repo))}</td><td className="number-cell">{formatCount(repoForks(repo))}</td><td><span className="relative" title={exactDate(repoActivity(repo))}>{relativeTime(repoActivity(repo))}</span></td></tr> })}</tbody></table></div> : <div className="empty-state"><GitBranch size={22} /><p>No repositories in the portfolio</p></div>}</section>
+  return <section className="repos-panel"><div className="panel-heading table-heading"><div><p className="eyebrow">Inventory</p><h2>Repositories</h2></div><TrackedRepositoryMenu repositories={repositories} login={login} hiddenIds={hiddenIds} onVisibilityChange={setVisible} onShowAll={() => setHiddenIds(new Set())} /></div>{visibleRepositories.length ? <div className="table-scroll"><table><thead><tr>{columns.map((column) => <th key={column.key}><button className={sort === column.key ? 'sort-button active' : 'sort-button'} title={`Sort by ${column.title}`} onClick={() => onSort(column.key)}>{column.label}{sort === column.key && (direction === 'asc' ? <ChevronUp size={13} /> : <ChevronDown size={13} />)}</button></th>)}</tr></thead><tbody>{visibleRepositories.map((repo) => { const isPrivate = repo.is_private ?? repo.isPrivate ?? false; return <tr key={String(repositoryId(repo))} onClick={() => onSelect(repo)} tabIndex={0} onKeyDown={(event) => { if (event.key === 'Enter') onSelect(repo) }}><td><div className="repo-cell"><span className="repo-glyph"><GitBranch size={14} /></span><span><strong>{repoName(repo)}</strong><small><span className="repo-meta-text">{repo.owner ?? repositoryLabel(repo).split('/')[0]}{repo.primary_language ?? repo.primaryLanguage ? ` · ${repo.primary_language ?? repo.primaryLanguage}` : ''}</span><em className={`repo-visibility ${isPrivate ? 'private' : 'public'}`}>{isPrivate ? 'Private' : 'Public'}</em></small></span></div></td><td className="number-cell" title={!repoLocAvailable(repo) ? 'Lines are not available for this repository' : undefined}>{repoLocDisplay(repo, repoTotal(repo))}</td><td className="number-cell" title={!repoLocAvailable(repo) ? 'Lines are not available for this repository' : undefined}>{repoLocDisplay(repo, repoSource(repo))}</td><td className="number-cell" title={!repoLocAvailable(repo) ? 'Lines are not available for this repository' : undefined}>{repoLocDisplay(repo, repoTests(repo))}</td><td className={repoGrowthClass(repo)} title={repoGrowthTitle(repo)}>{repoChangeDisplay(repo)}</td><td className="number-cell">{formatCount(repoOpenPrs(repo))}</td><td className="number-cell">{formatCount(repoOpenIssues(repo))}</td><td className="number-cell">{formatCount(repoStars(repo))}</td><td className="number-cell">{formatCount(repoForks(repo))}</td><td><span className="relative" title={exactDate(repoActivity(repo))}>{relativeTime(repoActivity(repo))}</span></td></tr> })}</tbody></table></div> : <div className="empty-state"><GitBranch size={22} /><p>{repositories.length ? 'All repositories hidden from this table' : 'No repositories in the portfolio'}</p></div>}</section>
+}
+
+function SelectionCheckbox({ label, checked, mixed = false, disabled = false, onChange }: { label: string; checked: boolean; mixed?: boolean; disabled?: boolean; onChange: (checked: boolean) => void }) {
+  const ref = useRef<HTMLInputElement>(null)
+  useEffect(() => { if (ref.current) ref.current.indeterminate = mixed }, [mixed])
+  return <input ref={ref} className="mac-checkbox" type="checkbox" aria-label={label} aria-checked={mixed ? 'mixed' : checked} checked={checked} disabled={disabled} onChange={(event) => onChange(event.target.checked)} />
+}
+
+function TrackedRepositoryMenu({ repositories, login, hiddenIds, onVisibilityChange, onShowAll }: { repositories: Repository[]; login: string; hiddenIds: Set<string>; onVisibilityChange: (ids: string[], visible: boolean) => void; onShowAll: () => void }) {
+  const [open, setOpen] = useState(false)
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({})
+  const containerRef = useRef<HTMLDivElement>(null)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const panelRef = useRef<HTMLDivElement>(null)
+  const [panelStyle, setPanelStyle] = useState<CSSProperties>({ position: 'fixed' })
+  useLayoutEffect(() => {
+    if (!open || !triggerRef.current) return
+    const anchor = triggerRef.current.getBoundingClientRect()
+    const margin = 12
+    const gap = 8
+    const width = Math.min(320, Math.max(0, window.innerWidth - margin * 2))
+    const below = Math.max(0, window.innerHeight - anchor.bottom - gap - margin)
+    const above = Math.max(0, anchor.top - gap - margin)
+    const upward = below < 420 && above > below
+    setPanelStyle({
+      position: 'fixed',
+      width,
+      left: Math.max(margin, Math.min(anchor.right - width, window.innerWidth - width - margin)),
+      right: 'auto',
+      top: upward ? 'auto' : anchor.bottom + gap,
+      bottom: upward ? window.innerHeight - anchor.top + gap : 'auto',
+      maxHeight: Math.min(420, upward ? above : below)
+    })
+  }, [open])
+  useEffect(() => {
+    if (!open) return
+    panelRef.current?.focus({ preventScroll: true })
+    const dismissOutside = (event: PointerEvent) => {
+      if (event.target instanceof Node && !containerRef.current?.contains(event.target)) setOpen(false)
+    }
+    const dismissOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { event.preventDefault(); setOpen(false); triggerRef.current?.focus() }
+    }
+    const dismissOnViewportChange = () => setOpen(false)
+    const dismissOnScroll = (event: Event) => {
+      if (event.target instanceof Node && panelRef.current?.contains(event.target)) return
+      setOpen(false)
+    }
+    window.addEventListener('resize', dismissOnViewportChange)
+    document.addEventListener('scroll', dismissOnScroll, true)
+    document.addEventListener('pointerdown', dismissOutside)
+    document.addEventListener('keydown', dismissOnEscape)
+    return () => { window.removeEventListener('resize', dismissOnViewportChange); document.removeEventListener('scroll', dismissOnScroll, true); document.removeEventListener('pointerdown', dismissOutside); document.removeEventListener('keydown', dismissOnEscape) }
+  }, [open])
+  const ownerOf = (repo: Repository) => repo.owner ?? repositoryLabel(repo).split('/')[0] ?? 'Unknown'
+  const personal = repositories.filter((repo) => ownerOf(repo).toLowerCase() === login.toLowerCase())
+  const companies = new Map<string, { owner: string; repositories: Repository[] }>()
+  for (const repo of repositories) {
+    const owner = ownerOf(repo)
+    if (owner.toLowerCase() === login.toLowerCase()) continue
+    const key = owner.toLowerCase()
+    const group = companies.get(key) ?? { owner, repositories: [] }
+    group.repositories.push(repo)
+    companies.set(key, group)
+  }
+  const groups = [
+    { key: 'personal', label: 'Personal repositories', repositories: personal },
+    ...[...companies.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([key, group]) => ({ key: `company-${key}`, label: `${group.owner} repositories`, repositories: group.repositories }))
+  ].filter((group) => group.repositories.length)
+  const visibleCount = repositories.filter((repo) => !hiddenIds.has(String(repositoryId(repo)))).length
+  return <div ref={containerRef} className={open ? 'tracked-repository-menu open' : 'tracked-repository-menu'} onBlur={(event) => { if (event.relatedTarget instanceof Node && !event.currentTarget.contains(event.relatedTarget)) setOpen(false) }}>
+    <button ref={triggerRef} type="button" aria-expanded={open} aria-haspopup="dialog" aria-controls="repository-view-picker" onClick={() => { if (!open) setExpanded({}); setOpen((current) => !current) }}><CircleDot size={13} /> {repositories.length} tracked <ChevronDown size={14} /></button>
+    {open && <div ref={panelRef} style={panelStyle} tabIndex={-1} role="dialog" aria-label="Show repositories in table" id="repository-view-picker" className="repo-picker tracked-repository-groups">
+      <div className="repo-picker-heading"><strong>Show in table</strong><span>{visibleCount} of {repositories.length} visible</span><button type="button" onClick={onShowAll} disabled={visibleCount === repositories.length}>Show all</button></div>
+      <p className="repo-picker-note">Tracking continues for hidden repositories.</p>
+      {groups.map((group) => {
+        const groupOpen = expanded[group.key] ?? false
+        const ids = group.repositories.map((repo) => String(repositoryId(repo)))
+        const selected = ids.filter((id) => !hiddenIds.has(id)).length
+        return <section className={groupOpen ? 'tracked-repository-group open' : 'tracked-repository-group'} key={group.key}>
+          <div className="repo-picker-group-header"><label><SelectionCheckbox label={`Show ${group.label} in table`} checked={selected === ids.length} mixed={selected > 0 && selected < ids.length} onChange={(visible) => onVisibilityChange(ids, visible)} /><span>{group.label}</span></label>
+            <button type="button" aria-label={`${groupOpen ? 'Collapse' : 'Expand'} ${group.label}`} aria-expanded={groupOpen} aria-controls={`view-${group.key}`} onClick={() => setExpanded((current) => ({ ...current, [group.key]: !groupOpen }))}><small>{selected}/{ids.length}</small><ChevronDown size={13} /></button></div>
+          {groupOpen && <div className="repo-picker-options" id={`view-${group.key}`}>{[...group.repositories].sort((left, right) => repoName(left).localeCompare(repoName(right))).map((repo) => <label className="repo-picker-option" key={String(repositoryId(repo))}><SelectionCheckbox label={`Show ${repositoryLabel(repo)} in table`} checked={!hiddenIds.has(String(repositoryId(repo)))} onChange={(visible) => onVisibilityChange([String(repositoryId(repo))], visible)} /><span>{repoName(repo)}</span></label>)}</div>}
+        </section>
+      })}
+    </div>}
+  </div>
 }
 
 function repoLocDisplay(repo: Repository, count: number): string {
@@ -599,10 +844,10 @@ function detailChangeValue(repo: Repository): string {
   return repoLocAvailable(repo) && repoBaseline30Available(repo) ? formatSigned(repoChange(repo), true) : '—'
 }
 
-function ActivitySidebar({ kind, state, repository, lockedRepository, repositories, prs, issues, onKind, onState, onRepository, onOpenUrl }: { kind: FeedKind; state: FeedState; repository: string; lockedRepository?: string | null; repositories: Repository[]; prs: PullRequest[]; issues: Issue[]; onKind: (kind: FeedKind) => void; onState: (state: FeedState) => void; onRepository: (repository: string) => void; onOpenUrl: (url: string | undefined) => void }) {
+function ActivitySidebar({ login, kind, state, repository, lockedRepository, repositories, prs, issues, onKind, onState, onRepository, onOpenUrl }: { login: string; kind: FeedKind; state: FeedState; repository: string; lockedRepository?: string | null; repositories: Repository[]; prs: PullRequest[]; issues: Issue[]; onKind: (kind: FeedKind) => void; onState: (state: FeedState) => void; onRepository: (repository: string) => void; onOpenUrl: (url: string | undefined) => void }) {
   const feed = kind === 'prs' ? prs : issues
   const selectedRepository = lockedRepository ?? repository
-  return <aside className="activity-sidebar"><div className="sidebar-sticky"><div className="sidebar-heading"><div><p className="eyebrow">Live feed</p><h2>Recent activity</h2></div><span className="feed-count">{feed.length}</span></div><div className="feed-tabs" role="tablist"><button className={kind === 'prs' ? 'active' : ''} onClick={() => onKind('prs')}>Pull requests</button><button className={kind === 'issues' ? 'active' : ''} onClick={() => onKind('issues')}>Issues</button></div><div className="feed-filters"><div className="filter-pills">{(kind === 'prs' ? (['all', 'open', 'merged'] as FeedState[]) : (['all', 'open', 'closed'] as FeedState[])).map((key) => <button key={key} className={state === key ? 'active' : ''} onClick={() => onState(key)}>{key[0].toUpperCase() + key.slice(1)}</button>)}</div><label className="select-wrap"><ListFilter size={14} /><select value={selectedRepository} disabled={Boolean(lockedRepository)} onChange={(event) => onRepository(event.target.value)} aria-label="Filter by repository"><option value="all">All repositories</option>{repositories.map((repo) => <option key={String(repositoryId(repo))} value={String(repositoryId(repo))}>{repositoryLabel(repo)}</option>)}</select><ChevronDown size={14} /></label></div></div><div className="feed-list">{feed.length ? feed.map((item) => kind === 'prs' ? <PullRequestItem key={`${activityRepo(item)}-${item.number}`} item={item} onOpen={() => onOpenUrl(item.url)} /> : <IssueItem key={`${activityRepo(item)}-${item.number}`} item={item} onOpen={() => onOpenUrl(item.url)} />) : <div className="feed-empty"><CircleDot size={21} /><p>No {kind === 'prs' ? 'pull requests' : 'issues'} match these filters</p><span>Activity will appear here after the next sync.</span></div>}</div></aside>
+  return <aside className="activity-sidebar"><div className="sidebar-sticky"><div className="sidebar-heading"><div><p className="eyebrow">Live feed</p><h2>Recent activity</h2></div><span className="feed-count">{feed.length}</span></div><div className="feed-tabs" role="tablist"><button className={kind === 'prs' ? 'active' : ''} onClick={() => onKind('prs')}>Pull requests</button><button className={kind === 'issues' ? 'active' : ''} onClick={() => onKind('issues')}>Issues</button></div><div className="feed-filters"><div className="filter-pills">{(kind === 'prs' ? (['all', 'open', 'merged'] as FeedState[]) : (['all', 'open', 'closed'] as FeedState[])).map((key) => <button key={key} className={state === key ? 'active' : ''} onClick={() => onState(key)}>{key[0].toUpperCase() + key.slice(1)}</button>)}</div><ActivityRepositoryMenu repositories={repositories} login={login} value={selectedRepository} disabled={Boolean(lockedRepository)} onChange={onRepository} /></div></div><div className="feed-list">{feed.length ? feed.map((item) => kind === 'prs' ? <PullRequestItem key={`${activityRepo(item)}-${item.number}`} item={item} onOpen={() => onOpenUrl(item.url)} /> : <IssueItem key={`${activityRepo(item)}-${item.number}`} item={item} onOpen={() => onOpenUrl(item.url)} />) : <div className="feed-empty"><CircleDot size={21} /><p>No {kind === 'prs' ? 'pull requests' : 'issues'} match these filters</p><span>Activity will appear here after the next sync.</span></div>}</div></aside>
 }
 
 function PullRequestItem({ item, onOpen }: { item: PullRequest; onOpen: () => void }) {
@@ -633,9 +878,5 @@ function ActivityList({ title, items, kind, onOpenUrl }: { title: string; items:
   return <section className="detail-list"><div className="list-title"><h3>{title}</h3><span>{items.length}</span></div>{items.length ? items.map((item) => kind === 'prs' ? <PullRequestItem item={item as PullRequest} key={item.number} onOpen={() => onOpenUrl(item.url)} /> : <IssueItem item={item as Issue} key={item.number} onOpen={() => onOpenUrl(item.url)} />) : <div className="detail-empty">No recent activity</div>}</section>
 }
 
-function SettingsDrawer({ settings, saving, error, onSave, onClose }: { settings: AppSettings; saving: boolean; error: string | null; onSave: (settings: AppSettings) => void; onClose: () => void }) {
-  const [draft, setDraft] = useState<AppSettings>(settings)
-  return <div className="drawer-backdrop" onClick={onClose}><aside className="settings-drawer" onClick={(event) => event.stopPropagation()}><div className="drawer-heading"><div><p className="eyebrow">Local settings</p><h2>Settings</h2></div><button className="icon-button" type="button" aria-label="Close settings" onClick={onClose}><X size={17} /></button></div><div className="setting-block"><span className="setting-label">Refresh cadence</span><p>Activity refreshes keep pull requests and issues current. Line counts run less often and can also run when a repository changes.</p><label className="setting-control"><span>Activity refresh</span><select value={draft.activity_refresh_minutes} onChange={(event) => setDraft((current) => ({ ...current, activity_refresh_minutes: Number(event.target.value) }))}><option value={1}>Every 1 minute</option><option value={2}>Every 2 minutes</option><option value={5}>Every 5 minutes</option><option value={10}>Every 10 minutes</option><option value={15}>Every 15 minutes</option></select></label><label className="setting-control"><span>Line count refresh</span><select value={draft.lines_refresh_minutes} onChange={(event) => setDraft((current) => ({ ...current, lines_refresh_minutes: Number(event.target.value) }))}><option value={30}>Every 30 minutes</option><option value={45}>Every 45 minutes</option><option value={60}>Every 60 minutes</option></select></label><label className="setting-checkbox"><input type="checkbox" checked={draft.refresh_lines_on_change} onChange={(event) => setDraft((current) => ({ ...current, refresh_lines_on_change: event.target.checked }))} /><span>Refresh line counts when code changes</span></label>{error && <div className="settings-error" role="alert"><AlertCircle size={14} /> {error}</div>}<button className="button primary wide settings-save" type="button" disabled={saving} onClick={() => onSave(draft)}>{saving ? <><LoaderCircle size={15} className="spin" /> Saving…</> : 'Save settings'}</button></div><div className="setting-block"><span className="setting-label">Data storage</span><p>Repositories, snapshots, and activity are stored in the application data directory.</p><span className="setting-value"><HardDrive size={14} /> Local SQLite cache</span></div><div className="setting-block"><span className="setting-label">Line classifier</span><p>Source and test paths follow the backend classifier rules. Per-repository overrides are stored locally by the backend when supported.</p><span className="setting-value"><GitBranch size={14} /> Backend-managed classification rules</span></div><div className="setting-block"><span className="setting-label">GitHub connection</span><p>The app uses your existing GitHub CLI login and never stores an authentication token.</p></div></aside></div>
-}
 
 export default App

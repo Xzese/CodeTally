@@ -222,10 +222,32 @@ export interface SyncResult {
   errors: string[]
 }
 
+export type MenuBarMetric = 'total_lines' | 'test_lines' | 'source_lines' | 'open_prs' | 'open_issues'
+
+export type RepositoryGroup = 'personal' | 'company'
+
+export interface RepositorySelection {
+  github_id: string
+  name_with_owner: string
+  owner: string
+  group: RepositoryGroup
+}
+
+export type ThemeMode = 'light' | 'dark' | 'system'
+
 export interface AppSettings {
+  theme_mode: ThemeMode
+  run_in_background: boolean
+  menu_bar_metric: MenuBarMetric
+  menu_bar_metrics: MenuBarMetric[]
+  show_menu_bar: boolean
   activity_refresh_minutes: number
   lines_refresh_minutes: number
   refresh_lines_on_change: boolean
+  include_forks_in_totals: boolean
+  include_personal_repositories: boolean
+  include_company_repositories: boolean
+  excluded_repository_ids: string[]
 }
 
 export interface ActivityFeed {
@@ -243,5 +265,6 @@ export interface HistoryRequest {
 export interface FeedRequest {
   kind: FeedKind
   repositoryId?: number | string | null
+  repositoryIds?: number[]
   state?: string
 }

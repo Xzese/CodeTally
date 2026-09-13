@@ -207,6 +207,18 @@ fi
 
 if [ "${1:-}" = "api" ] && [ "${2:-}" = "graphql" ]; then
   graphql_calls=$(grep -c '^api graphql' "$log" || true)
+  if [ "$mode" = "transient" ] && [ "$graphql_calls" -le 2 ]; then
+    printf '%s\n' 'operation timed out' >&2
+    exit 1
+  fi
+  if [ "$mode" = "retry-exhausted" ]; then
+    printf '%s\n' 'connection reset by peer' >&2
+    exit 1
+  fi
+  if [ "$mode" = "permanent" ]; then
+    printf '%s\n' 'permission denied' >&2
+    exit 1
+  fi
   if [ "$mode" = "rate-first" ] && [ "$graphql_calls" = "2" ]; then
     printf '%s\n' '{"data":{"rateLimit":{"remaining":0,"resetAt":"2099-01-01T00:00:00Z"}},"errors":[{"type":"RATE_LIMITED","message":"API rate limit exceeded"}]}'
     exit 0
@@ -321,6 +333,72 @@ fn paginated_activity_import_keeps_all_pages_and_preserves_server_counts() {
     assert_eq!(refreshed.open_pr_count, 17, "feed totals must not be replaced by page length");
     assert_eq!(refreshed.open_issue_count, 23, "feed totals must not be replaced by page length");
     assert!(fake.calls().matches("api graphql").count() >= 4, "both paginated feeds should be requested: {}", fake.calls());
+
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_file(database_path);
+}
+
+#[test]
+fn transient_graphql_failures_are_retried_before_activity_import_fails() {
+    let root = unique_root("transient-retry");
+    let fake = FakeGh::new("transient-retry", "transient", 1);
+    let repo = repository("repo-1", "one");
+    let (database, database_path) = seed_database(&root, std::slice::from_ref(&repo));
+    let stored = database.repositories().expect("repositories").remove(0);
+
+    let imported = fake.with_path(|| {
+        github_sync::sync_activity(&database, &stored).expect("transient GraphQL failures should be retried")
+    });
+    assert!(imported.2, "activity feeds should finish after transient retries");
+    assert_eq!(pull_requests(&database, stored.id).len(), 2);
+    assert_eq!(issues(&database, stored.id).len(), 2);
+    assert!(fake.calls().matches("api graphql").count() >= 6, "the fake should record two retries before the paginated feeds: {}", fake.calls());
+
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_file(database_path);
+}
+
+#[test]
+fn exhausted_transient_graphql_retries_preserve_cached_activity() {
+    let root = unique_root("retry-exhausted");
+    let mut fake = FakeGh::new("retry-exhausted", "pages", 1);
+    let repo = repository("repo-1", "one");
+    let (database, database_path) = seed_database(&root, std::slice::from_ref(&repo));
+    let stored = database.repositories().expect("repositories").remove(0);
+
+    fake.with_path(|| github_sync::sync_activity(&database, &stored).expect("seed activity cache"));
+    fake.scenario = "retry-exhausted:1".into();
+    fake.clear_calls();
+    let error = fake.with_path(|| {
+        github_sync::sync_activity(&database, &stored).expect_err("exhausted transient failures should be reported")
+    });
+    assert!(error.to_string().contains("connection reset by peer"));
+    assert_eq!(fake.calls().matches("api graphql").count(), 4, "retry exhaustion should make one initial request and three retries: {}", fake.calls());
+    assert_eq!(pull_requests(&database, stored.id).len(), 2, "cached pull requests should survive retry exhaustion");
+    assert_eq!(issues(&database, stored.id).len(), 2, "cached issues should survive retry exhaustion");
+
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_file(database_path);
+}
+
+#[test]
+fn permanent_graphql_failure_is_not_retried_and_preserves_cached_activity() {
+    let root = unique_root("permanent-error");
+    let mut fake = FakeGh::new("permanent-error", "pages", 1);
+    let repo = repository("repo-1", "one");
+    let (database, database_path) = seed_database(&root, std::slice::from_ref(&repo));
+    let stored = database.repositories().expect("repositories").remove(0);
+
+    fake.with_path(|| github_sync::sync_activity(&database, &stored).expect("seed activity cache"));
+    fake.scenario = "permanent:1".into();
+    fake.clear_calls();
+    let error = fake.with_path(|| {
+        github_sync::sync_activity(&database, &stored).expect_err("permanent failures should be reported")
+    });
+    assert!(error.to_string().contains("permission denied"));
+    assert_eq!(fake.calls().matches("api graphql").count(), 1, "permanent failures should not be retried: {}", fake.calls());
+    assert_eq!(pull_requests(&database, stored.id).len(), 2, "cached pull requests should survive a permanent failure");
+    assert_eq!(issues(&database, stored.id).len(), 2, "cached issues should survive a permanent failure");
 
     let _ = std::fs::remove_dir_all(root);
     let _ = std::fs::remove_file(database_path);
@@ -495,6 +573,72 @@ fn repository_discovery_is_reused_within_one_hour() {
     fake.clear_calls();
     fake.with_path(|| sync::sync_activity(&first_state).expect("cached discovery refresh"));
     assert!(!fake.calls().lines().any(|call| call.starts_with("repo list")), "fresh discovery should be reused for one hour: {}", fake.calls());
+
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_file(database_path);
+}
+
+#[test]
+fn excluded_repositories_are_skipped_by_activity_sync_but_selected_repositories_are_queried() {
+    let root = unique_root("repository-inclusion");
+    let fake = FakeGh::new("repository-inclusion", "pages", 2);
+    let repositories = [repository("repo-1", "one"), repository("repo-2", "two")];
+    let (database, database_path) = seed_database(&root, &repositories);
+    database
+        .set_metadata("github_login", "me")
+        .expect("cached GitHub login");
+    database
+        .set_metadata("github_discovered_at", &Utc::now().to_rfc3339())
+        .expect("cached discovery timestamp");
+    sync::save_app_settings(
+        &database,
+        &codetally_lib::models::AppSettings {
+            excluded_repository_ids: vec!["repo-2".into()],
+            ..codetally_lib::models::AppSettings::default()
+        },
+    )
+    .expect("save repository exclusion");
+    let state = state(database_path.clone(), &root);
+
+    let result = fake.with_path(|| sync::sync_activity(&state).expect("selected repository refresh"));
+    assert!(result.ok);
+    assert_eq!(result.activity_repositories_synced, 1);
+    let calls = fake.calls();
+    assert!(calls.lines().any(|call| call.contains("name=one")), "selected repository should reach GitHub: {calls}");
+    assert!(!calls.lines().any(|call| call.contains("name=two")), "excluded repository must not reach GitHub: {calls}");
+
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_file(database_path);
+}
+
+#[test]
+fn direct_sync_and_backfill_calls_reject_an_excluded_repository_before_scanning() {
+    let root = unique_root("disabled-direct-calls");
+    let fake = FakeGh::new("disabled-direct-calls", "pages", 1);
+    let repo = repository("repo-1", "one");
+    let (database, database_path) = seed_database(&root, std::slice::from_ref(&repo));
+    database
+        .set_metadata("github_login", "me")
+        .expect("cached GitHub login");
+    sync::save_app_settings(
+        &database,
+        &codetally_lib::models::AppSettings {
+            excluded_repository_ids: vec!["repo-1".into()],
+            ..codetally_lib::models::AppSettings::default()
+        },
+    )
+    .expect("save repository exclusion");
+    let stored = database.repositories().expect("repositories").remove(0);
+    let state = state(database_path.clone(), &root);
+
+    fake.with_path(|| {
+        let sync_error = sync::sync_one(&state, stored.id).expect_err("disabled sync should be rejected");
+        assert!(sync_error.to_string().contains("Repository is disabled in settings"));
+        let backfill_error = sync::backfill_one(&state, stored.id).expect_err("disabled backfill should be rejected");
+        assert!(backfill_error.to_string().contains("Repository is disabled in settings"));
+    });
+    let calls = fake.calls();
+    assert_eq!(calls.lines().filter(|call| call.contains("api graphql")).count(), 0, "disabled direct calls must not scan GitHub: {calls}");
 
     let _ = std::fs::remove_dir_all(root);
     let _ = std::fs::remove_file(database_path);
