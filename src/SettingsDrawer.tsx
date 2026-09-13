@@ -1,9 +1,10 @@
 import { createPortal } from 'react-dom'
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react'
-import { AlertCircle, Check, ChevronDown, ChevronUp, HardDrive, LoaderCircle, ChartNoAxesColumnIncreasing, CodeXml, FlaskConical, GitPullRequest, CircleDot, Sun, Moon, Monitor, X } from 'lucide-react'
-import { getDatabaseLocation, getRepositorySelection, revealDatabase } from './api'
-import type { AppSettings, MenuBarMetric, RepositorySelection, ThemeMode } from './types'
+import { AlertCircle, Check, ChevronDown, ChevronUp, ExternalLink, Github, HardDrive, LoaderCircle, ChartNoAxesColumnIncreasing, CodeXml, FlaskConical, GitPullRequest, CircleDot, Sun, Moon, Monitor, X } from 'lucide-react'
+import { checkForUpdates, getAppInfo, getDatabaseLocation, getRepositorySelection, installAppUpdate, openExternalUrl, revealDatabase, type AppInfo, type AppUpdate } from './api'
+import type { AppSettings, MenuBarMetric, RepositorySelection, ThemeMode, UpdateCheckInterval } from './types'
 import type { NormalizedMetrics } from './utils'
+import codetallyMark from './assets/codetally-mark.png'
 
 const METRICS: { key: MenuBarMetric; label: string; field: keyof NormalizedMetrics; suffix: string }[] = [
   { key: 'total_lines', label: 'Total lines', field: 'total_loc', suffix: 'lines' },
@@ -21,6 +22,12 @@ export function menuBarTitle(metric: MenuBarMetric, metrics: NormalizedMetrics):
 }
 
 const THEME_OPTIONS: { key: ThemeMode; label: string; icon: typeof Sun }[] = [{ key: 'light', label: 'Light', icon: Sun }, { key: 'dark', label: 'Dark', icon: Moon }, { key: 'system', label: 'Follow system', icon: Monitor }]
+const UPDATE_CHECK_OPTIONS: { key: UpdateCheckInterval; label: string }[] = [
+  { key: 'daily', label: 'Daily' },
+  { key: 'weekly', label: 'Weekly' },
+  { key: 'monthly', label: 'Monthly' },
+  { key: 'never', label: 'Never' }
+]
 const METRIC_ICONS = { total_lines: ChartNoAxesColumnIncreasing, source_lines: CodeXml, test_lines: FlaskConical, open_prs: GitPullRequest, open_issues: CircleDot }
 
 function Help({ label, children }: { label: string; children: ReactNode }) {
@@ -49,7 +56,7 @@ function SectionHeading({ title, help }: { title: string; help: string }) {
   return <div className="settings-section-heading"><h3>{title}</h3><Help label={title}>{help}</Help></div>
 }
 
-function Interval({ label, value, options, onChange }: { label: string; value: number; options: number[]; onChange: (value: number) => void }) {
+function Interval({ label, value, options, minMinutes = 1, help, onChange }: { label: string; value: number; options: number[]; minMinutes?: number; help: string; onChange: (value: number) => void }) {
   const [custom, setCustom] = useState(!options.includes(value))
   const [draft, setDraft] = useState(String(value))
   const [error, setError] = useState<string | null>(null)
@@ -61,8 +68,8 @@ function Interval({ label, value, options, onChange }: { label: string; value: n
     setError(null)
   }, [value])
   const commit = () => {
-    if (!/^\d+$/.test(draft) || Number(draft) < 1 || Number(draft) > 1440) {
-      setError('Enter a whole number from 1 to 1440 minutes.')
+    if (!/^\d+$/.test(draft) || Number(draft) < minMinutes || Number(draft) > 1440) {
+      setError(`Enter a whole number between ${minMinutes} and 1440 minutes.`)
       return
     }
     setError(null)
@@ -71,7 +78,7 @@ function Interval({ label, value, options, onChange }: { label: string; value: n
     if (minutes !== value) onChange(minutes)
   }
   const customId = `${errorId}-custom`
-  const customLabel = `Custom ${label === 'Activity refresh' ? 'activity refresh' : 'line count refresh'} minutes`
+  const customLabel = `Custom minutes for ${label.toLowerCase()}`
   const selectCustom = () => {
     setCustom(true)
     setDraft(String(value))
@@ -81,7 +88,11 @@ function Interval({ label, value, options, onChange }: { label: string; value: n
       inputRef.current?.select()
     })
   }
-  return <div className="settings-row settings-interval-row"><div className="settings-row-label">{label} <span className="settings-row-unit">(min)</span><Help label={label}>{label === 'Activity refresh' ? 'Checks pull requests and issues while CodeTally is running.' : 'Recounts source and test lines. Longer intervals use fewer resources.'} Choose Custom for any whole number from 1 to 1440; changes apply when you leave the field or press Enter.</Help></div><div className="settings-interval-control"><div className="settings-interval-options" role="radiogroup" aria-label={label}>{options.map((minutes) => <label key={minutes} className={!custom && value === minutes ? 'selected' : ''}><input type="radio" name={label} aria-label={`${minutes} ${minutes === 1 ? 'minute' : 'minutes'}`} checked={!custom && value === minutes} onChange={() => { setCustom(false); setError(null); setDraft(String(minutes)); if (minutes !== value) onChange(minutes) }} /><span>{minutes}</span></label>)}<div className={`settings-custom-option${custom ? ' selected' : ''}`} onClick={() => { if (!custom) selectCustom() }}><input id={customId} type="radio" name={label} aria-label="Custom" checked={custom} onChange={selectCustom} />{custom ? <input ref={inputRef} className="settings-inline-custom" type="text" inputMode="numeric" aria-label={customLabel} aria-invalid={!!error} aria-describedby={error ? errorId : undefined} value={draft} onClick={(event) => event.stopPropagation()} onChange={(event) => { setDraft(event.target.value); setError(null) }} onBlur={commit} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); commit() } }} /> : <label htmlFor={customId}>Custom</label>}</div></div>{error && <span id={errorId} role="alert" className="settings-interval-error">{error}</span>}</div></div>
+  return <div className="settings-row settings-interval-row"><div className="settings-row-label">{label} <span className="settings-row-unit">(min)</span><Help label={label}>{help} Choose Custom for any whole number from {minMinutes} to 1440 minutes. Your change saves when you leave the field or press Enter.</Help></div><div className="settings-interval-control"><div className="settings-interval-options" role="radiogroup" aria-label={label}>{options.map((minutes) => <label key={minutes} className={!custom && value === minutes ? 'selected' : ''}><input type="radio" name={label} aria-label={`${minutes} ${minutes === 1 ? 'minute' : 'minutes'}`} checked={!custom && value === minutes} onChange={() => { setCustom(false); setError(null); setDraft(String(minutes)); if (minutes !== value) onChange(minutes) }} /><span>{minutes}</span></label>)}<div className={`settings-custom-option${custom ? ' selected' : ''}`} onClick={() => { if (!custom) selectCustom() }}><input id={customId} type="radio" name={label} aria-label="Custom" checked={custom} onChange={selectCustom} />{custom ? <input ref={inputRef} className="settings-inline-custom" type="text" inputMode="numeric" aria-label={customLabel} aria-invalid={!!error} aria-describedby={error ? errorId : undefined} value={draft} onClick={(event) => event.stopPropagation()} onChange={(event) => { setDraft(event.target.value); setError(null) }} onBlur={commit} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); commit() } }} /> : <label htmlFor={customId}>Custom</label>}</div></div>{error && <span id={errorId} role="alert" className="settings-interval-error">{error}</span>}</div></div>
+}
+
+function UpdateCheckIntervalControl({ value, onChange }: { value: UpdateCheckInterval; onChange: (value: UpdateCheckInterval) => void }) {
+  return <div className="settings-row settings-update-interval-row"><div className="settings-row-label">App update checks<Help label="App update checks">Check for new app versions automatically. Choose Never to check only when you select Check for updates.</Help></div><div className="settings-update-interval-options" role="radiogroup" aria-label="App update checks">{UPDATE_CHECK_OPTIONS.map((option) => <label key={option.key} className={value === option.key ? 'selected' : ''}><input type="radio" name="app-update-check-interval" aria-label={option.label} checked={value === option.key} onChange={() => onChange(option.key)} /><span>{option.label}</span></label>)}</div></div>
 }
 
 type Props = { settings: AppSettings; loaded: boolean; metrics: NormalizedMetrics; saving: boolean; error: string | null; onChange: (update: (current: AppSettings) => AppSettings) => void; onRetry: () => void; onClose: () => void }
@@ -103,6 +114,16 @@ export default function SettingsDrawer({ settings, loaded, metrics, saving, erro
   const [databaseLocationLoading, setDatabaseLocationLoading] = useState(true)
   const [databaseLocationError, setDatabaseLocationError] = useState<string | null>(null)
   const [databaseRevealError, setDatabaseRevealError] = useState<string | null>(null)
+  const [appInfo, setAppInfo] = useState<AppInfo | null>(null)
+  const [appInfoLoading, setAppInfoLoading] = useState(true)
+  const [appInfoError, setAppInfoError] = useState<string | null>(null)
+  const [repositoryLinkError, setRepositoryLinkError] = useState<string | null>(null)
+  const [appUpdate, setAppUpdate] = useState<AppUpdate | null>(null)
+  const [appUpdateLoading, setAppUpdateLoading] = useState(true)
+  const [appUpdateError, setAppUpdateError] = useState<string | null>(null)
+  const [appUpdateInstalling, setAppUpdateInstalling] = useState(false)
+  const [releaseLinkError, setReleaseLinkError] = useState<string | null>(null)
+  const appUpdateCheckStarted = useRef(false)
 
   const loadInventory = useCallback(async () => {
     setInventoryLoading(true)
@@ -137,6 +158,42 @@ export default function SettingsDrawer({ settings, loaded, metrics, saving, erro
     void loadDatabaseLocation()
   }, [loadDatabaseLocation])
 
+  const loadAppInfo = useCallback(async () => {
+    setAppInfoLoading(true)
+    setAppInfoError(null)
+    try {
+      setAppInfo(await getAppInfo())
+    } catch (reason) {
+      setAppInfoError(reason instanceof Error ? reason.message : String(reason))
+    } finally {
+      setAppInfoLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    void loadAppInfo()
+  }, [loadAppInfo])
+
+  const checkAppUpdate = useCallback(async () => {
+    setAppUpdateLoading(true)
+    setAppUpdateError(null)
+    setReleaseLinkError(null)
+    setAppUpdate(null)
+    try {
+      setAppUpdate(await checkForUpdates())
+    } catch {
+      setAppUpdateError('Couldn’t check for updates. Check your connection and GitHub sign-in, then try again.')
+    } finally {
+      setAppUpdateLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (appUpdateCheckStarted.current) return
+    appUpdateCheckStarted.current = true
+    void checkAppUpdate()
+  }, [checkAppUpdate])
+
   const handleRevealDatabase = async (event: MouseEvent<HTMLAnchorElement>) => {
     event.preventDefault()
     setDatabaseRevealError(null)
@@ -144,6 +201,28 @@ export default function SettingsDrawer({ settings, loaded, metrics, saving, erro
       if (!await revealDatabase()) throw new Error('The database could not be revealed.')
     } catch (reason) {
       setDatabaseRevealError(reason instanceof Error ? reason.message : String(reason))
+    }
+  }
+
+  const handleOpenRepository = async (event: MouseEvent<HTMLAnchorElement>) => {
+    event.preventDefault()
+    if (!appInfo?.repository_url) return
+    setRepositoryLinkError(null)
+    try {
+      await openExternalUrl(appInfo.repository_url)
+    } catch (reason) {
+      setRepositoryLinkError(reason instanceof Error ? reason.message : String(reason))
+    }
+  }
+
+  const handleInstallUpdate = async () => {
+    setAppUpdateInstalling(true)
+    setReleaseLinkError(null)
+    try {
+      await installAppUpdate()
+    } catch (reason) {
+      setReleaseLinkError(reason instanceof Error ? reason.message : String(reason))
+      setAppUpdateInstalling(false)
     }
   }
 
@@ -197,7 +276,7 @@ export default function SettingsDrawer({ settings, loaded, metrics, saving, erro
         {repositories.length ? [...repositories].sort((left, right) => left.name_with_owner.localeCompare(right.name_with_owner)).map((repository) => <label className="repository-option" key={repository.github_id}>
           <input className="mac-checkbox" type="checkbox" aria-label={repository.name_with_owner} checked={isRepositoryIncluded(repository)} disabled={!enabled} onChange={(event) => setRepositoryIncluded(repository, event.target.checked)} />
           <span><small>{repository.owner}</small><strong>{repository.name_with_owner.split('/').slice(1).join('/') || repository.name_with_owner}</strong></span>
-        </label>) : <span className="repository-options-empty">No repositories discovered in this group.</span>}
+        </label>) : <span className="repository-options-empty">No repositories found here.</span>}
       </div>}
     </section>
   }
@@ -226,30 +305,43 @@ export default function SettingsDrawer({ settings, loaded, metrics, saving, erro
       else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus() }
     }
   }}>
-    <div className="drawer-heading"><div><p className="eyebrow">Make it yours</p><h2>Settings</h2><span className="settings-status" role="status">{!loaded ? error ? 'Preferences unavailable' : 'Loading preferences…' : saving ? <><LoaderCircle size={12} className="spin" /> Saving…</> : error ? 'Changes not saved' : <><Check size={12} /> Changes save automatically</>}</span></div><button className="icon-button" type="button" aria-label="Close settings" onClick={onClose}><X size={17} /></button></div>
-    {error && <div className="settings-error" role="alert"><AlertCircle size={14} /><span>{error}</span><button className="button secondary compact" type="button" onClick={onRetry}>Retry settings</button></div>}
+    <div className="drawer-heading"><div><p className="eyebrow">Make it yours</p><h2>Settings</h2><span className="settings-status" role="status">{!loaded ? error ? 'Settings unavailable' : 'Loading settings…' : saving ? <><LoaderCircle size={12} className="spin" /> Saving…</> : error ? 'Changes couldn’t be saved' : <><Check size={12} /> Changes save automatically</>}</span></div><button className="icon-button" type="button" aria-label="Close settings" onClick={onClose}><X size={17} /></button></div>
+    {error && <div className="settings-error" role="alert"><AlertCircle size={14} /><span>{error}</span><button className="button secondary compact" type="button" onClick={onRetry}>Retry</button></div>}
     <fieldset className="settings-controls" disabled={!loaded}>
-    <section className="settings-section" id="settings-appearance"><SectionHeading title="Appearance & menu bar" help="Choose one or more portfolio metrics for the macOS menu bar. Each has its own icon. Hover or focus an option to preview adding it without saving. Values come from your locally cached dashboard." />
+    <section className="settings-section" id="settings-appearance"><SectionHeading title="Appearance & menu bar" help="Choose the metrics you want to see in the macOS menu bar. Hover or focus a metric to preview it. Values come from your saved dashboard data." />
       <div className="settings-theme-options" role="radiogroup" aria-label="Appearance">{THEME_OPTIONS.map((option) => { const Icon = option.icon; return <label key={option.key} className={`settings-theme-option${settings.theme_mode === option.key ? ' selected' : ''}`}><input type="radio" name="appearance" aria-label={option.label} checked={settings.theme_mode === option.key} onChange={() => onChange((current) => ({ ...current, theme_mode: option.key }))} /><Icon size={18} aria-hidden="true" /><span>{option.label}</span></label> })}</div>
-      <div className="settings-row settings-menu-visibility"><div className="settings-row-label">Show in menu bar<Help label="Show in menu bar">Show selected metrics in the macOS menu bar. If hidden, reopen CodeTally from Applications or the Dock.</Help></div><input className="mac-switch" role="switch" type="checkbox" aria-label="Show CodeTally in the menu bar" checked={settings.show_menu_bar} onChange={(event) => { const checked = event.target.checked; onChange((current) => ({ ...current, show_menu_bar: checked })) }} /></div>
+      <div className="settings-row settings-menu-visibility"><div className="settings-row-label">Show in menu bar<Help label="Show in menu bar">Show your selected metrics in the macOS menu bar. If you hide them, open CodeTally from Applications or the Dock.</Help></div><input className="mac-switch" role="switch" type="checkbox" aria-label="Show CodeTally in the menu bar" checked={settings.show_menu_bar} onChange={(event) => { const checked = event.target.checked; onChange((current) => ({ ...current, show_menu_bar: checked })) }} /></div>
       <div className="settings-menu-preview"><div className="settings-menu-preview-strip"><span className="settings-preview-value" aria-label="Menu bar preview">{previewMetrics.map((option, index) => { const Icon = METRIC_ICONS[option.key]; return <span className="settings-preview-metric" key={option.key}>{index > 0 && <span aria-hidden="true"> · </span>}<Icon size={16} aria-hidden="true" />{menuBarTitle(option.key, metrics)}</span> })}</span></div><span className="settings-preview-caption">{exploratoryMetric && !selectedMetrics.includes(exploratoryMetric) ? 'Preview · select to add' : 'Your menu bar'}</span></div>
       <div className="settings-metric-options" role="group" aria-label="Menu bar metrics">{METRICS.map((option) => { const selected = selectedMetrics.includes(option.key); const Icon = METRIC_ICONS[option.key]; return <label key={option.key} className={`settings-metric-option${selected ? ' selected' : ''}`} onMouseEnter={() => setHoverMetric(option.key)} onMouseLeave={() => setHoverMetric(null)}><input type="checkbox" aria-label={option.label} checked={selected} aria-disabled={selected && selectedMetrics.length === 1} onFocus={() => setFocusMetric(option.key)} onBlur={() => setFocusMetric(null)} onChange={() => toggleMetric(option.key)} /><Icon className="settings-metric-icon" size={18} aria-hidden="true" /><span className="settings-metric-copy"><strong>{option.label}</strong><small>{menuBarTitle(option.key, metrics)}</small></span><span className="settings-metric-indicator" aria-hidden="true">{selected && <Check size={12} />}</span></label> })}</div>
-      <p className="settings-metric-hint">Select one or more metrics. Keep at least one selected.</p>
+      <p className="settings-metric-hint">Choose the metrics you want to see. Keep at least one selected.</p>
     </section>
-    <section className="settings-section" id="settings-refresh"><SectionHeading title="Background & refresh" help="Scheduled refreshes continue while CodeTally is running. Background operation keeps the app running when its window closes; it does not launch at login or keep your Mac awake." />
-      <div className="settings-row"><div className="settings-row-label">Run in background<Help label="Run in background">Close the window and keep refreshing. Reopen or quit CodeTally from the menu bar.</Help></div><input className="mac-switch" role="switch" type="checkbox" aria-label="Keep running in the background when the window closes" checked={settings.run_in_background} onChange={(event) => { const checked = event.target.checked; onChange((current) => ({ ...current, run_in_background: checked })) }} /></div>
-      <Interval label="Activity refresh" value={settings.activity_refresh_minutes} options={[15, 30, 60, 120]} onChange={(value) => onChange((current) => ({ ...current, activity_refresh_minutes: value }))} />
-      <Interval label="Line count refresh" value={settings.lines_refresh_minutes} options={[60, 120, 240, 480]} onChange={(value) => onChange((current) => ({ ...current, lines_refresh_minutes: value }))} />
-      <div className="settings-row"><div className="settings-row-label">Refresh on code changes<Help label="Refresh on code changes">Also recount a repository when GitHub reports new pushed code during an activity refresh.</Help></div><input className="mac-switch" role="switch" type="checkbox" aria-label="Refresh line counts when code changes" checked={settings.refresh_lines_on_change} onChange={(event) => { const checked = event.target.checked; onChange((current) => ({ ...current, refresh_lines_on_change: checked })) }} /></div>
+    <section className="settings-section" id="settings-refresh"><SectionHeading title="Background & refresh" help="Choose when CodeTally refreshes your GitHub activity and line counts." />
+      <div className="settings-row"><div className="settings-row-label">Run in background<Help label="Run in background">Keep CodeTally running from the menu bar without a Dock icon.</Help></div><input className="mac-switch" role="switch" type="checkbox" aria-label="Keep running in the background when the window closes" checked={settings.run_in_background} onChange={(event) => { const checked = event.target.checked; onChange((current) => ({ ...current, run_in_background: checked })) }} /></div>
+      <UpdateCheckIntervalControl value={settings.update_check_interval} onChange={(value) => onChange((current) => ({ ...current, update_check_interval: value }))} />
+      <Interval label="Pull requests and issues" value={settings.activity_refresh_minutes} options={[15, 30, 60, 120]} minMinutes={15} help="Choose how often CodeTally refreshes pull requests and issues." onChange={(value) => onChange((current) => ({ ...current, activity_refresh_minutes: value }))} />
+      <Interval label="Lines of Code Refresh" value={settings.lines_refresh_minutes} options={[360, 720, 1440]} help="Choose how often CodeTally updates line counts for changed repositories." onChange={(value) => onChange((current) => ({ ...current, lines_refresh_minutes: value }))} />
+      <div className="settings-row"><div className="settings-row-label">Refresh on code changes<Help label="Refresh on code changes">Update line counts when a repository changes.</Help></div><input className="mac-switch" role="switch" type="checkbox" aria-label="Refresh Lines of Code when code changes" checked={settings.refresh_lines_on_change} onChange={(event) => { const checked = event.target.checked; onChange((current) => ({ ...current, refresh_lines_on_change: checked })) }} /></div>
     </section>
-    <section className="settings-section repository-selection-block" id="settings-repositories"><SectionHeading title="Repositories" help="Deselected repositories disappear from the dashboard and future refreshes. Their local cache and history stay on this device. Work already in progress may finish." />
-      <div className="settings-row"><div className="settings-row-label">Include forks in totals<Help label="Include forks in totals">Count selected forks in portfolio line totals and history. Off by default.</Help></div><input className="mac-switch" role="switch" type="checkbox" aria-label="Include forks in line totals" checked={settings.include_forks_in_totals} onChange={(event) => { const checked = event.target.checked; onChange((current) => ({ ...current, include_forks_in_totals: checked })) }} /></div>
-      {inventoryLoading ? <div className="repository-inventory-state" role="status"><LoaderCircle size={14} className="spin" /> Loading repositories…</div> : inventoryError ? <div className="repository-inventory-state error" role="alert"><AlertCircle size={14} /><span>{inventoryError}</span><button className="button secondary compact" type="button" onClick={() => void loadInventory()}>Retry</button></div> : <div className="repository-groups">{renderGroup('personal', 'Personal repositories', personalRepositories, true)}<label className="setting-checkbox repository-company-switch"><input className="mac-switch" role="switch" type="checkbox" checked={settings.include_company_repositories} onChange={(event) => { const checked = event.target.checked; onChange((current) => ({ ...current, include_company_repositories: checked })) }} /><span>Track company repositories</span></label>{[...organizations.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([key, group]) => renderGroup(`company-${key}`, `${group.owner} repositories`, group.repositories))}</div>}
+    <section className="settings-section repository-selection-block" id="settings-repositories"><SectionHeading title="Repositories" help="Choose which repositories to include. Repositories you leave out won’t appear in the dashboard or refresh, but their saved data stays on this Mac." />
+      <div className="settings-row"><div className="settings-row-label">Include forks in totals<Help label="Include forks in totals">Include selected forks when counting Lines of Code. This is off by default.</Help></div><input className="mac-switch" role="switch" type="checkbox" aria-label="Include forks in line totals" checked={settings.include_forks_in_totals} onChange={(event) => { const checked = event.target.checked; onChange((current) => ({ ...current, include_forks_in_totals: checked })) }} /></div>
+      {inventoryLoading ? <div className="repository-inventory-state" role="status"><LoaderCircle size={14} className="spin" /> Loading repositories…</div> : inventoryError ? <div className="repository-inventory-state error" role="alert"><AlertCircle size={14} /><span>{inventoryError}</span><button className="button secondary compact" type="button" onClick={() => void loadInventory()}>Retry</button></div> : <div className="repository-groups">{renderGroup('personal', 'Personal repositories', personalRepositories, true)}<label className="setting-checkbox repository-company-switch"><input className="mac-switch" role="switch" type="checkbox" checked={settings.include_company_repositories} onChange={(event) => { const checked = event.target.checked; onChange((current) => ({ ...current, include_company_repositories: checked })) }} /><span>Include company repositories</span></label>{[...organizations.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([key, group]) => renderGroup(`company-${key}`, `${group.owner} repositories`, group.repositories))}</div>}
     </section>
     </fieldset>
-    <section className="settings-section" id="settings-storage"><SectionHeading title="Storage & connection" help="Repository data, history, and preferences stay in this local SQLite database. Authentication uses your existing GitHub CLI session; CodeTally never stores a token." />
-      <span className="setting-label">SQLite database</span>{databaseLocationLoading ? <div className="setting-value setting-status" role="status"><LoaderCircle size={14} className="spin" /> Loading SQLite location…</div> : databaseLocationError ? <div className="settings-error storage-error" role="alert"><AlertCircle size={14} /><span>{databaseLocationError}</span><button className="button secondary compact" type="button" onClick={() => void loadDatabaseLocation()}>Retry</button></div> : databaseLocation ? <a className="setting-value storage-link" href={databaseLocation} title="Reveal SQLite database in Finder" onClick={handleRevealDatabase}><HardDrive size={14} /><span>{databaseLocation}</span></a> : <div className="setting-value setting-status"><AlertCircle size={14} /> SQLite location unavailable</div>}{databaseRevealError && <div className="settings-error storage-error" role="alert"><AlertCircle size={14} /><span>{databaseRevealError}</span></div>}
-      <details className="settings-connection"><summary>GitHub connection</summary><div className="github-command-list"><div className="github-command"><code>gh --version</code><span>Check the GitHub CLI installation.</span></div><div className="github-command"><code>gh auth status</code><span>Check the authentication session.</span></div><div className="github-command"><code>gh api user --jq .login</code><span>Show the signed-in username.</span></div></div></details>
+    <section className="settings-section" id="settings-storage"><SectionHeading title="Storage & connection" help="Your repository data, history, and preferences are stored on this Mac. CodeTally uses your existing GitHub sign-in and never stores your token." />
+      <span className="setting-label">Data location</span>{databaseLocationLoading ? <div className="setting-value setting-status" role="status"><LoaderCircle size={14} className="spin" /> Loading location…</div> : databaseLocationError ? <div className="settings-error storage-error" role="alert"><AlertCircle size={14} /><span>{databaseLocationError}</span><button className="button secondary compact" type="button" onClick={() => void loadDatabaseLocation()}>Retry</button></div> : databaseLocation ? <a className="setting-value storage-link" href={databaseLocation} title="Show data location in Finder" onClick={handleRevealDatabase}><HardDrive size={14} /><span>{databaseLocation}</span></a> : <div className="setting-value setting-status"><AlertCircle size={14} /> Data location unavailable</div>}{databaseRevealError && <div className="settings-error storage-error" role="alert"><AlertCircle size={14} /><span>{databaseRevealError}</span></div>}
+      <details className="settings-connection"><summary>GitHub connection details</summary><div className="github-command-list"><div className="github-command"><code>gh --version</code><span>Check that GitHub CLI is installed.</span></div><div className="github-command"><code>gh auth status</code><span>Check your GitHub sign-in.</span></div><div className="github-command"><code>gh api user --jq .login</code><span>Show the GitHub account in use.</span></div></div></details>
+    </section>
+    <section className="settings-section settings-about" id="settings-about" aria-labelledby="settings-about-heading">
+      <div className="settings-section-heading"><h3 id="settings-about-heading">About CodeTally</h3></div>
+      {appInfoLoading ? <div className="settings-about-state" role="status"><LoaderCircle size={14} className="spin" /> Loading app details…</div> : appInfoError ? <div className="settings-about-state error" role="alert"><AlertCircle size={14} /><span>{appInfoError}</span><button className="button secondary compact" type="button" onClick={() => void loadAppInfo()}>Retry</button></div> : appInfo ? <div className="settings-about-content">
+        <div className="settings-about-intro"><img src={codetallyMark} alt="" aria-hidden="true" /><div><strong>{appInfo.name}</strong><p>See your GitHub repositories, activity, and code history in one place.</p></div></div>
+        <dl className="settings-about-details"><div><dt>Version</dt><dd>{appInfo.version}</dd></div><div><dt>App identifier</dt><dd>{appInfo.identifier}</dd></div><div><dt>Latest version</dt><dd>{appUpdateLoading ? 'Checking…' : appUpdate?.update_available ? `${appUpdate.latest_version} available` : appUpdate ? appUpdate.latest_version : 'Unavailable'}</dd></div></dl>
+        {appUpdateError && <div className="settings-about-state error" role="alert"><AlertCircle size={14} /><span>{appUpdateError}</span><button className="button secondary compact" type="button" onClick={() => void checkAppUpdate()}>Try again</button></div>}
+        {appUpdate && <div className="settings-about-update-actions">{appUpdate.update_available && <button type="button" className="button primary compact" disabled={appUpdateInstalling} onClick={() => void handleInstallUpdate()}>{appUpdateInstalling ? <LoaderCircle size={14} className="spin" /> : <ExternalLink size={14} />} {appUpdateInstalling ? 'Installing…' : 'Download update'}</button>}<button type="button" className="button secondary compact" disabled={appUpdateInstalling || appUpdateLoading} onClick={() => void checkAppUpdate()}>Check for updates</button></div>}
+        {releaseLinkError && <div className="settings-error settings-about-link-error" role="alert"><AlertCircle size={14} /><span>{releaseLinkError}</span></div>}
+        {appInfo.repository_url && <a className="button secondary compact settings-about-repository" href={appInfo.repository_url} onClick={handleOpenRepository}><Github size={14} /> View on GitHub <ExternalLink size={12} /></a>}
+        {repositoryLinkError && <div className="settings-error settings-about-link-error" role="alert"><AlertCircle size={14} /><span>{repositoryLinkError}</span></div>}
+      </div> : null}
     </section>
   </aside></div>
 }

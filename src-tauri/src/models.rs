@@ -111,6 +111,10 @@ pub struct PullRequest {
     pub merged_at: Option<String>,
     pub closed_at: Option<String>,
     pub url: String,
+    #[serde(default)]
+    pub author: Option<String>,
+    #[serde(default)]
+    pub assignees: Vec<String>,
     pub additions: i64,
     pub deletions: i64,
     pub changed_files: i64,
@@ -152,6 +156,14 @@ pub struct Dashboard {
     pub history: Vec<HistoryPoint>,
     pub last_sync_at: Option<String>,
     pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppInfo {
+    pub name: String,
+    pub version: String,
+    pub identifier: String,
+    pub repository_url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -208,11 +220,35 @@ pub enum ThemeMode {
     System,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityRelationship {
+    Everyone,
+    #[default]
+    Author,
+    Assignee,
+    AuthorOrAssignee,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateCheckInterval {
+    #[default]
+    Daily,
+    Weekly,
+    Monthly,
+    Never,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     #[serde(default)]
     pub theme_mode: ThemeMode,
     pub activity_refresh_minutes: i64,
+    #[serde(default)]
+    pub activity_relationship: ActivityRelationship,
+    #[serde(default)]
+    pub update_check_interval: UpdateCheckInterval,
     pub lines_refresh_minutes: i64,
     pub refresh_lines_on_change: bool,
     #[serde(default = "default_run_in_background")]
@@ -255,7 +291,9 @@ impl Default for AppSettings {
         Self {
             theme_mode: ThemeMode::default(),
             activity_refresh_minutes: 30,
-            lines_refresh_minutes: 120,
+            activity_relationship: ActivityRelationship::default(),
+            update_check_interval: UpdateCheckInterval::default(),
+            lines_refresh_minutes: 1440,
             refresh_lines_on_change: true,
             run_in_background: true,
             menu_bar_metric: MenuBarMetric::default(),
@@ -362,6 +400,10 @@ pub struct GithubPullRequestJson {
     #[serde(rename = "closedAt")]
     pub closed_at: Option<String>,
     pub url: String,
+    #[serde(default)]
+    pub author: Option<GithubActor>,
+    #[serde(default)]
+    pub assignees: Vec<GithubActor>,
     pub additions: Option<i64>,
     pub deletions: Option<i64>,
     #[serde(rename = "changedFiles")]

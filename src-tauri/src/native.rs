@@ -1,5 +1,5 @@
 //! Native lifecycle and scheduling remain active when the dashboard is hidden.
-use crate::models::{DashboardTotals, MenuBarMetric};
+use crate::models::{AppSettings, DashboardTotals, MenuBarMetric};
 use crate::sync::{self, AppState};
 use std::time::{Duration, Instant};
 use tauri::{menu::{Menu, MenuBuilder}, tray::TrayIconBuilder, AppHandle, Emitter, Manager};
@@ -13,6 +13,22 @@ const METRIC_TRAYS: [(MenuBarMetric, &str); 5] = [
     (MenuBarMetric::OpenPrs, "codetally-open-prs"),
     (MenuBarMetric::OpenIssues, "codetally-open-issues"),
 ];
+
+pub fn hides_dock_icon(settings: &AppSettings) -> bool {
+    settings.run_in_background && settings.show_menu_bar
+}
+
+pub fn apply_activation_policy(app: &AppHandle, settings: &AppSettings) -> tauri::Result<()> {
+    #[cfg(target_os = "macos")]
+    app.set_activation_policy(if hides_dock_icon(settings) {
+        tauri::ActivationPolicy::Accessory
+    } else {
+        tauri::ActivationPolicy::Regular
+    })?;
+    #[cfg(not(target_os = "macos"))]
+    let _ = (app, settings);
+    Ok(())
+}
 
 pub fn metric_title(metric: MenuBarMetric, totals: &DashboardTotals) -> String {
     let (value, label) = match metric {
@@ -200,20 +216,23 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     let state = app.state::<AppState>().inner().clone();
     std::thread::spawn(move || {
         refresh_menu(&app, &state);
-        let mut last_attempt = Instant::now();
+        let mut last_full_attempt = Instant::now();
         loop {
             std::thread::sleep(Duration::from_secs(5));
             let db = state.database();
             let Ok(settings) = sync::app_settings(&db) else { continue; };
-            if last_attempt.elapsed() < Duration::from_secs(settings.activity_refresh_minutes.max(1) as u64 * 60) { continue; }
+            let full_due = last_full_attempt.elapsed() >= Duration::from_secs(settings.activity_refresh_minutes.max(1) as u64 * 60);
+            if !full_due { continue; }
             // Never queue an automatic refresh behind an active manual job.
             let Ok(_job) = state.job_lock.try_lock() else {
-                last_attempt = Instant::now();
+                last_full_attempt = Instant::now();
                 continue;
             };
-            last_attempt = Instant::now();
             // First import remains an explicit user action.
-            if !db.repositories().is_ok_and(|repos| !repos.is_empty()) { continue; }
+            if !db.repositories().is_ok_and(|repos| !repos.is_empty()) {
+                last_full_attempt = Instant::now();
+                continue;
+            }
             // Existing activity sync owns discovery cadence, LOC sweeps and persisted rate-limit pauses.
             if let Err(error) = sync::sync_activity(&state) {
                 let mut progress = state.progress();
@@ -221,10 +240,30 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
                 progress.error = Some(error.to_string());
                 state.set_progress(progress);
             }
+            last_full_attempt = Instant::now();
             drop(_job);
             refresh_menu(&app, &state);
             let _ = app.emit("background-sync-completed", ());
         }
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hides_dock_icon;
+    use crate::models::AppSettings;
+
+    #[test]
+    fn dock_icon_is_hidden_only_when_background_and_menu_bar_are_enabled() {
+        let mut settings = AppSettings::default();
+        assert!(hides_dock_icon(&settings));
+
+        settings.run_in_background = false;
+        assert!(!hides_dock_icon(&settings));
+
+        settings.run_in_background = true;
+        settings.show_menu_bar = false;
+        assert!(!hides_dock_icon(&settings));
+    }
 }

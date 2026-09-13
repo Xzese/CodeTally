@@ -107,39 +107,68 @@ jobs:
           RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
         run: node scripts/release-preflight.mjs --set-version
 
-      - name: Build Tauri bundle
-        run: npm run tauri:build -- --target ${{ matrix.target }}
-
-      - name: Verify macOS bundle signature
+      - name: Build Tauri bundle with updater artifacts
         env:
-          TARGET: ${{ matrix.target }}
-        run: codesign --verify --deep --strict --verbose=2 "src-tauri/target/$TARGET/release/bundle/macos/CodeTally.app"
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
+            echo 'TAURI_SIGNING_PRIVATE_KEY is required to create updater artifacts.' >&2
+            exit 1
+          fi
+          npm run tauri:build -- --target "${{ matrix.target }}" --config src-tauri/tauri.updater.conf.json
 
-      - name: Collect DMG artifact
+      - name: Collect DMG, updater archive, and signature
         shell: bash
         env:
           VERSION: ${{ needs.preflight.outputs.version }}
           INSTALLER: ${{ matrix.installer }}
+          TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
           mkdir -p artifacts
-          dmgs="$(find src-tauri/target -type f -path '*/release/bundle/dmg/*.dmg' -print)"
-          if [[ -z "$dmgs" ]]; then
-            echo 'No DMG was produced.' >&2
-            exit 1
-          fi
-          if [[ "$(printf '%s\n' "$dmgs" | wc -l | tr -d ' ')" != 1 ]]; then
-            echo 'Expected exactly one DMG per architecture.' >&2
-            exit 1
-          fi
-          cp "$dmgs" "artifacts/CodeTally_${VERSION}_${INSTALLER}.dmg"
+          bundle_root="src-tauri/target/$TARGET/release/bundle"
+          [[ -d "$bundle_root" ]] || { echo "Missing bundle directory: $bundle_root" >&2; exit 1; }
+          artifact_stem="CodeTally_${VERSION}_${INSTALLER}"
+
+          copy_single() {
+            local pattern=$1
+            local destination=$2
+            local matches count
+            matches="$(find "$bundle_root" -type f -name "$pattern" -print)"
+            count="$(printf '%s\n' "$matches" | sed '/^$/d' | wc -l | tr -d ' ')"
+            if [[ "$count" != 1 ]]; then
+              echo "Expected exactly one $pattern below $bundle_root; found $count." >&2
+              exit 1
+            fi
+            cp "$matches" "$destination"
+          }
+
+          copy_single '*.dmg' "artifacts/${artifact_stem}.dmg"
+          copy_single '*.app.tar.gz' "artifacts/${artifact_stem}.app.tar.gz"
+          copy_single '*.app.tar.gz.sig' "artifacts/${artifact_stem}.app.tar.gz.sig"
           ls -lh artifacts
 
-      - name: Upload architecture artifact
+      - name: Verify release artifacts before publication
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+          INSTALLER: ${{ matrix.installer }}
+        run: |
+          set -euo pipefail
+          artifact_stem="CodeTally_${VERSION}_${INSTALLER}"
+          bash scripts/verify-release-artifacts.sh \
+            "$TARGET" \
+            "artifacts/${artifact_stem}.dmg" \
+            "artifacts/${artifact_stem}.app.tar.gz" \
+            "artifacts/${artifact_stem}.app.tar.gz.sig"
+
+      - name: Upload architecture artifacts
         uses: actions/upload-artifact@v4
         with:
           name: codetally-${{ matrix.target }}
-          path: artifacts/*.dmg
+          path: artifacts/*
           if-no-files-found: error
           retention-days: 7
 
@@ -167,7 +196,7 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      - name: Verify tag availability and both DMGs
+      - name: Verify tag availability and complete artifact set
         shell: bash
         run: |
           set -euo pipefail
@@ -176,11 +205,74 @@ jobs:
             echo "${RELEASE_TAG} was created during this run. Retry the workflow to select the next version." >&2
             exit 1
           fi
+          for installer in Apple-Silicon_aarch64 Intel_x64; do
+            for suffix in dmg app.tar.gz app.tar.gz.sig; do
+              path="artifacts/CodeTally_${VERSION}_${installer}.${suffix}"
+              [[ -s "$path" ]] || { echo "Missing artifact: $path" >&2; exit 1; }
+            done
+          done
           test "$(find artifacts -maxdepth 1 -type f -name '*.dmg' | wc -l | tr -d ' ')" -eq 2
+          test "$(find artifacts -maxdepth 1 -type f -name '*.app.tar.gz' | wc -l | tr -d ' ')" -eq 2
+          test "$(find artifacts -maxdepth 1 -type f -name '*.app.tar.gz.sig' | wc -l | tr -d ' ')" -eq 2
         env:
           TAG: ${{ needs.preflight.outputs.tag }}
+          VERSION: ${{ needs.preflight.outputs.version }}
 
-      - name: Create release and upload both DMGs
+      - name: Generate and validate latest updater manifest
+        shell: bash
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          aarch64_stem="CodeTally_${VERSION}_Apple-Silicon_aarch64"
+          x86_64_stem="CodeTally_${VERSION}_Intel_x64"
+          release_base="https://github.com/${REPOSITORY}/releases/download/${TAG}"
+          aarch64_archive_url="${release_base}/${aarch64_stem}.app.tar.gz"
+          x86_64_archive_url="${release_base}/${x86_64_stem}.app.tar.gz"
+          aarch64_signature="$(tr -d '\r\n' < "artifacts/${aarch64_stem}.app.tar.gz.sig")"
+          x86_64_signature="$(tr -d '\r\n' < "artifacts/${x86_64_stem}.app.tar.gz.sig")"
+          [[ -n "$aarch64_signature" && -n "$x86_64_signature" ]] || {
+            echo 'Updater signatures must be non-empty.' >&2
+            exit 1
+          }
+
+          jq -n \
+            --arg version "$VERSION" \
+            --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg aarch64_url "$aarch64_archive_url" \
+            --arg aarch64_signature "$aarch64_signature" \
+            --arg x86_64_url "$x86_64_archive_url" \
+            --arg x86_64_signature "$x86_64_signature" \
+            '{
+              version: $version,
+              notes: "CodeTally update for macOS.",
+              pub_date: $pub_date,
+              platforms: {
+                "darwin-aarch64": { signature: $aarch64_signature, url: $aarch64_url },
+                "darwin-x86_64": { signature: $x86_64_signature, url: $x86_64_url }
+              }
+            }' > artifacts/latest.json
+
+          jq empty artifacts/latest.json
+          jq -e \
+            --arg version "$VERSION" \
+            --arg aarch64_url "$aarch64_archive_url" \
+            --arg aarch64_signature "$aarch64_signature" \
+            --arg x86_64_url "$x86_64_archive_url" \
+            --arg x86_64_signature "$x86_64_signature" \
+            '(.version == $version)
+             and ((.platforms | type) == "object")
+             and ((.platforms | keys | sort) == ["darwin-aarch64", "darwin-x86_64"])
+             and (.platforms["darwin-aarch64"].url == $aarch64_url)
+             and (.platforms["darwin-aarch64"].signature == $aarch64_signature)
+             and (.platforms["darwin-x86_64"].url == $x86_64_url)
+             and (.platforms["darwin-x86_64"].signature == $x86_64_signature)' \
+            artifacts/latest.json
+          cat artifacts/latest.json
+
+      - name: Create release and upload verified artifacts
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.preflight.outputs.version }}
@@ -192,7 +284,14 @@ jobs:
 
           These builds are ad-hoc signed, but not Developer ID signed or notarized. macOS may require approval in System Settings → Privacy & Security.
           EOF
-          gh release create "$TAG" artifacts/*.dmg \
+          gh release create "$TAG" \
+            "artifacts/CodeTally_${VERSION}_Apple-Silicon_aarch64.dmg" \
+            "artifacts/CodeTally_${VERSION}_Apple-Silicon_aarch64.app.tar.gz" \
+            "artifacts/CodeTally_${VERSION}_Apple-Silicon_aarch64.app.tar.gz.sig" \
+            "artifacts/CodeTally_${VERSION}_Intel_x64.dmg" \
+            "artifacts/CodeTally_${VERSION}_Intel_x64.app.tar.gz" \
+            "artifacts/CodeTally_${VERSION}_Intel_x64.app.tar.gz.sig" \
+            artifacts/latest.json \
             --repo "$GITHUB_REPOSITORY" \
             --target "$RELEASE_SHA" \
             --title "CodeTally $VERSION" \

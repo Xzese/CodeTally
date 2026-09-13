@@ -2,7 +2,8 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from '../App'
-import type { AppSettings, DashboardData, DependencyStatus, Issue, LocSnapshot, MenuBarMetric, PullRequest, Repository, SyncProgress, SyncResult, ThemeMode } from '../types'
+import type { AppUpdate } from '../api'
+import type { AppSettings, DashboardData, DependencyStatus, FeedKind, Issue, LocSnapshot, MenuBarMetric, PullRequest, Repository, SyncProgress, SyncResult, ThemeMode } from '../types'
 
 const invokeMock = vi.hoisted(() => vi.fn())
 const backgroundSyncListener = vi.hoisted(() => vi.fn())
@@ -170,7 +171,9 @@ const readyDependencies: DependencyStatus = { gh: true, git: true, tokei: true, 
 const syncOk: SyncResult = { ok: true, message: 'Sync complete', repositories_synced: 2, pull_requests_synced: 2, issues_synced: 2, snapshots_created: 0, errors: [] }
 const defaultAppSettings: AppSettings = {
   activity_refresh_minutes: 30,
-  lines_refresh_minutes: 120,
+  activity_relationship: 'author',
+  update_check_interval: 'daily',
+  lines_refresh_minutes: 1440,
   refresh_lines_on_change: true,
   run_in_background: true,
   menu_bar_metric: 'total_lines' as const,
@@ -181,6 +184,20 @@ const defaultAppSettings: AppSettings = {
   include_company_repositories: true,
   include_forks_in_totals: false,
   excluded_repository_ids: []
+}
+
+const appUpToDate: AppUpdate = {
+  current_version: 'v0.1.2',
+  latest_version: 'v0.1.2',
+  release_url: 'https://github.com/Xzese/CodeTally/releases/tag/v0.1.2',
+  update_available: false
+}
+
+const appUpdateAvailable: AppUpdate = {
+  current_version: 'v0.1.2',
+  latest_version: 'v0.2.0',
+  release_url: 'https://github.com/Xzese/CodeTally/releases/tag/v0.2.0',
+  update_available: true
 }
 
 const defaultRepositorySelection = [
@@ -212,14 +229,17 @@ type BackendOptions = {
   settings?: Partial<AppSettings>
   repositorySelection?: typeof defaultRepositorySelection
   appSettingsResponses?: Array<Partial<AppSettings> | Error>
+  appUpdateResponses?: Array<AppUpdate | Error>
   setAppSettings?: (next: Partial<AppSettings>, current: AppSettings) => AppSettings | Promise<AppSettings>
+  activityFeed?: (kind: FeedKind, args: Record<string, unknown>) => PullRequest[] | Issue[] | Promise<PullRequest[] | Issue[]>
 }
 
-function configureBackend({ dependencies = readyDependencies, syncResult = syncOk, cachedDashboard = dashboard, dashboardResponses, historyPromise, syncPromise, activitySyncPromise, fullSyncPromise, progress, settings, repositorySelection = defaultRepositorySelection, appSettingsResponses, setAppSettings }: BackendOptions = {}) {
+function configureBackend({ dependencies = readyDependencies, syncResult = syncOk, cachedDashboard = dashboard, dashboardResponses, historyPromise, syncPromise, activitySyncPromise, fullSyncPromise, progress, settings, repositorySelection = defaultRepositorySelection, appSettingsResponses, appUpdateResponses, setAppSettings, activityFeed }: BackendOptions = {}) {
   let progressIndex = 0
   let dashboardIndex = 0
   let dependencyIndex = 0
   let appSettingsReadIndex = 0
+  let appUpdateReadIndex = 0
   let appSettings = { ...defaultAppSettings, ...settings }
   const writeAppSettings = setAppSettings ?? ((next: Partial<AppSettings>, current: AppSettings) => {
     appSettings = { ...current, ...next }
@@ -232,6 +252,18 @@ function configureBackend({ dependencies = readyDependencies, syncResult = syncO
         return Array.isArray(dependencies) ? dependencies[Math.min(dependencyIndex++, dependencies.length - 1)] : dependencies
       case 'get_github_user':
         return { login: 'sam' }
+      case 'check_for_updates': {
+        const response = appUpdateResponses?.length ? appUpdateResponses[Math.min(appUpdateReadIndex++, appUpdateResponses.length - 1)] : appUpToDate
+        if (response instanceof Error) throw response
+        return response
+      }
+      case 'get_app_info':
+        return {
+          name: 'CodeTally',
+          version: '0.1.2',
+          identifier: 'com.samfaid.codetally',
+          repository_url: 'https://github.com/Xzese/CodeTally'
+        }
       case 'get_dashboard':
         return dashboards[Math.min(dashboardIndex++, dashboards.length - 1)]
       case 'discover_repositories':
@@ -242,6 +274,7 @@ function configureBackend({ dependencies = readyDependencies, syncResult = syncO
         return history.filter((snapshot) => String(snapshot.repository_id) === String(repositoryId))
       }
       case 'get_activity_feed':
+        if (activityFeed) return activityFeed(args?.kind === 'issues' ? 'issues' : 'prs', args ?? {})
         return args?.kind === 'issues' ? issues : prs
       case 'sync_github_data':
         return fullSyncPromise ?? syncPromise ?? syncResult
@@ -260,6 +293,8 @@ function configureBackend({ dependencies = readyDependencies, syncResult = syncO
         return 'file:///Users/demo/Library/Application%20Support/com.samfaid.codetally/codetally.sqlite3'
       case 'reveal_database':
         return true
+      case 'install_update':
+        return null
       case 'set_app_settings': {
         if (!args?.settings || typeof args.settings !== 'object') throw new Error('set_app_settings requires a settings payload')
         const next = args.settings as Partial<AppSettings>
@@ -347,12 +382,12 @@ describe('dashboard UI', () => {
 
     expect(screen.getByText('CodeTally')).toBeInTheDocument()
     expect(screen.getByText('16,000')).toBeInTheDocument()
-    expect(screen.getByText('Portfolio overview')).toBeInTheDocument()
+    expect(screen.getAllByText('Your repositories')).toHaveLength(2)
     expect(screen.getByRole('heading', { name: 'Total Lines' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Repositories' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Recent activity' })).toBeInTheDocument()
-    expect(screen.getByText('Fix alpha flow')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /sam\/alpha #12/ })).toBeInTheDocument()
+    expect(await screen.findByText('Fix alpha flow')).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: /sam\/alpha #12/ })).toBeInTheDocument()
   })
 
   it('keeps the settings retry available when an empty dashboard opens Settings after a read failure', async () => {
@@ -372,12 +407,12 @@ describe('dashboard UI', () => {
     expect(await screen.findByRole('heading', { name: 'No repositories selected' })).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Open Settings' }))
     const drawer = await screen.findByRole('dialog', { name: 'Settings' })
-    expect(within(drawer).getByText('Could not load preferences: preferences unavailable')).toBeInTheDocument()
-    const retry = within(drawer).getByRole('button', { name: 'Retry settings' })
+    expect(within(drawer).getByText("Couldn't load settings: preferences unavailable")).toBeInTheDocument()
+    const retry = within(drawer).getByRole('button', { name: 'Retry' })
     await user.click(retry)
 
     await waitFor(() => expect(within(drawer).getByText('Changes save automatically')).toBeInTheDocument())
-    expect(within(drawer).queryByText('Could not load preferences: preferences unavailable')).not.toBeInTheDocument()
+    expect(within(drawer).queryByText("Couldn't load settings: preferences unavailable")).not.toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Settings' })).toBeInTheDocument()
   })
 
@@ -390,7 +425,7 @@ describe('dashboard UI', () => {
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('get_dashboard', undefined))
     await user.click(screen.getByRole('button', { name: 'Settings' }))
     const drawer = await screen.findByRole('dialog', { name: 'Settings' })
-    const activityRefresh = within(drawer).getByRole('radiogroup', { name: 'Activity refresh' })
+    const activityRefresh = within(drawer).getByRole('radiogroup', { name: 'Pull requests and issues' })
     await user.click(within(activityRefresh).getByRole('radio', { name: '15 minutes' }))
     await waitFor(() => expect(savedSettings()[savedSettings().length - 1]).toEqual(expect.objectContaining({ activity_refresh_minutes: 15 })))
 
@@ -435,7 +470,7 @@ describe('dashboard UI', () => {
     await user.click(within(picker).getByRole('checkbox', { name: 'Show Personal repositories in table' }))
     await user.click(within(picker).getByRole('checkbox', { name: 'Show acme repositories in table' }))
 
-    expect(screen.getByText('All repositories hidden from this table')).toBeInTheDocument()
+    expect(screen.getByText('All repositories are hidden')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '3 tracked' })).toBeInTheDocument()
     expect(within(picker).getByText('0 of 3 visible')).toBeInTheDocument()
     expect(within(picker).getByRole('button', { name: 'Show all' })).toBeEnabled()
@@ -489,10 +524,10 @@ describe('dashboard UI', () => {
     expect(within(picker).queryByRole('button', { name: 'gamma' })).not.toBeInTheDocument()
     await user.click(within(picker).getByRole('button', { name: 'Expand acme' }))
     await user.click(within(picker).getByRole('button', { name: 'All acme repositories' }))
-    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('get_activity_feed', { kind: 'prs', repository_id: null, repository_ids: [3], state: 'open', limit: 1000 }))
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('get_activity_feed', { kind: 'prs', repository_id: null, repository_ids: [3], state: 'open', relationship: 'author', limit: 1000 }))
     const sidebar = screen.getByRole('heading', { name: 'Recent activity' }).closest('aside') as HTMLElement
     await user.click(within(sidebar).getByRole('button', { name: 'Issues' }))
-    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('get_activity_feed', { kind: 'issues', repository_id: null, repository_ids: [3], state: 'open', limit: 1000 }))
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('get_activity_feed', { kind: 'issues', repository_id: null, repository_ids: [3], state: 'open', relationship: 'author', limit: 1000 }))
     expect(screen.getByRole('button', { name: 'Filter by repository: acme' })).toBeInTheDocument()
   })
 
@@ -508,9 +543,96 @@ describe('dashboard UI', () => {
         kind: 'prs',
         repository_id: 2,
         state: 'open',
+        relationship: 'author',
         limit: 1000
       })
     })
+  })
+
+  it('sends each My involvement choice through the activity request', async () => {
+    const user = await renderDashboard()
+    const involvement = screen.getByRole('combobox', { name: 'My involvement' }) as HTMLSelectElement
+    const callsFor = (kind: FeedKind) => invokeMock.mock.calls.filter(([command, args]) => command === 'get_activity_feed' && (args as Record<string, unknown> | undefined)?.kind === kind)
+    const latestPrArgs = () => callsFor('prs').at(-1)?.[1] as Record<string, unknown>
+
+    await waitFor(() => expect(callsFor('prs').length).toBeGreaterThan(0))
+    expect(latestPrArgs()).toEqual(expect.objectContaining({ relationship: 'author' }))
+
+    await user.selectOptions(involvement, 'author')
+    await waitFor(() => expect(latestPrArgs()).toEqual(expect.objectContaining({ relationship: 'author' })))
+    expect(involvement).toHaveValue('author')
+
+    await user.selectOptions(involvement, 'assignee')
+    await waitFor(() => expect(latestPrArgs()).toEqual(expect.objectContaining({ relationship: 'assignee' })))
+    expect(involvement).toHaveValue('assignee')
+
+    await user.selectOptions(involvement, 'author_or_assignee')
+    await waitFor(() => expect(latestPrArgs()).toEqual(expect.objectContaining({ relationship: 'author_or_assignee' })))
+    expect(involvement).toHaveValue('author_or_assignee')
+
+    await user.selectOptions(involvement, 'everyone')
+    await waitFor(() => expect(latestPrArgs()).not.toHaveProperty('relationship'))
+    expect(involvement).toHaveValue('everyone')
+  })
+
+  it('retains My involvement when switching between pull requests and issues', async () => {
+    const user = await renderDashboard()
+    const sidebar = () => screen.getByRole('heading', { name: 'Recent activity' }).closest('aside') as HTMLElement
+    const involvement = () => within(sidebar()).getByRole('combobox', { name: 'My involvement' }) as HTMLSelectElement
+    const activityCalls = (kind: FeedKind) => invokeMock.mock.calls.filter(([command, args]) => command === 'get_activity_feed' && (args as Record<string, unknown> | undefined)?.kind === kind)
+
+    await user.selectOptions(involvement(), 'assignee')
+    await waitFor(() => expect((activityCalls('prs').at(-1)?.[1] as Record<string, unknown>).relationship).toBe('assignee'))
+    expect(involvement()).toHaveValue('assignee')
+
+    await user.click(within(sidebar()).getByRole('button', { name: 'Issues' }))
+    await waitFor(() => expect((activityCalls('issues').at(-1)?.[1] as Record<string, unknown>).relationship).toBe('assignee'))
+    expect(involvement()).toHaveValue('assignee')
+
+    await user.click(within(sidebar()).getByRole('button', { name: 'Pull requests' }))
+    await waitFor(() => expect((activityCalls('prs').at(-1)?.[1] as Record<string, unknown>).relationship).toBe('assignee'))
+    expect(involvement()).toHaveValue('assignee')
+  })
+
+  it('defaults missing My involvement settings to author and saves a changed choice', async () => {
+    configureBackend({ appSettingsResponses: [{}] })
+    const user = await renderDashboard()
+    const involvement = screen.getByRole('combobox', { name: 'My involvement' }) as HTMLSelectElement
+    const activityCalls = () => invokeMock.mock.calls.filter(([command, args]) => command === 'get_activity_feed' && (args as Record<string, unknown> | undefined)?.kind === 'prs')
+
+    await waitFor(() => expect(involvement).toHaveValue('author'))
+    await waitFor(() => expect((activityCalls().at(-1)?.[1] as Record<string, unknown>).relationship).toBe('author'))
+
+    await user.selectOptions(involvement, 'assignee')
+    await waitFor(() => expect(savedSettings()).toEqual(expect.arrayContaining([expect.objectContaining({ activity_relationship: 'assignee' })])))
+  })
+
+  it('ignores a stale My involvement response after a newer filter request resolves', async () => {
+    const staleResponse = deferred<PullRequest[]>()
+    const freshResponse = deferred<PullRequest[]>()
+    const staleItem: PullRequest = { ...prs[0], title: 'Stale everyone result' }
+    const freshItem: PullRequest = { ...prs[0], title: 'Fresh author result' }
+    configureBackend({
+      settings: { activity_relationship: 'everyone' },
+      activityFeed: (kind, args) => {
+        if (kind === 'issues') return issues
+        return args.relationship === 'author' ? freshResponse.promise : staleResponse.promise
+      }
+    })
+    const user = userEvent.setup()
+    render(<App />)
+    const involvement = await screen.findByRole('combobox', { name: 'My involvement' }) as HTMLSelectElement
+    const activityCalls = () => invokeMock.mock.calls.filter(([command, args]) => command === 'get_activity_feed' && (args as Record<string, unknown> | undefined)?.kind === 'prs')
+
+    await waitFor(() => expect(activityCalls().some(([, args]) => !(args as Record<string, unknown>).relationship)).toBe(true))
+    await user.selectOptions(involvement, 'author')
+    await waitFor(() => expect(activityCalls().some(([, args]) => (args as Record<string, unknown>).relationship === 'author')).toBe(true))
+
+    freshResponse.resolve([freshItem])
+    expect(await screen.findByText('Fresh author result')).toBeInTheDocument()
+    staleResponse.resolve([staleItem])
+    await act(async () => { await Promise.resolve() })
+    expect(screen.queryByText('Stale everyone result')).not.toBeInTheDocument()
   })
 
   it('opens a repository detail view with repository-scoped LOC history and activity', async () => {
@@ -521,7 +643,7 @@ describe('dashboard UI', () => {
     await user.click(alphaRow as HTMLElement)
 
     expect(await screen.findByRole('heading', { name: 'alpha' })).toBeInTheDocument()
-    expect(screen.getByText('Repository detail')).toBeInTheDocument()
+    expect(screen.getByText('Repository details')).toBeInTheDocument()
     const detail = within(screen.getByRole('main'))
     expect(detail.getByText('Fix alpha flow')).toBeInTheDocument()
     expect(detail.getByText('Alpha issue')).toBeInTheDocument()
@@ -551,6 +673,7 @@ describe('dashboard UI', () => {
         kind: 'prs',
         repository_id: 1,
         state: 'open',
+        relationship: 'author',
         limit: 1000
       })
     })
@@ -564,6 +687,7 @@ describe('dashboard UI', () => {
         kind: 'issues',
         repository_id: 1,
         state: 'open',
+        relationship: 'author',
         limit: 1000
       })
     })
@@ -575,7 +699,7 @@ describe('dashboard UI', () => {
     await waitFor(() => expect(within(sidebar()).getByText('Fix alpha flow')).toBeInTheDocument())
     expect(within(sidebar()).getByRole('button', { name: 'Filter by repository: alpha' })).toBeDisabled()
 
-    await user.click(screen.getByRole('button', { name: 'Back to portfolio' }))
+    await user.click(screen.getByRole('button', { name: 'Back to repositories' }))
     await screen.findByRole('heading', { name: 'Code at a glance' })
     const restoredSidebar = sidebar()
     const restoredRepository = within(restoredSidebar).getByRole('button', { name: /Filter by repository:/ }).textContent?.includes('All repositories') ? 'all' : '1'
@@ -698,10 +822,10 @@ describe('dashboard UI', () => {
     const loginCommand = 'gh auth login --hostname github.com --web'
     expect(await screen.findByText(loginCommand, { exact: true })).toBeInTheDocument()
     const checksBefore = invokeMock.mock.calls.filter(([command]) => command === 'check_dependencies').length
-    await user.click(screen.getByRole('button', { name: 'Check connection' }))
+    await user.click(screen.getByRole('button', { name: 'Check again' }))
     await waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === 'check_dependencies').length).toBeGreaterThan(checksBefore))
     await waitFor(() => expect(screen.queryByText(loginCommand, { exact: true })).not.toBeInTheDocument())
-    expect(screen.getByRole('button', { name: 'Import repositories' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Add repositories' })).toBeInTheDocument()
     expect(invokeMock.mock.calls.some(([command]) => typeof command === 'string' && /auth.*login|login.*auth/i.test(command))).toBe(false)
   })
 
@@ -763,11 +887,11 @@ describe('dashboard UI', () => {
 
     try {
       await screen.findByRole('heading', { name: 'Code at a glance' })
-      const trigger = await screen.findByRole('button', { name: /Sync details|Syncing|Importing/i })
+      const trigger = await screen.findByRole('button', { name: /Refresh details|Updating|Importing/i })
 
       await user.click(trigger)
       expect(await screen.findByText(/Repositories 1 \/ 2/)).toBeInTheDocument()
-      expect(screen.getByRole('progressbar', { name: 'Overall repository progress' })).toBeInTheDocument()
+      expect(screen.getByRole('progressbar', { name: 'Repository progress' })).toBeInTheDocument()
 
       await user.keyboard('{Escape}')
       await waitFor(() => expect(screen.queryByText(/Repositories 1 \/ 2/)).not.toBeInTheDocument())
@@ -789,7 +913,7 @@ describe('dashboard UI', () => {
 
     try {
       await screen.findByRole('heading', { name: 'Code at a glance' })
-      const syncControls = () => screen.getAllByRole('button', { name: /Refresh|Syncing|Importing/i })
+      const syncControls = () => screen.getAllByRole('button', { name: /Refresh|Updating|Importing/i })
 
       await waitFor(() => {
         expect(invokeMock.mock.calls.some(([command]) => command === 'sync_activity')).toBe(true)
@@ -802,18 +926,18 @@ describe('dashboard UI', () => {
       await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('sync_github_data', undefined))
       await waitFor(() => {
         expect(syncControls()).toHaveLength(1)
-        expect(syncControls()[0]).toHaveAccessibleName(/Syncing|Importing/i)
+        expect(syncControls()[0]).toHaveAccessibleName(/Updating|Importing/i)
       })
 
       const activeControl = syncControls()[0]
       await user.click(activeControl)
-      expect(await screen.findByRole('dialog', { name: 'Sync progress' })).toBeInTheDocument()
+      expect(await screen.findByRole('dialog', { name: 'Refresh details' })).toBeInTheDocument()
       await user.keyboard('{Escape}')
-      await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Sync progress' })).not.toBeInTheDocument())
+      await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Refresh details' })).not.toBeInTheDocument())
 
       await user.unhover(activeControl)
       await user.hover(activeControl)
-      expect(await screen.findByRole('dialog', { name: 'Sync progress' })).toBeInTheDocument()
+      expect(await screen.findByRole('dialog', { name: 'Refresh details' })).toBeInTheDocument()
     } finally {
       sync.resolve(syncOk)
     }
@@ -856,7 +980,7 @@ describe('dashboard UI', () => {
       await waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === 'get_sync_progress').length).toBeGreaterThanOrEqual(1))
 
       activitySync.resolve(syncOk)
-      const refresh = await screen.findByRole('button', { name: /Refresh GitHub data/i })
+      const refresh = await screen.findByRole('button', { name: /Refresh dashboard/i })
       expect(refresh).toBeEnabled()
       expect(invokeMock.mock.calls.filter(([command]) => command === 'get_sync_progress').length).toBeGreaterThanOrEqual(2)
 
@@ -868,8 +992,7 @@ describe('dashboard UI', () => {
     }
   })
 
-  it('uses activity-only sync on startup while manual Refresh uses full sync and frontend timers do not schedule extra syncs', async () => {
-    vi.useFakeTimers()
+  it('uses the PR and issue sync on startup while manual Refresh uses the full sync', async () => {
     configureBackend()
     render(<App />)
 
@@ -885,14 +1008,6 @@ describe('dashboard UI', () => {
       for (let index = 0; index < 8; index += 1) await Promise.resolve()
     })
     expect(invokeMock.mock.calls.some(([command]) => command === 'sync_github_data')).toBe(true)
-
-    const activityCallsBeforeSchedule = invokeMock.mock.calls.filter(([command]) => command === 'sync_activity').length
-    await act(async () => {
-      vi.advanceTimersByTime(2 * 60 * 1000)
-      for (let index = 0; index < 12; index += 1) await Promise.resolve()
-    })
-    const activityCallsAfterSchedule = invokeMock.mock.calls.filter(([command]) => command === 'sync_activity').length
-    expect(activityCallsAfterSchedule).toBe(activityCallsBeforeSchedule)
   })
 
   it('reloads cached dashboard data and activity feeds after native background sync completion', async () => {
@@ -927,37 +1042,51 @@ describe('dashboard UI', () => {
   })
 
   it('loads cadence settings, autosaves each updated refresh choice, and keeps Settings open', async () => {
-    configureBackend({ settings: { activity_refresh_minutes: 30, lines_refresh_minutes: 120, refresh_lines_on_change: false } })
+    configureBackend({ appSettingsResponses: [{ activity_refresh_minutes: 30, lines_refresh_minutes: 720, refresh_lines_on_change: false }] })
     const user = await renderDashboard()
 
     await user.click(screen.getByRole('button', { name: 'Settings' }))
     expect(await screen.findByRole('heading', { name: 'Settings' })).toBeInTheDocument()
 
-    const activityRefresh = screen.getByRole('radiogroup', { name: 'Activity refresh' })
-    const lineRefresh = screen.getByRole('radiogroup', { name: 'Line count refresh' })
-    const codeChangeRefresh = screen.getByRole('switch', { name: /Refresh line counts when code changes/i })
+    const activityRefresh = screen.getByRole('radiogroup', { name: 'Pull requests and issues' })
+    const lineRefresh = screen.getByRole('radiogroup', { name: 'Lines of Code Refresh' })
+    const updateChecks = screen.getByRole('radiogroup', { name: 'App update checks' })
+    const codeChangeRefresh = screen.getByRole('switch', { name: /Refresh Lines of Code when code changes/i })
     await waitFor(() => {
       expect(within(activityRefresh).getByRole('radio', { name: '30 minutes' })).toBeChecked()
-      expect(within(lineRefresh).getByRole('radio', { name: '120 minutes' })).toBeChecked()
+      expect(within(lineRefresh).getByRole('radio', { name: '720 minutes' })).toBeChecked()
+      expect(within(updateChecks).getByRole('radio', { name: 'Daily' })).toBeChecked()
       expect(codeChangeRefresh).not.toBeChecked()
     })
+    for (const label of ['Daily', 'Weekly', 'Monthly', 'Never']) {
+      expect(within(updateChecks).getByRole('radio', { name: label })).toBeInTheDocument()
+    }
     for (const minutes of [15, 30, 60, 120]) {
       expect(within(activityRefresh).getByRole('radio', { name: `${minutes} minutes` })).toBeInTheDocument()
     }
-    for (const minutes of [60, 120, 240, 480]) {
+    for (const minutes of [360, 720, 1440]) {
       expect(within(lineRefresh).getByRole('radio', { name: `${minutes} minutes` })).toBeInTheDocument()
     }
+    await user.click(screen.getByRole('button', { name: 'About Lines of Code Refresh' }))
+    const linesRefreshHelp = await screen.findByRole('tooltip')
+    expect(linesRefreshHelp).toHaveTextContent(/line counts|lines of code/i)
+    expect(linesRefreshHelp).not.toHaveTextContent(/pushedAt|commit SHA/i)
 
     await user.click(within(activityRefresh).getByRole('radio', { name: '15 minutes' }))
-    await user.click(within(lineRefresh).getByRole('radio', { name: '240 minutes' }))
+    await user.click(within(lineRefresh).getByRole('radio', { name: '1440 minutes' }))
     await user.click(codeChangeRefresh)
+    for (const interval of ['daily', 'weekly', 'monthly', 'never'] as const) {
+      await user.click(within(updateChecks).getByRole('radio', { name: interval[0].toUpperCase() + interval.slice(1) }))
+      await waitFor(() => expect(savedSettings()[savedSettings().length - 1]).toEqual(expect.objectContaining({ update_check_interval: interval })))
+    }
 
     await waitFor(() => {
       const writes = savedSettings()
       expect(writes[writes.length - 1]).toEqual(expect.objectContaining({
         activity_refresh_minutes: 15,
-        lines_refresh_minutes: 240,
-        refresh_lines_on_change: true
+        lines_refresh_minutes: 1440,
+        refresh_lines_on_change: true,
+        update_check_interval: 'never'
       }))
     })
     expect(screen.getByRole('heading', { name: 'Settings' })).toBeInTheDocument()
@@ -969,34 +1098,48 @@ describe('dashboard UI', () => {
 
     await user.click(screen.getByRole('button', { name: 'Settings' }))
     const drawer = await screen.findByRole('dialog', { name: 'Settings' })
-    const activityRefresh = within(drawer).getByRole('radiogroup', { name: 'Activity refresh' })
-    const lineRefresh = within(drawer).getByRole('radiogroup', { name: 'Line count refresh' })
+    const activityRefresh = within(drawer).getByRole('radiogroup', { name: 'Pull requests and issues' })
+    const lineRefresh = within(drawer).getByRole('radiogroup', { name: 'Lines of Code Refresh' })
 
     await user.click(within(activityRefresh).getByRole('radio', { name: 'Custom' }))
-    const activityInput = within(drawer).getByRole('textbox', { name: 'Custom activity refresh minutes' }) as HTMLInputElement
+    const activityInput = within(drawer).getByRole('textbox', { name: 'Custom minutes for pull requests and issues' }) as HTMLInputElement
     expect(activityInput).toHaveAttribute('inputmode', 'numeric')
     expect(activityInput).toHaveValue('30')
 
     await user.clear(activityInput)
     fireEvent.blur(activityInput)
-    expect(await within(drawer).findByRole('alert')).toHaveTextContent('Enter a whole number from 1 to 1440 minutes.')
+    expect(await within(drawer).findByRole('alert')).toHaveTextContent('Enter a whole number between 15 and 1440 minutes.')
     const writesAfterEmpty = savedSettings().length
+
+    await user.click(activityInput)
+    await user.clear(activityInput)
+    await user.type(activityInput, '14')
+    fireEvent.blur(activityInput)
+    expect(await within(drawer).findByRole('alert')).toHaveTextContent('Enter a whole number between 15 and 1440 minutes.')
+    expect(savedSettings()).toHaveLength(writesAfterEmpty)
 
     await user.click(activityInput)
     await user.clear(activityInput)
     await user.type(activityInput, '1441')
     fireEvent.blur(activityInput)
-    expect(await within(drawer).findByRole('alert')).toHaveTextContent('Enter a whole number from 1 to 1440 minutes.')
+    expect(await within(drawer).findByRole('alert')).toHaveTextContent('Enter a whole number between 15 and 1440 minutes.')
     expect(savedSettings()).toHaveLength(writesAfterEmpty)
 
     await user.click(activityInput)
     await user.clear(activityInput)
-    await user.type(activityInput, '12')
+    await user.type(activityInput, '15')
     fireEvent.blur(activityInput)
-    await waitFor(() => expect(savedSettings()[savedSettings().length - 1]).toEqual(expect.objectContaining({ activity_refresh_minutes: 12 })))
+    await waitFor(() => expect(savedSettings()[savedSettings().length - 1]).toEqual(expect.objectContaining({ activity_refresh_minutes: 15 })))
+
+    await user.click(within(activityRefresh).getByRole('radio', { name: 'Custom' }))
+    const customActivityInput = within(drawer).getByRole('textbox', { name: 'Custom minutes for pull requests and issues' }) as HTMLInputElement
+    await user.clear(customActivityInput)
+    await user.type(customActivityInput, '17')
+    fireEvent.blur(customActivityInput)
+    await waitFor(() => expect(savedSettings()[savedSettings().length - 1]).toEqual(expect.objectContaining({ activity_refresh_minutes: 17 })))
 
     await user.click(within(lineRefresh).getByRole('radio', { name: 'Custom' }))
-    const lineInput = within(drawer).getByRole('textbox', { name: 'Custom line count refresh minutes' }) as HTMLInputElement
+    const lineInput = within(drawer).getByRole('textbox', { name: 'Custom minutes for lines of code refresh' }) as HTMLInputElement
     await user.clear(lineInput)
     await user.type(lineInput, '90')
     await user.keyboard('{Enter}')
@@ -1005,9 +1148,9 @@ describe('dashboard UI', () => {
     await user.click(within(drawer).getByRole('button', { name: 'Close settings' }))
     await user.click(screen.getByRole('button', { name: 'Settings' }))
     const reopened = await screen.findByRole('dialog', { name: 'Settings' })
-    expect(within(within(reopened).getByRole('radiogroup', { name: 'Activity refresh' })).getByRole('radio', { name: 'Custom' })).toBeChecked()
-    expect(within(reopened).getByRole('textbox', { name: 'Custom activity refresh minutes' })).toHaveValue('12')
-    expect(within(reopened).getByRole('textbox', { name: 'Custom line count refresh minutes' })).toHaveValue('90')
+    expect(within(within(reopened).getByRole('radiogroup', { name: 'Pull requests and issues' })).getByRole('radio', { name: 'Custom' })).toBeChecked()
+    expect(within(reopened).getByRole('textbox', { name: 'Custom minutes for pull requests and issues' })).toHaveValue('17')
+    expect(within(reopened).getByRole('textbox', { name: 'Custom minutes for lines of code refresh' })).toHaveValue('90')
   })
 
   it('serializes rapid setting changes and persists the latest intended value', async () => {
@@ -1029,7 +1172,7 @@ describe('dashboard UI', () => {
     const user = await renderDashboard()
 
     await user.click(screen.getByRole('button', { name: 'Settings' }))
-    const activityRefresh = screen.getByRole('radiogroup', { name: 'Activity refresh' })
+    const activityRefresh = screen.getByRole('radiogroup', { name: 'Pull requests and issues' })
     await user.click(within(activityRefresh).getByRole('radio', { name: '15 minutes' }))
     await waitFor(() => expect(writes).toHaveLength(1))
 
@@ -1198,6 +1341,39 @@ describe('dashboard UI', () => {
     }
   })
 
+  it('shows the app version and About details and opens the CodeTally repository', async () => {
+    const user = await renderDashboard()
+
+    await user.click(screen.getByRole('button', { name: 'Settings' }))
+    const drawer = await screen.findByRole('dialog', { name: 'Settings' })
+
+    expect(await within(drawer).findByText('0.1.2', { exact: true })).toBeInTheDocument()
+    expect(invokeMock).toHaveBeenCalledWith('get_app_info', undefined)
+    expect(within(drawer).getByText('com.samfaid.codetally', { exact: true })).toBeInTheDocument()
+
+    const repositoryLink = within(drawer).getByRole('link', { name: /GitHub|repository|source/i })
+    expect(repositoryLink).toHaveAttribute('href', 'https://github.com/Xzese/CodeTally')
+    await user.click(repositoryLink)
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('open_external_url', { url: 'https://github.com/Xzese/CodeTally' }))
+  })
+
+  it('checks for updates when About opens and installs an available release', async () => {
+    configureBackend({ appUpdateResponses: [appUpdateAvailable] })
+    const user = await renderDashboard()
+
+    // The dashboard status indicator may already have checked on startup. Isolate
+    // the check performed by the About section when Settings mounts.
+    invokeMock.mockClear()
+    await user.click(screen.getByRole('button', { name: 'Settings' }))
+    const drawer = await screen.findByRole('dialog', { name: 'Settings' })
+    await waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === 'check_for_updates')).toHaveLength(1))
+
+    expect(within(drawer).getByText('v0.2.0 available')).toBeInTheDocument()
+
+    await user.click(within(drawer).getByRole('button', { name: 'Download update' }))
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('install_update', undefined))
+  })
+
   it('loads and autosaves background execution and supports every menu bar metric', async () => {
     configureBackend({ settings: { run_in_background: true, menu_bar_metric: 'total_lines', menu_bar_metrics: ['total_lines'] } })
     const user = await renderDashboard()
@@ -1257,7 +1433,7 @@ describe('dashboard UI', () => {
     await user.click(screen.getByRole('button', { name: 'Settings' }))
     expect(await screen.findByRole('heading', { name: 'Settings' })).toBeInTheDocument()
 
-    const companySwitch = await screen.findByRole('switch', { name: 'Track company repositories' })
+      const companySwitch = await screen.findByRole('switch', { name: 'Include company repositories' })
     const personalSwitch = await screen.findByRole('switch', { name: 'Track personal repositories' })
     const organizationGroup = await screen.findByRole('switch', { name: 'Track acme repositories' })
     expect(screen.getByRole('button', { name: 'Expand acme repositories' })).toBeInTheDocument()
@@ -1310,7 +1486,7 @@ describe('dashboard UI', () => {
     await user.click(screen.getByRole('button', { name: 'Expand acme repositories' }))
     const savedPersonal = await screen.findByRole('checkbox', { name: 'sam/alpha' })
     expect(savedPersonal).not.toBeChecked()
-    expect(screen.getByRole('switch', { name: 'Track company repositories' })).not.toBeChecked()
+    expect(screen.getByRole('switch', { name: 'Include company repositories' })).not.toBeChecked()
     expect(screen.getByRole('switch', { name: 'Track acme repositories' })).toBeChecked()
     expect(screen.getByRole('checkbox', { name: 'acme/beta' })).toBeChecked()
     expect(screen.getByRole('checkbox', { name: 'acme/beta' })).toBeDisabled()
@@ -1398,11 +1574,11 @@ describe('dashboard UI', () => {
         for (let index = 0; index < 12; index += 1) await Promise.resolve()
       })
       expect(screen.getByRole('heading', { name: 'Code at a glance' })).toBeInTheDocument()
-      fireEvent.click(screen.getByRole('button', { name: /Sync details|Syncing|Importing/i }))
+      fireEvent.click(screen.getByRole('button', { name: /Refresh details|Updating|Importing/i }))
       const firstProgress = screen.getByText(/Repositories 1 \/ 7/)
       const firstPanel = firstProgress.closest('.sync-progress-panel')
       expect(firstPanel).not.toBeNull()
-      const firstBar = within(firstPanel as HTMLElement).getByRole('progressbar', { name: 'Overall repository progress' })
+      const firstBar = within(firstPanel as HTMLElement).getByRole('progressbar', { name: 'Repository progress' })
       expect(firstBar).not.toBeNull()
       expect(Number(firstBar.getAttribute('aria-valuenow'))).toBe(1)
       expect(Number(firstBar.getAttribute('aria-valuemax'))).toBe(7)
@@ -1415,7 +1591,7 @@ describe('dashboard UI', () => {
       const secondProgress = screen.getByText(/Repositories 2 \/ 7/)
       const secondPanel = secondProgress.closest('.sync-progress-panel')
       expect(secondPanel).not.toBeNull()
-      const secondBar = within(secondPanel as HTMLElement).getByRole('progressbar', { name: 'Overall repository progress' })
+      const secondBar = within(secondPanel as HTMLElement).getByRole('progressbar', { name: 'Repository progress' })
       expect(secondBar).not.toBeNull()
       expect(Number(secondBar.getAttribute('aria-valuenow'))).toBe(2)
       expect(Number(secondBar.getAttribute('aria-valuemax'))).toBe(7)
@@ -1437,7 +1613,7 @@ describe('dashboard UI', () => {
       const completedPanel = completedProgress.closest('.sync-progress-panel')
       expect(completedPanel).not.toBeNull()
       expect(completedPanel?.querySelector('strong')).toHaveTextContent('Complete')
-      const completedBar = within(completedPanel as HTMLElement).getByRole('progressbar', { name: 'Overall repository progress' })
+      const completedBar = within(completedPanel as HTMLElement).getByRole('progressbar', { name: 'Repository progress' })
       expect(Number(completedBar.getAttribute('aria-valuenow'))).toBe(19)
       expect(Number(completedBar.getAttribute('aria-valuemax'))).toBe(19)
     } finally {
@@ -1477,11 +1653,11 @@ describe('dashboard UI', () => {
     render(<App />)
 
     try {
-      await user.click(await screen.findByRole('button', { name: 'Import repositories' }))
+      await user.click(await screen.findByRole('button', { name: 'Add repositories' }))
       expect(await screen.findByRole('heading', { name: 'Code at a glance' })).toBeInTheDocument()
       expect(screen.getByRole('heading', { name: 'Total Lines' })).toBeInTheDocument()
       expect(screen.queryByText('No LOC history for this range')).not.toBeInTheDocument()
-      await user.click(screen.getByRole('button', { name: /Sync details|Syncing|Importing/i }))
+      await user.click(screen.getByRole('button', { name: /Refresh details|Updating|Importing/i }))
       expect(screen.getByText(/Repositories 1 \/ 2/)).toBeInTheDocument()
 
       const dashboardCalls = invokeMock.mock.calls.filter(([command]) => command === 'get_dashboard')
@@ -1502,8 +1678,8 @@ describe('dashboard UI', () => {
       expect(progressPanel?.lastElementChild).toBe(bars)
       const progressRows = bars?.querySelectorAll('.sync-progress-row') ?? []
       expect(progressRows.length).toBe(2)
-      expect(within(bars as HTMLElement).getByText('Overall repository progress')).toBeInTheDocument()
-      expect(within(bars as HTMLElement).getByText('Current repository samples')).toBeInTheDocument()
+      expect(within(bars as HTMLElement).getByText('Repository progress')).toBeInTheDocument()
+      expect(within(bars as HTMLElement).getByText('Current line scan')).toBeInTheDocument()
       expect(within(bars as HTMLElement).getAllByRole('progressbar')).toHaveLength(2)
     } finally {
       sync.resolve(syncOk)

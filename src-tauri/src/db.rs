@@ -10,6 +10,7 @@ use std::path::Path;
 
 const LOC_ANALYSIS_VERSION: &str = "3";
 const HISTORY_SAMPLING_VERSION: &str = "1";
+const ACTIVITY_ACTOR_FIELDS_VERSION: &str = "1";
 
 pub struct Database {
     path: std::path::PathBuf,
@@ -93,6 +94,8 @@ impl Database {
                 merged_at TEXT,
                 closed_at TEXT,
                 url TEXT NOT NULL,
+                author TEXT,
+                assignees_json TEXT NOT NULL DEFAULT '[]',
                 additions INTEGER NOT NULL DEFAULT 0,
                 deletions INTEGER NOT NULL DEFAULT 0,
                 changed_files INTEGER NOT NULL DEFAULT 0,
@@ -140,6 +143,31 @@ impl Database {
         let _ = conn.execute("ALTER TABLE repositories ADD COLUMN last_fetched_pushed_at TEXT", []);
         let _ = conn.execute("ALTER TABLE repositories ADD COLUMN star_count INTEGER NOT NULL DEFAULT 0", []);
         let _ = conn.execute("ALTER TABLE repositories ADD COLUMN fork_count INTEGER NOT NULL DEFAULT 0", []);
+        let _ = conn.execute("ALTER TABLE pull_requests ADD COLUMN author TEXT", []);
+        let _ = conn.execute("ALTER TABLE pull_requests ADD COLUMN assignees_json TEXT NOT NULL DEFAULT '[]'", []);
+        let stored_activity_actor_version: Option<String> = conn.query_row("SELECT value FROM app_metadata WHERE key='activity_actor_fields_version'", [], |row| row.get(0)).optional()?;
+        if stored_activity_actor_version.as_deref() != Some(ACTIVITY_ACTOR_FIELDS_VERSION) {
+            // Actor fields were added after activity was already cached. Reset
+            // only closed-PR checkpoints to the oldest cached PR so the next
+            // activity refresh hydrates actor data without dropping rows.
+            let oldest_closed_prs = {
+                let mut statement = conn.prepare("SELECT repository_id,MIN(updated_at) FROM pull_requests WHERE upper(state) IN ('CLOSED','MERGED') GROUP BY repository_id")?;
+                let rows = statement.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?;
+                rows.collect::<Result<Vec<_>, _>>()?
+            };
+            for (repository_id, updated_at) in oldest_closed_prs {
+                let checkpoint = serde_json::json!({
+                    "completed_at": updated_at,
+                    "started_at": null,
+                    "after": null,
+                }).to_string();
+                conn.execute(
+                    "INSERT INTO app_metadata(key,value) VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    params![format!("github_activity_v2:{repository_id}:pullRequests:false"), checkpoint],
+                )?;
+            }
+            conn.execute("INSERT INTO app_metadata(key,value) VALUES ('activity_actor_fields_version',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [ACTIVITY_ACTOR_FIELDS_VERSION])?;
+        }
         let stored_version: Option<String> = conn.query_row("SELECT value FROM app_metadata WHERE key='loc_analysis_version'", [], |row| row.get(0)).optional()?;
         if stored_version.as_deref() != Some(LOC_ANALYSIS_VERSION) {
             // LOC counts are derived artifacts. A scanner/parser change must
@@ -474,10 +502,10 @@ impl Database {
         let conn = self.connect()?;
         conn.execute(
             r#"INSERT INTO pull_requests
-               (repository_id,number,title,state,is_draft,created_at,updated_at,merged_at,closed_at,url,additions,deletions,changed_files,ci_state)
-               VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
-               ON CONFLICT(repository_id,number) DO UPDATE SET title=excluded.title,state=excluded.state,is_draft=excluded.is_draft,created_at=excluded.created_at,updated_at=excluded.updated_at,merged_at=excluded.merged_at,closed_at=excluded.closed_at,url=excluded.url,additions=excluded.additions,deletions=excluded.deletions,changed_files=excluded.changed_files,ci_state=excluded.ci_state"#,
-            params![item.repository_id,item.number,item.title,item.state,item.is_draft,item.created_at,item.updated_at,item.merged_at,item.closed_at,item.url,item.additions,item.deletions,item.changed_files,item.ci_state],
+               (repository_id,number,title,state,is_draft,created_at,updated_at,merged_at,closed_at,url,author,assignees_json,additions,deletions,changed_files,ci_state)
+               VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
+               ON CONFLICT(repository_id,number) DO UPDATE SET title=excluded.title,state=excluded.state,is_draft=excluded.is_draft,created_at=excluded.created_at,updated_at=excluded.updated_at,merged_at=excluded.merged_at,closed_at=excluded.closed_at,url=excluded.url,author=excluded.author,assignees_json=excluded.assignees_json,additions=excluded.additions,deletions=excluded.deletions,changed_files=excluded.changed_files,ci_state=excluded.ci_state"#,
+            params![item.repository_id,item.number,item.title,item.state,item.is_draft,item.created_at,item.updated_at,item.merged_at,item.closed_at,item.url,item.author,serde_json::to_string(&item.assignees)?,item.additions,item.deletions,item.changed_files,item.ci_state],
         )?;
         Ok(())
     }
@@ -499,9 +527,16 @@ impl Database {
     }
 
     fn scoped_pull_requests(&self, repository_id: Option<i64>, scope: Option<&[i64]>, state: Option<&str>, limit: usize) -> AppResult<Vec<PullRequest>> {
+        self.scoped_pull_requests_for_relationship(repository_id, scope, state, limit, "everyone", None)
+    }
+
+    fn scoped_pull_requests_for_relationship(&self, repository_id: Option<i64>, scope: Option<&[i64]>, state: Option<&str>, limit: usize, relationship: &str, login: Option<&str>) -> AppResult<Vec<PullRequest>> {
+        let relationship = normalize_relationship(relationship)?;
+        let relationship_filter = relationship_filter("p", relationship);
         let conn = self.connect()?;
-        let mut stmt = conn.prepare("SELECT p.repository_id,r.name_with_owner,p.number,p.title,p.state,p.is_draft,p.created_at,p.updated_at,p.merged_at,p.closed_at,p.url,p.additions,p.deletions,p.changed_files,p.ci_state FROM pull_requests p JOIN repositories r ON r.id=p.repository_id WHERE r.is_archived=0 AND r.id IN (SELECT value FROM json_each(?4)) AND (?1 IS NULL OR p.repository_id=?1) AND (?2 IS NULL OR lower(p.state)=lower(?2)) ORDER BY p.updated_at DESC LIMIT ?3")?;
-        let rows = stmt.query_map(params![repository_id, state, limit as i64, self.activity_repository_ids_json(scope)?], pull_request_from_row)?;
+        let query = format!("SELECT p.repository_id,r.name_with_owner,p.number,p.title,p.state,p.is_draft,p.created_at,p.updated_at,p.merged_at,p.closed_at,p.url,p.author,p.assignees_json,p.additions,p.deletions,p.changed_files,p.ci_state FROM pull_requests p JOIN repositories r ON r.id=p.repository_id WHERE r.is_archived=0 AND r.id IN (SELECT value FROM json_each(?4)) AND (?1 IS NULL OR p.repository_id=?1) AND (?2 IS NULL OR lower(p.state)=lower(?2)) AND ({relationship_filter}) ORDER BY p.updated_at DESC LIMIT ?3");
+        let mut stmt = conn.prepare(&query)?;
+        let rows = stmt.query_map(params![repository_id, state, limit as i64, self.activity_repository_ids_json(scope)?, login], pull_request_from_row)?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
@@ -510,9 +545,16 @@ impl Database {
     }
 
     fn scoped_issues(&self, repository_id: Option<i64>, scope: Option<&[i64]>, state: Option<&str>, limit: usize) -> AppResult<Vec<Issue>> {
+        self.scoped_issues_for_relationship(repository_id, scope, state, limit, "everyone", None)
+    }
+
+    fn scoped_issues_for_relationship(&self, repository_id: Option<i64>, scope: Option<&[i64]>, state: Option<&str>, limit: usize, relationship: &str, login: Option<&str>) -> AppResult<Vec<Issue>> {
+        let relationship = normalize_relationship(relationship)?;
+        let relationship_filter = relationship_filter("i", relationship);
         let conn = self.connect()?;
-        let mut stmt = conn.prepare("SELECT i.repository_id,r.name_with_owner,i.number,i.title,i.state,i.created_at,i.updated_at,i.closed_at,i.url,i.author,i.labels_json,i.assignees_json FROM issues i JOIN repositories r ON r.id=i.repository_id WHERE r.is_archived=0 AND r.id IN (SELECT value FROM json_each(?4)) AND (?1 IS NULL OR i.repository_id=?1) AND (?2 IS NULL OR lower(i.state)=lower(?2)) ORDER BY i.updated_at DESC LIMIT ?3")?;
-        let rows = stmt.query_map(params![repository_id, state, limit as i64, self.activity_repository_ids_json(scope)?], issue_from_row)?;
+        let query = format!("SELECT i.repository_id,r.name_with_owner,i.number,i.title,i.state,i.created_at,i.updated_at,i.closed_at,i.url,i.author,i.labels_json,i.assignees_json FROM issues i JOIN repositories r ON r.id=i.repository_id WHERE r.is_archived=0 AND r.id IN (SELECT value FROM json_each(?4)) AND (?1 IS NULL OR i.repository_id=?1) AND (?2 IS NULL OR lower(i.state)=lower(?2)) AND ({relationship_filter}) ORDER BY i.updated_at DESC LIMIT ?3");
+        let mut stmt = conn.prepare(&query)?;
+        let rows = stmt.query_map(params![repository_id, state, limit as i64, self.activity_repository_ids_json(scope)?, login], issue_from_row)?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
@@ -644,10 +686,14 @@ impl Database {
     }
 
     pub fn scoped_activity(&self, kind: &str, repository_id: Option<i64>, scope: Option<&[i64]>, state: Option<&str>, limit: usize) -> AppResult<Vec<ActivityItem>> {
+        self.scoped_activity_for_relationship(kind, repository_id, scope, state, limit, "everyone", None)
+    }
+
+    pub fn scoped_activity_for_relationship(&self, kind: &str, repository_id: Option<i64>, scope: Option<&[i64]>, state: Option<&str>, limit: usize, relationship: &str, login: Option<&str>) -> AppResult<Vec<ActivityItem>> {
         if kind.eq_ignore_ascii_case("issues") || kind.eq_ignore_ascii_case("issue") {
-            Ok(self.scoped_issues(repository_id, scope, state, limit)?.into_iter().map(ActivityItem::Issue).collect())
+            Ok(self.scoped_issues_for_relationship(repository_id, scope, state, limit, relationship, login)?.into_iter().map(ActivityItem::Issue).collect())
         } else {
-            Ok(self.scoped_pull_requests(repository_id, scope, state, limit)?.into_iter().map(ActivityItem::PullRequest).collect())
+            Ok(self.scoped_pull_requests_for_relationship(repository_id, scope, state, limit, relationship, login)?.into_iter().map(ActivityItem::PullRequest).collect())
         }
     }
 }
@@ -663,13 +709,34 @@ fn snapshot_from_row(row: &Row<'_>) -> rusqlite::Result<Snapshot> {
 }
 
 fn pull_request_from_row(row: &Row<'_>) -> rusqlite::Result<PullRequest> {
-    Ok(PullRequest { repository_id: row.get(0)?, repository: row.get(1)?, number: row.get(2)?, title: row.get(3)?, state: row.get(4)?, is_draft: row.get(5)?, created_at: row.get(6)?, updated_at: row.get(7)?, merged_at: row.get(8)?, closed_at: row.get(9)?, url: row.get(10)?, additions: row.get(11)?, deletions: row.get(12)?, changed_files: row.get(13)?, ci_state: row.get(14)?, })
+    let assignees_json: Option<String> = row.get(12)?;
+    Ok(PullRequest { repository_id: row.get(0)?, repository: row.get(1)?, number: row.get(2)?, title: row.get(3)?, state: row.get(4)?, is_draft: row.get(5)?, created_at: row.get(6)?, updated_at: row.get(7)?, merged_at: row.get(8)?, closed_at: row.get(9)?, url: row.get(10)?, author: row.get(11)?, assignees: assignees_json.as_deref().and_then(|json| serde_json::from_str(json).ok()).unwrap_or_default(), additions: row.get(13)?, deletions: row.get(14)?, changed_files: row.get(15)?, ci_state: row.get(16)?, })
 }
 
 fn issue_from_row(row: &Row<'_>) -> rusqlite::Result<Issue> {
     let labels_json: String = row.get(10)?;
     let assignees_json: String = row.get(11)?;
     Ok(Issue { repository_id: row.get(0)?, repository: row.get(1)?, number: row.get(2)?, title: row.get(3)?, state: row.get(4)?, created_at: row.get(5)?, updated_at: row.get(6)?, closed_at: row.get(7)?, url: row.get(8)?, author: row.get(9)?, labels: serde_json::from_str(&labels_json).unwrap_or_default(), assignees: serde_json::from_str(&assignees_json).unwrap_or_default(), })
+}
+
+fn normalize_relationship(relationship: &str) -> AppResult<&str> {
+    if relationship.eq_ignore_ascii_case("everyone") { Ok("everyone") }
+    else if relationship.eq_ignore_ascii_case("author") { Ok("author") }
+    else if relationship.eq_ignore_ascii_case("assignee") { Ok("assignee") }
+    else if relationship.eq_ignore_ascii_case("author_or_assignee") { Ok("author_or_assignee") }
+    else { Err(crate::error::AppError::InvalidArgument("relationship must be one of everyone, author, assignee, author_or_assignee".into())) }
+}
+
+fn relationship_filter(alias: &str, relationship: &str) -> String {
+    match relationship {
+        // Keep the login placeholder present so all relationship variants use
+        // the same positional parameter list.
+        "everyone" => "?5 IS NULL OR ?5 IS NOT NULL".into(),
+        "author" => format!("?5 IS NOT NULL AND lower({alias}.author)=lower(?5)"),
+        "assignee" => format!("?5 IS NOT NULL AND EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid({alias}.assignees_json) THEN {alias}.assignees_json ELSE '[]' END) AS assignee WHERE lower(CAST(assignee.value AS TEXT))=lower(?5))"),
+        "author_or_assignee" => format!("?5 IS NOT NULL AND (lower({alias}.author)=lower(?5) OR EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid({alias}.assignees_json) THEN {alias}.assignees_json ELSE '[]' END) AS assignee WHERE lower(CAST(assignee.value AS TEXT))=lower(?5)) )"),
+        _ => unreachable!("relationship validated before SQL generation"),
+    }
 }
 
 fn repository_selected(repo: &Repository, settings: &crate::models::AppSettings, login: &str) -> bool {

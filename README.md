@@ -97,7 +97,7 @@ To prevent merging failing changes, configure repository branch protection or a 
 
 The [release workflow](.github/workflows/release.yml) runs only when a commit is pushed or merged into the `release` branch. Normal development merges into `main` do not publish releases. Open a pull request from `main` into `release` when the current main build is ready to ship; the pull request runs CI, and merging it starts one release workflow.
 
-The release workflow selects a version, repeats the frontend and backend tests against the release commit, then builds separate macOS artifacts for Apple Silicon and Intel. A successful run creates a published GitHub Release, generates release notes, tags the release commit as `v<version>`, and attaches both DMGs.
+The release workflow selects a version, repeats the frontend and backend tests against the release commit, then builds separate macOS artifacts for Apple Silicon and Intel. Each build includes a DMG plus a signed updater archive and is mounted, deep-signature verified, architecture checked, launched briefly on a matching runner, detached, and extracted from its updater archive before upload. Cross-architecture builds still receive all structural checks; a live launch is skipped when the runner architecture does not match. A successful run creates a published GitHub Release, generates release notes, tags the release commit as `v<version>`, and attaches both DMGs, updater archives, signatures, and the static `latest.json` updater manifest.
 
 Patch versions are automatic: if the source version is at or below the latest stable `v<major>.<minor>.<patch>` tag, the workflow increments that tag's patch version. For example, after `v0.1.2`, the next release uses `0.1.3` without a source version edit. A higher source version is used as declared, allowing intentional major or minor releases. When making such a change, update the same version in all three files:
 
@@ -113,23 +113,27 @@ Run the release regression checks with `node --test scripts/release-preflight.ch
 
 Choose `CodeTally_<version>_Apple-Silicon_aarch64.dmg` for an Apple M-series Mac, or `CodeTally_<version>_Intel_x64.dmg` for an Intel Mac. Check **Apple menu → About This Mac** for your chip or processor.
 
-macOS bundles are ad-hoc signed and their signatures are verified before publication. They are not Developer ID signed or notarized, so macOS may still require approval in **System Settings → Privacy & Security**. Developer ID signing and notarization require Apple signing credentials stored as GitHub Actions secrets.
+macOS bundles and updater archives are ad-hoc signed and verified before publication. The release workflow requires the `TAURI_SIGNING_PRIVATE_KEY` GitHub Actions secret to create updater signatures. Builds are not Developer ID signed or notarized, so macOS may still require approval in **System Settings → Privacy & Security**. Developer ID signing and notarization require Apple signing credentials stored as GitHub Actions secrets.
 
 Older builds such as `v0.1.2` can show “CodeTally is damaged” because the executable's linker signature does not seal the whole app bundle. Install a release containing the bundle-signing fix. Renaming an older download does not repair its signature.
 
 ## Everyday use
 
+The **Updates** button next to Settings checks for the latest stable [GitHub release](https://github.com/Xzese/CodeTally/releases). It checks when the app starts and every day by default. In **Settings → Background & refresh**, you can change this to weekly, monthly, or never. If an update is available, open the button to see the installed and available versions, **Check again**, or **Download update**. **Settings → About CodeTally** also checks once when you open it. **Download update** fetches and installs the signed updater archive for your Mac, then restarts CodeTally.
+
 The rightmost **Refresh** control performs an immediate full synchronization of GitHub activity and line counts. While work is running, that same control becomes **Syncing** or **Importing**. Hover, focus, or click it to see progress; click again to pin or dismiss the details.
 
-Automatic activity refreshes keep repository metadata, pull requests, and issues current while CodeTally is running, including with its window closed when background operation is enabled. The defaults are:
+Automatic PR & issue refreshes keep repository metadata, pull requests, and issues current while CodeTally is running, including with its window closed when background operation is enabled. The defaults are:
 
-- activity refresh every 30 minutes;
-- line-count sweep every 120 minutes;
-- refresh a repository's line counts when its GitHub `pushedAt` value changes.
+- PR & issue refresh every 30 minutes for all selected repositories;
+- code verification once per day (1440 minutes) as a fallback;
+- fetch a repository promptly when its GitHub `pushedAt` value changes, with exact commit-SHA deduplication preventing an already measured commit from being recounted.
 
 Settings apply automatically when you change a control and are stored in the local database. The status at the top shows when changes are being saved and provides a retry if saving fails. Rapid changes are saved in order, and the drawer stays open. Supporting explanations are available from the **?** buttons by hovering, focusing, or clicking.
 
-The **Background & refresh** section offers activity presets of 15, 30, 60, and 120 minutes (default 30), and line-count presets of 60, 120, 240, and 480 minutes (default 120). Each control also offers an inline **Custom** field for whole-minute intervals from 1 to 1440. A custom value applies when you leave its field or press Enter; invalid entries are not saved. Previously saved intervals are preserved and appear as custom values when they are outside the presets.
+**Settings → About CodeTally** displays the installed app name, version, bundle identifier, a link to the project repository, and the latest update status.
+
+The **Background & refresh** section lets you choose how often CodeTally refreshes pull requests and issues (15, 30, 60, or 120 minutes; 30 by default) and Lines of Code (6, 12, or 24 hours; daily by default). You can also enter a custom interval. Your change saves when you leave the field or press Enter.
 
 In **Settings → Appearance & menu bar**, choose **Light**, **Dark**, or **Follow system**. Follow system is the default and responds to macOS appearance changes while the app is open.
 
@@ -137,7 +141,7 @@ On macOS, select one or more of **Total lines**, **Source lines**, **Test lines*
 
 **Include forks in line totals** is disabled by default. Enable it in Settings to count selected fork repositories in portfolio totals and line history.
 
-**Keep running in the background when the window closes** is enabled by default. Closing the window keeps scheduled refreshes running in the native app. Use **Show CodeTally** in the menu bar to reopen the dashboard and **Quit CodeTally** to stop the app. Disable background operation to quit when the main window closes. These preferences are saved locally; background operation does not launch the app at login or keep the Mac awake.
+**Keep running in the background when the window closes** is enabled by default. With the menu bar visible, CodeTally runs without a Dock icon. Use **Show CodeTally** in the menu bar to reopen the dashboard and **Quit CodeTally** to stop the app. If you hide the menu bar, CodeTally keeps its Dock icon so you can still reopen it. Disable background operation to quit when the main window closes. These preferences are saved locally; background operation does not launch the app at login or keep the Mac awake.
 
 The **tracked** count above the repository table opens **Show in table**. Uncheck individual repositories or a whole owner group to hide rows, and use **Show all** to restore them. Personal repositories appear first, followed by each organization by name; groups start collapsed. This is a temporary table filter: tracking, background sync, portfolio totals, history, and activity continue unchanged. The filter resets when you leave the dashboard.
 
@@ -147,13 +151,19 @@ Deselected repositories disappear from the dashboard, activity feeds, line histo
 
 The selector lists locally discovered repositories, including deselected ones. Discovery can still list repository metadata for enabled owner groups so newly available repositories appear; disabling a whole group also skips its repository discovery. Reenable a group and refresh to discover its new repositories.
 
-Automatic repository discovery and metadata refresh run at most once per hour; manual **Refresh** forces discovery. Activity refreshes combine pull requests, issues, and exact open counts into paginated queries. Open items are refreshed regardless of age, including pull-request CI status. The first activity import fetches closed or merged items updated in the last 30 days; later refreshes fetch changes since each feed's saved checkpoint, with a five-minute overlap. Previously cached history is retained.
+Automatic repository discovery and metadata refresh use a cache reuse window based on the PR & issue refresh setting, clamped to 15 to 60 minutes (30 minutes by default). Discovery is attempted on the next PR & issue refresh cycle after that window expires, so a slower PR & issue interval can make discovery less frequent. Manual **Refresh** forces discovery. PR & issue refreshes combine pull requests, issues, and exact open counts into paginated queries. Open items are refreshed regardless of age, including pull-request CI status. The first activity import fetches closed or merged items updated in the last 30 days; later refreshes fetch changes since each feed's saved checkpoint, with a five-minute overlap. Previously cached history is retained.
 
 Large feeds are processed up to five pages of 100 items per feed per cycle, then resumed from saved progress on the next cycle. Repository processing rotates after an interrupted refresh so later repositories also get a turn. A partial import does not advance the last-successful-sync timestamp.
 
 When GitHub reports a low or exhausted API quota, CodeTally saves a pause until the reset time and stops further requests. Secondary rate limits also trigger a cooldown. Pauses survive restarts, cached data stays readable, and scheduled refreshes resume after the cooldown. Manual refreshes respect the same pause. This reduces API consumption and handles limits shared with other applications using your GitHub account.
 
+PR & issue refreshes use GitHub's GraphQL allowance alongside startup and manual work. The app records the reported query cost and remaining GraphQL allowance, and pauses at 100 remaining points. More selected repositories, pagination, transient retries, or other tools using the account can still exhaust the shared allowance and delay refreshes. App update checks use the separate core REST allowance and default to daily; Settings also offers weekly, monthly, or never.
+
 The activity sidebar starts on open pull requests. Switching between pull requests and issues resets the state filter to **Open**. On a repository detail page, the feed remains locked to that repository; returning to the portfolio restores the previous dashboard filter.
+
+Use **My involvement** in the feed to choose **Everyone**, **Authored by me** (default), **Assigned to me**, or **Authored or assigned to me**. “Me” is the connected GitHub account. The choice is saved automatically and applies to both pull requests and issues alongside the repository and state filters.
+
+Pull request and issue refreshes cover all selected repositories. **My involvement** only changes what appears in the live feed. “Me” is the connected GitHub account, and the default is **Authored by me**.
 
 The activity repository filter opens collapsed **Personal repositories** and named company groups. Expand a group to choose all its repositories or one repository, or choose **All company repositories** across organizations. The selected scope carries across PR and issue tabs and only filters the feed; it does not change tracking. Group selection is applied before the activity result limit.
 
