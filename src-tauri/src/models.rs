@@ -158,6 +158,14 @@ pub struct Dashboard {
     pub errors: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppInfo {
+    pub name: String,
+    pub version: String,
+    pub identifier: String,
+    pub repository_url: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct LocHistory {
     pub repository_id: Option<i64>,

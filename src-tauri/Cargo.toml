@@ -22,6 +22,7 @@ chrono = { version = "0.4", features = ["serde", "clock"] }
 thiserror = "1"
 open = "5"
 tokio = { version = "1", features = ["sync", "rt", "macros"] }
+tauri-plugin-updater = "=2.11.0"
 
 [profile.release]
 codegen-units = 1

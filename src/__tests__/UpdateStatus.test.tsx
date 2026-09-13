@@ -37,7 +37,7 @@ async function flushPromises() {
 }
 
 function updatesPanel() {
-  return screen.getByRole('region', { name: 'App updates' })
+  return screen.getByRole('region', { name: 'Updates' })
 }
 
 function renderUpdateStatus(interval: UpdateCheckInterval = 'daily') {
@@ -63,16 +63,16 @@ describe('UpdateStatus', () => {
     renderUpdateStatus()
 
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('check_for_updates', undefined))
-    const trigger = screen.getByRole('button', { name: 'App updates' })
+    const trigger = screen.getByRole('button', { name: 'Updates' })
     expect(trigger).toHaveAttribute('aria-expanded', 'false')
 
     await user.click(trigger)
     const panel = updatesPanel()
-    expect(within(panel).getByText('Installed version: v0.1.2')).toBeInTheDocument()
+    expect(within(panel).getByText('Current version: v0.1.2')).toBeInTheDocument()
     await waitFor(() => expect(within(panel).getByText('You’re up to date.')).toBeInTheDocument())
   })
 
-  it('announces an available update and opens its release page through the backend', async () => {
+  it('announces an available update and installs it through the backend', async () => {
     invokeMock.mockResolvedValue(updateAvailable)
     const user = userEvent.setup()
 
@@ -82,11 +82,11 @@ describe('UpdateStatus', () => {
     expect(trigger).toHaveAttribute('title', 'CodeTally v0.2.0 is available')
     await user.click(trigger)
     const panel = updatesPanel()
-    expect(within(panel).getByText('Installed version: v0.1.2')).toBeInTheDocument()
+    expect(within(panel).getByText('Current version: v0.1.2')).toBeInTheDocument()
     expect(within(panel).getByText('CodeTally v0.2.0 is available.')).toBeInTheDocument()
 
-    await user.click(within(panel).getByRole('button', { name: 'View release' }))
-    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('open_external_url', { url: updateAvailable.release_url }))
+    await user.click(within(panel).getByRole('button', { name: 'Download update' }))
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('install_update', undefined))
   })
 
   it('shows a retry error without stale status and recovers after a rejected check', async () => {
@@ -99,16 +99,16 @@ describe('UpdateStatus', () => {
     renderUpdateStatus()
     await waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === 'check_for_updates')).toHaveLength(1))
 
-    await user.click(screen.getByRole('button', { name: 'App updates' }))
+    await user.click(screen.getByRole('button', { name: 'Updates' }))
     const panel = updatesPanel()
     await waitFor(() => expect(within(panel).getByText('You’re up to date.')).toBeInTheDocument())
 
-    await user.click(within(panel).getByRole('button', { name: 'Check for updates' }))
+    await user.click(within(panel).getByRole('button', { name: 'Check again' }))
     await waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === 'check_for_updates')).toHaveLength(2))
-    expect(await within(panel).findByRole('alert')).toHaveTextContent('Could not check for updates.')
+    expect(await within(panel).findByRole('alert')).toHaveTextContent("Couldn't check for updates.")
     expect(within(panel).queryByText('You’re up to date.')).not.toBeInTheDocument()
 
-    await user.click(within(panel).getByRole('button', { name: 'Check for updates' }))
+    await user.click(within(panel).getByRole('button', { name: 'Check again' }))
     await waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === 'check_for_updates')).toHaveLength(3))
     await waitFor(() => expect(within(panel).getByText('You’re up to date.')).toBeInTheDocument())
     expect(within(panel).queryByRole('alert')).not.toBeInTheDocument()
@@ -175,8 +175,8 @@ describe('UpdateStatus', () => {
     await flushPromises()
     expect(invokeMock.mock.calls.filter(([command]) => command === 'check_for_updates')).toHaveLength(0)
 
-    await user.click(screen.getByRole('button', { name: 'App updates' }))
-    await user.click(within(updatesPanel()).getByRole('button', { name: 'Check for updates' }))
+    await user.click(screen.getByRole('button', { name: 'Updates' }))
+    await user.click(within(updatesPanel()).getByRole('button', { name: 'Check again' }))
     await flushPromises()
     expect(invokeMock.mock.calls.filter(([command]) => command === 'check_for_updates')).toHaveLength(1)
   })
@@ -187,12 +187,12 @@ describe('UpdateStatus', () => {
 
     renderUpdateStatus()
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('check_for_updates', undefined))
-    const trigger = screen.getByRole('button', { name: 'App updates' })
+    const trigger = screen.getByRole('button', { name: 'Updates' })
     await user.click(trigger)
     expect(updatesPanel()).toBeInTheDocument()
 
     await user.keyboard('{Escape}')
-    expect(screen.queryByRole('region', { name: 'App updates' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: 'Updates' })).not.toBeInTheDocument()
     expect(trigger).toHaveFocus()
   })
 })

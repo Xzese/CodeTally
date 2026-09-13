@@ -1,5 +1,5 @@
 //! Native lifecycle and scheduling remain active when the dashboard is hidden.
-use crate::models::{DashboardTotals, MenuBarMetric};
+use crate::models::{AppSettings, DashboardTotals, MenuBarMetric};
 use crate::sync::{self, AppState};
 use std::time::{Duration, Instant};
 use tauri::{menu::{Menu, MenuBuilder}, tray::TrayIconBuilder, AppHandle, Emitter, Manager};
@@ -13,6 +13,22 @@ const METRIC_TRAYS: [(MenuBarMetric, &str); 5] = [
     (MenuBarMetric::OpenPrs, "codetally-open-prs"),
     (MenuBarMetric::OpenIssues, "codetally-open-issues"),
 ];
+
+pub fn hides_dock_icon(settings: &AppSettings) -> bool {
+    settings.run_in_background && settings.show_menu_bar
+}
+
+pub fn apply_activation_policy(app: &AppHandle, settings: &AppSettings) -> tauri::Result<()> {
+    #[cfg(target_os = "macos")]
+    app.set_activation_policy(if hides_dock_icon(settings) {
+        tauri::ActivationPolicy::Accessory
+    } else {
+        tauri::ActivationPolicy::Regular
+    })?;
+    #[cfg(not(target_os = "macos"))]
+    let _ = (app, settings);
+    Ok(())
+}
 
 pub fn metric_title(metric: MenuBarMetric, totals: &DashboardTotals) -> String {
     let (value, label) = match metric {
@@ -231,4 +247,23 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         }
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hides_dock_icon;
+    use crate::models::AppSettings;
+
+    #[test]
+    fn dock_icon_is_hidden_only_when_background_and_menu_bar_are_enabled() {
+        let mut settings = AppSettings::default();
+        assert!(hides_dock_icon(&settings));
+
+        settings.run_in_background = false;
+        assert!(!hides_dock_icon(&settings));
+
+        settings.run_in_background = true;
+        settings.show_menu_bar = false;
+        assert!(!hides_dock_icon(&settings));
+    }
 }

@@ -25,20 +25,20 @@ function couldNotVerifyAuthentication(deps: DependencyStatus): boolean {
 
 function authenticationMessage(deps: DependencyStatus): string {
   if (couldNotVerifyAuthentication(deps)) {
-    return "CodeTally couldn't verify the GitHub CLI session just now. Your cached dashboard is still available; check your connection and try again."
+    return "Couldn't verify your GitHub sign-in just now. Your saved dashboard is still available. Check your connection and try again."
   }
-  return 'Run the sign-in command below in Terminal. If you are already signed in, run gh auth status there, then check the connection again.'
+  return 'Run the sign-in command below in Terminal. If you are already signed in, check your GitHub sign-in again.'
 }
 
 function ConnectionStatus({ deps, login }: { deps: DependencyStatus; login?: string | null }) {
   const authenticated = isAuthenticated(deps)
   if (!deps.gh) {
-    return <div className="github-connection-status github-connection-status-missing"><span className="check-icon"><Terminal size={15} /></span><span><strong>GitHub CLI is not installed</strong><small>Install it before signing in to GitHub.</small></span></div>
+    return <div className="github-connection-status github-connection-status-missing"><span className="check-icon"><Terminal size={15} /></span><span><strong>GitHub sign-in is not set up</strong><small>Install GitHub CLI before signing in.</small></span></div>
   }
   if (authenticated) {
-    return <div className="github-connection-status github-connection-status-ready" role="status"><span className="check-icon"><Check size={15} /></span><span><strong>GitHub connected</strong><small>{login || deps.login ? `Signed in as ${login || deps.login}` : 'The local GitHub CLI session is ready.'}</small></span><span className="check-state">Ready</span></div>
+    return <div className="github-connection-status github-connection-status-ready" role="status"><span className="check-icon"><Check size={15} /></span><span><strong>GitHub connected</strong><small>{login || deps.login ? `Signed in as ${login || deps.login}` : 'Your GitHub sign-in is ready.'}</small></span><span className="check-state">Ready</span></div>
   }
-  return <div className={couldNotVerifyAuthentication(deps) ? 'github-connection-status github-connection-status-unavailable' : 'github-connection-status github-connection-status-disconnected'} role="status"><span className="check-icon"><AlertCircle size={15} /></span><span><strong>GitHub session could not be verified</strong><small>{authenticationMessage(deps)}</small></span></div>
+  return <div className={couldNotVerifyAuthentication(deps) ? 'github-connection-status github-connection-status-unavailable' : 'github-connection-status github-connection-status-disconnected'} role="status"><span className="check-icon"><AlertCircle size={15} /></span><span><strong>GitHub sign-in needs attention</strong><small>{authenticationMessage(deps)}</small></span></div>
 }
 
 function GitHubCliLink({ compact = false }: { compact?: boolean }) {
@@ -52,7 +52,7 @@ function GitHubCliLink({ compact = false }: { compact?: boolean }) {
       setError(true)
     }
   }
-  return <span className="github-install-link-wrap"><a className={compact ? 'github-install-link' : 'button secondary compact github-install-link'} href={GITHUB_CLI_INSTALL_URL} onClick={(event) => void open(event)}>{compact ? <>GitHub CLI help <ExternalLink size={12} /></> : <><Terminal size={14} /> Install GitHub CLI <ExternalLink size={12} /></>}</a>{error && <span className="github-link-error" role="status">Could not open the GitHub CLI page.</span>}</span>
+  return <span className="github-install-link-wrap"><a className={compact ? 'github-install-link' : 'button secondary compact github-install-link'} href={GITHUB_CLI_INSTALL_URL} onClick={(event) => void open(event)}>{compact ? <>GitHub sign-in help <ExternalLink size={12} /></> : <><Terminal size={14} /> Install GitHub CLI <ExternalLink size={12} /></>}</a>{error && <span className="github-link-error" role="status">Couldn't open the GitHub download page.</span>}</span>
 }
 
 function CopyAuthCommand() {
@@ -69,7 +69,7 @@ function CopyAuthCommand() {
     }
   }
 
-  return <div className="github-auth-command-wrap"><code className="github-auth-command">{GITHUB_AUTH_COMMAND}</code><button className="button secondary compact github-copy-button" type="button" onClick={() => void copy()} aria-label="Copy GitHub authentication command">{copyState === 'copied' ? <Check size={14} /> : <Clipboard size={14} />}{copyState === 'copied' ? 'Copied' : 'Copy command'}</button>{copyState === 'failed' && <span className="github-copy-error" role="status">Could not copy. Select the command above and copy it manually.</span>}</div>
+  return <div className="github-auth-command-wrap"><code className="github-auth-command">{GITHUB_AUTH_COMMAND}</code><button className="button secondary compact github-copy-button" type="button" onClick={() => void copy()} aria-label="Copy GitHub sign-in command">{copyState === 'copied' ? <Check size={14} /> : <Clipboard size={14} />}{copyState === 'copied' ? 'Copied' : 'Copy command'}</button>{copyState === 'failed' && <span className="github-copy-error" role="status">Couldn't copy. Select the command above and copy it yourself.</span>}</div>
 }
 
 function CheckConnectionButton({ checking, onRetry, secondary = false }: { checking: boolean; onRetry: () => void | Promise<void>; secondary?: boolean }) {
@@ -83,7 +83,7 @@ function CheckConnectionButton({ checking, onRetry, secondary = false }: { check
       setLocalChecking(false)
     }
   }
-  return <button className={secondary ? 'button secondary compact github-check-button' : 'button primary compact github-check-button'} type="button" disabled={isChecking} onClick={() => void check()}>{isChecking ? <><LoaderCircle size={14} className="spin" /> Checking connection…</> : <><Github size={14} /> Check connection</>}</button>
+  return <button className={secondary ? 'button secondary compact github-check-button' : 'button primary compact github-check-button'} type="button" disabled={isChecking} onClick={() => void check()}>{isChecking ? <><LoaderCircle size={14} className="spin" /> Checking GitHub sign-in…</> : <><Github size={14} /> Check again</>}</button>
 }
 
 function AuthGuide({ checking, onRetry, compact = false, showCheckButton = true }: { checking: boolean; onRetry: () => void | Promise<void>; compact?: boolean; showCheckButton?: boolean }) {
@@ -99,8 +99,8 @@ function AuthGuide({ checking, onRetry, compact = false, showCheckButton = true 
     }
   }
 
-  const steps = <ol className="github-auth-steps"><li className="github-auth-step"><span className="github-step-number">1</span><span><strong>Open Terminal</strong><small>Use the Terminal app on your Mac.</small></span></li><li className="github-auth-step"><span className="github-step-number">2</span><span><strong>Copy and run this command</strong><small>It opens GitHub in your browser. Finish the authorization there, then return to CodeTally.</small><CopyAuthCommand /></span></li><li className="github-auth-step"><span className="github-step-number">3</span><span><strong>Check connection</strong><small>CodeTally will recheck the local GitHub CLI session without starting authentication.</small>{showCheckButton && <button className="button primary compact github-check-button" type="button" disabled={isChecking} onClick={() => void check()}>{isChecking ? <><LoaderCircle size={14} className="spin" /> Checking connection…</> : <><Github size={14} /> Check connection</>}</button>}</span></li></ol>
-  return <div className={compact ? 'github-auth-guide github-auth-guide-compact' : 'github-auth-guide'}>{compact && <button className="github-auth-toggle" type="button" aria-expanded={expanded} onClick={() => setExpanded((current) => !current)}>{expanded ? 'Hide sign-in instructions' : 'Sign-in instructions'}</button>}{!compact && <p className="github-auth-intro">Authorize GitHub in Terminal and in your browser, then return here to recheck the local session.</p>}{expanded && steps}</div>
+  const steps = <ol className="github-auth-steps"><li className="github-auth-step"><span className="github-step-number">1</span><span><strong>Open Terminal</strong><small>Use Terminal on your Mac.</small></span></li><li className="github-auth-step"><span className="github-step-number">2</span><span><strong>Run this command</strong><small>GitHub opens in your browser. Finish signing in, then return to CodeTally.</small><CopyAuthCommand /></span></li><li className="github-auth-step"><span className="github-step-number">3</span><span><strong>Check again</strong><small>CodeTally will check your GitHub sign-in without starting a new sign-in.</small>{showCheckButton && <button className="button primary compact github-check-button" type="button" disabled={isChecking} onClick={() => void check()}>{isChecking ? <><LoaderCircle size={14} className="spin" /> Checking GitHub sign-in…</> : <><Github size={14} /> Check again</>}</button>}</span></li></ol>
+  return <div className={compact ? 'github-auth-guide github-auth-guide-compact' : 'github-auth-guide'}>{compact && <button className="github-auth-toggle" type="button" aria-expanded={expanded} onClick={() => setExpanded((current) => !current)}>{expanded ? 'Hide sign-in instructions' : 'Sign-in instructions'}</button>}{!compact && <p className="github-auth-intro">Sign in to GitHub in Terminal and your browser, then return here and check again.</p>}{expanded && steps}</div>
 }
 
 export default function GitHubConnection({ deps, login, compact = false, checking = false, onRetry }: GitHubConnectionProps) {
@@ -108,8 +108,8 @@ export default function GitHubConnection({ deps, login, compact = false, checkin
   const showCheck = !deps.gh || !authenticated || !deps.git || !deps.tokei
 
   if (compact) {
-    return <section className="repos-panel github-connection github-connection-compact" aria-labelledby="github-reconnect-heading"><div className="panel-heading github-reconnect-heading"><div><p className="eyebrow">GitHub connection</p><h2 id="github-reconnect-heading">Reconnect GitHub</h2></div><span className="github-reconnect-icon"><Github size={17} /></span></div><p className="github-reconnect-copy">{couldNotVerifyAuthentication(deps) ? "We couldn't verify the GitHub CLI session. Cached data remains available while you check your connection." : 'GitHub session could not be verified. Authorize it in Terminal, then check the connection to refresh your cached data.'}</p><div className="github-reconnect-actions"><CheckConnectionButton checking={checking} onRetry={onRetry} /><GitHubCliLink compact /></div><AuthGuide compact checking={checking} onRetry={onRetry} showCheckButton={false} /></section>
+    return <section className="repos-panel github-connection github-connection-compact" aria-labelledby="github-reconnect-heading"><div className="panel-heading github-reconnect-heading"><div><p className="eyebrow">GitHub connection</p><h2 id="github-reconnect-heading">Reconnect GitHub</h2></div><span className="github-reconnect-icon"><Github size={17} /></span></div><p className="github-reconnect-copy">{couldNotVerifyAuthentication(deps) ? "We couldn't verify your GitHub sign-in. Your saved data is still available while you check again." : 'We couldn\'t verify your GitHub sign-in. Run the sign-in command in Terminal, then check again to refresh your saved data.'}</p><div className="github-reconnect-actions"><CheckConnectionButton checking={checking} onRetry={onRetry} /><GitHubCliLink compact /></div><AuthGuide compact checking={checking} onRetry={onRetry} showCheckButton={false} /></section>
   }
 
-  return <section className="github-connection" aria-labelledby="github-connection-heading"><p className="eyebrow">GitHub connection</p><h1 id="github-connection-heading">Connect GitHub to CodeTally</h1><p className="setup-copy">CodeTally uses the GitHub CLI already installed on this Mac. Your authentication stays with GitHub CLI and no token is stored by CodeTally.</p><ConnectionStatus deps={deps} login={login} />{!deps.gh && <div className="github-install"><p>Install the official GitHub CLI, then come back and check the connection.</p><GitHubCliLink /></div>}{deps.gh && !authenticated && <AuthGuide checking={checking} onRetry={onRetry} />}{showCheck && !deps.gh && <div className="github-missing-check"><button className="button secondary compact github-check-button" type="button" disabled={checking} onClick={() => void onRetry()}>{checking ? <><LoaderCircle size={14} className="spin" /> Checking connection…</> : 'Check connection'}</button></div>}{showCheck && deps.gh && authenticated && <div className="github-tool-check"><p className="github-tool-check-copy">GitHub is connected. Check again after installing any missing local tools below.</p><button className="button secondary compact github-check-button" type="button" disabled={checking} onClick={() => void onRetry()}>{checking ? <><LoaderCircle size={14} className="spin" /> Checking connection…</> : 'Check connection'}</button></div>}</section>
+  return <section className="github-connection" aria-labelledby="github-connection-heading"><p className="eyebrow">GitHub connection</p><h1 id="github-connection-heading">Connect GitHub to CodeTally</h1><p className="setup-copy">CodeTally uses the GitHub sign-in set up on this Mac. Your sign-in stays with GitHub, and CodeTally doesn’t store a token.</p><ConnectionStatus deps={deps} login={login} />{!deps.gh && <div className="github-install"><p>Install GitHub CLI, then come back and check again.</p><GitHubCliLink /></div>}{deps.gh && !authenticated && <AuthGuide checking={checking} onRetry={onRetry} />}{showCheck && !deps.gh && <div className="github-missing-check"><button className="button secondary compact github-check-button" type="button" disabled={checking} onClick={() => void onRetry()}>{checking ? <><LoaderCircle size={14} className="spin" /> Checking GitHub sign-in…</> : 'Check again'}</button></div>}{showCheck && deps.gh && authenticated && <div className="github-tool-check"><p className="github-tool-check-copy">GitHub is connected. Install any missing tools below, then check again.</p><button className="button secondary compact github-check-button" type="button" disabled={checking} onClick={() => void onRetry()}>{checking ? <><LoaderCircle size={14} className="spin" /> Checking GitHub sign-in…</> : 'Check again'}</button></div>}</section>
 }

@@ -65,6 +65,21 @@ export async function getDatabaseLocation(): Promise<string> {
   return call<string>('get_database_location')
 }
 
+export interface AppInfo {
+  name: string
+  version: string
+  identifier: string
+  repository_url: string
+}
+
+export async function getAppInfo(): Promise<AppInfo> {
+  return call<AppInfo>('get_app_info')
+}
+
+export async function installAppUpdate(): Promise<void> {
+  return call<void>('install_update')
+}
+
 export async function revealDatabase(): Promise<boolean> {
   return call<boolean>('reveal_database')
 }
