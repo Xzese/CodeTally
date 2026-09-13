@@ -2,7 +2,7 @@ use crate::error;
 use crate::models::{ActivityFeed, AppSettings, ClassificationConfig, Dashboard, GithubUser, LocHistory, RepositorySummary, SyncProgress, SyncResult};
 use crate::sync::{self, AppState};
 use chrono::Utc;
-use tauri::{Manager, State};
+use tauri::State;
 
 #[tauri::command(rename_all = "snake_case")]
 pub async fn check_dependencies() -> crate::models::DependencyStatus {

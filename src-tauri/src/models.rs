@@ -222,6 +222,16 @@ pub enum ActivityRelationship {
     AuthorOrAssignee,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateCheckInterval {
+    #[default]
+    Daily,
+    Weekly,
+    Monthly,
+    Never,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     #[serde(default)]
@@ -229,6 +239,8 @@ pub struct AppSettings {
     pub activity_refresh_minutes: i64,
     #[serde(default)]
     pub activity_relationship: ActivityRelationship,
+    #[serde(default)]
+    pub update_check_interval: UpdateCheckInterval,
     pub lines_refresh_minutes: i64,
     pub refresh_lines_on_change: bool,
     #[serde(default = "default_run_in_background")]
@@ -272,7 +284,8 @@ impl Default for AppSettings {
             theme_mode: ThemeMode::default(),
             activity_refresh_minutes: 30,
             activity_relationship: ActivityRelationship::default(),
-            lines_refresh_minutes: 120,
+            update_check_interval: UpdateCheckInterval::default(),
+            lines_refresh_minutes: 1440,
             refresh_lines_on_change: true,
             run_in_background: true,
             menu_bar_metric: MenuBarMetric::default(),

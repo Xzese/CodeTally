@@ -592,7 +592,7 @@ function App() {
         <div className="topbar-status">
           {login ? <span className="identity"><span className="status-dot" />{login}</span> : <span className="muted">Local desktop dashboard</span>}
           <button className="icon-button" title="Settings" onClick={() => setSettingsOpen(true)}><Settings size={17} /></button>
-          <UpdateStatus />
+          <UpdateStatus updateCheckInterval={settingsLoaded ? appSettings.update_check_interval : null} />
           <div
             className={syncDetailsAvailable ? 'sync-popover-wrap active' : 'sync-popover-wrap'}
             ref={syncPopoverRef}

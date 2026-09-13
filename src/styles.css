@@ -418,6 +418,12 @@ td:first-child { padding-left: 18px; }
 .settings-interval-options > label:has(input:focus-visible), .settings-custom-option:has(input:focus-visible), .settings-metric-option:has(input:focus-visible) { outline: 3px solid color-mix(in srgb, var(--control-accent) 55%, transparent); outline-offset: 2px; }
 .settings-interval-options label:has(input:disabled), .settings-metric-option:has(input:disabled) { opacity: .45; cursor: default; }
 .settings-interval-row .settings-interval-options { margin: 0; }
+.settings-update-interval-row { display: grid; grid-template-columns: 160px minmax(0, 1fr); gap: 14px; align-items: start; }
+.settings-update-interval-options { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 3px; width: 100%; padding: 3px; border: 1px solid var(--line); border-radius: 8px; background: var(--control-fill); }
+.settings-update-interval-options label { position: relative; display: flex; align-items: center; justify-content: center; min-width: 0; min-height: 29px; padding: 7px 4px; border-radius: 5px; color: var(--subtle); font-size: 11px; font-weight: 500; cursor: pointer; white-space: nowrap; }
+.settings-update-interval-options label.selected, .settings-update-interval-options label:has(input:checked) { color: white; background: linear-gradient(#2793ff, #007aff); box-shadow: 0 1px 3px rgba(0,0,0,.16); }
+.settings-update-interval-options label:has(input:focus-visible) { outline: 3px solid color-mix(in srgb, var(--control-accent) 55%, transparent); outline-offset: 2px; }
+.settings-update-interval-options input { position: absolute; width: 1px; height: 1px; padding: 0; opacity: 0; }
 .settings-row-unit { color: var(--muted); font-size: 10px; font-weight: 450; }
 .settings-menu-preview { margin-bottom: 14px; padding: 16px; border: 1px solid color-mix(in srgb, var(--blue) 22%, var(--line)); border-radius: 12px; background: linear-gradient(135deg, color-mix(in srgb, var(--blue) 15%, var(--panel)), var(--panel)); }
 .settings-menu-preview-label { margin-bottom: 12px; color: var(--muted); font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .09em; }
@@ -460,7 +466,7 @@ td:first-child { padding-left: 18px; }
 .settings-interval-error { display: block; margin-top: 6px; color: var(--red); font-size: 11px; line-height: 1.4; text-align: right; }
 .light .settings-interval-error { color: #b42332; }
 @media (max-width: 480px) {
-  .settings-interval-row { grid-template-columns: minmax(0, 1fr); gap: 5px; padding: 5px 0; }
+  .settings-interval-row, .settings-update-interval-row { grid-template-columns: minmax(0, 1fr); gap: 5px; padding: 5px 0; }
 }
 .settings-menu-preview-strip { justify-content: flex-start; overflow-x: auto; scrollbar-width: thin; }
 .settings-preview-value { flex: 0 0 auto; margin-inline: auto; }

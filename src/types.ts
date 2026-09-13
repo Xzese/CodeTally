@@ -236,10 +236,12 @@ export interface RepositorySelection {
 }
 
 export type ThemeMode = 'light' | 'dark' | 'system'
+export type UpdateCheckInterval = 'daily' | 'weekly' | 'monthly' | 'never'
 
 export interface AppSettings {
   theme_mode: ThemeMode
   activity_relationship: ActivityRelationship
+  update_check_interval: UpdateCheckInterval
   run_in_background: boolean
   menu_bar_metric: MenuBarMetric
   menu_bar_metrics: MenuBarMetric[]

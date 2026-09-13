@@ -170,8 +170,9 @@ const readyDependencies: DependencyStatus = { gh: true, git: true, tokei: true, 
 const syncOk: SyncResult = { ok: true, message: 'Sync complete', repositories_synced: 2, pull_requests_synced: 2, issues_synced: 2, snapshots_created: 0, errors: [] }
 const defaultAppSettings: AppSettings = {
   activity_refresh_minutes: 30,
-  activity_relationship: 'everyone',
-  lines_refresh_minutes: 120,
+  activity_relationship: 'author',
+  update_check_interval: 'daily',
+  lines_refresh_minutes: 1440,
   refresh_lines_on_change: true,
   run_in_background: true,
   menu_bar_metric: 'total_lines' as const,
@@ -393,7 +394,7 @@ describe('dashboard UI', () => {
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('get_dashboard', undefined))
     await user.click(screen.getByRole('button', { name: 'Settings' }))
     const drawer = await screen.findByRole('dialog', { name: 'Settings' })
-    const activityRefresh = within(drawer).getByRole('radiogroup', { name: 'Activity refresh' })
+    const activityRefresh = within(drawer).getByRole('radiogroup', { name: 'PR & issue refresh' })
     await user.click(within(activityRefresh).getByRole('radio', { name: '15 minutes' }))
     await waitFor(() => expect(savedSettings()[savedSettings().length - 1]).toEqual(expect.objectContaining({ activity_refresh_minutes: 15 })))
 
@@ -492,10 +493,10 @@ describe('dashboard UI', () => {
     expect(within(picker).queryByRole('button', { name: 'gamma' })).not.toBeInTheDocument()
     await user.click(within(picker).getByRole('button', { name: 'Expand acme' }))
     await user.click(within(picker).getByRole('button', { name: 'All acme repositories' }))
-    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('get_activity_feed', { kind: 'prs', repository_id: null, repository_ids: [3], state: 'open', limit: 1000 }))
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('get_activity_feed', { kind: 'prs', repository_id: null, repository_ids: [3], state: 'open', relationship: 'author', limit: 1000 }))
     const sidebar = screen.getByRole('heading', { name: 'Recent activity' }).closest('aside') as HTMLElement
     await user.click(within(sidebar).getByRole('button', { name: 'Issues' }))
-    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('get_activity_feed', { kind: 'issues', repository_id: null, repository_ids: [3], state: 'open', limit: 1000 }))
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('get_activity_feed', { kind: 'issues', repository_id: null, repository_ids: [3], state: 'open', relationship: 'author', limit: 1000 }))
     expect(screen.getByRole('button', { name: 'Filter by repository: acme' })).toBeInTheDocument()
   })
 
@@ -511,6 +512,7 @@ describe('dashboard UI', () => {
         kind: 'prs',
         repository_id: 2,
         state: 'open',
+        relationship: 'author',
         limit: 1000
       })
     })
@@ -523,7 +525,7 @@ describe('dashboard UI', () => {
     const latestPrArgs = () => callsFor('prs').at(-1)?.[1] as Record<string, unknown>
 
     await waitFor(() => expect(callsFor('prs').length).toBeGreaterThan(0))
-    expect(latestPrArgs()).not.toHaveProperty('relationship')
+    expect(latestPrArgs()).toEqual(expect.objectContaining({ relationship: 'author' }))
 
     await user.selectOptions(involvement, 'author')
     await waitFor(() => expect(latestPrArgs()).toEqual(expect.objectContaining({ relationship: 'author' })))
@@ -580,6 +582,7 @@ describe('dashboard UI', () => {
     const staleItem: PullRequest = { ...prs[0], title: 'Stale everyone result' }
     const freshItem: PullRequest = { ...prs[0], title: 'Fresh author result' }
     configureBackend({
+      settings: { activity_relationship: 'everyone' },
       activityFeed: (kind, args) => {
         if (kind === 'issues') return issues
         return args.relationship === 'author' ? freshResponse.promise : staleResponse.promise
@@ -639,6 +642,7 @@ describe('dashboard UI', () => {
         kind: 'prs',
         repository_id: 1,
         state: 'open',
+        relationship: 'author',
         limit: 1000
       })
     })
@@ -652,6 +656,7 @@ describe('dashboard UI', () => {
         kind: 'issues',
         repository_id: 1,
         state: 'open',
+        relationship: 'author',
         limit: 1000
       })
     })
@@ -956,8 +961,7 @@ describe('dashboard UI', () => {
     }
   })
 
-  it('uses activity-only sync on startup while manual Refresh uses full sync and frontend timers do not schedule extra syncs', async () => {
-    vi.useFakeTimers()
+  it('uses the PR and issue sync on startup while manual Refresh uses the full sync', async () => {
     configureBackend()
     render(<App />)
 
@@ -973,14 +977,6 @@ describe('dashboard UI', () => {
       for (let index = 0; index < 8; index += 1) await Promise.resolve()
     })
     expect(invokeMock.mock.calls.some(([command]) => command === 'sync_github_data')).toBe(true)
-
-    const activityCallsBeforeSchedule = invokeMock.mock.calls.filter(([command]) => command === 'sync_activity').length
-    await act(async () => {
-      vi.advanceTimersByTime(2 * 60 * 1000)
-      for (let index = 0; index < 12; index += 1) await Promise.resolve()
-    })
-    const activityCallsAfterSchedule = invokeMock.mock.calls.filter(([command]) => command === 'sync_activity').length
-    expect(activityCallsAfterSchedule).toBe(activityCallsBeforeSchedule)
   })
 
   it('reloads cached dashboard data and activity feeds after native background sync completion', async () => {
@@ -1015,37 +1011,51 @@ describe('dashboard UI', () => {
   })
 
   it('loads cadence settings, autosaves each updated refresh choice, and keeps Settings open', async () => {
-    configureBackend({ settings: { activity_refresh_minutes: 30, lines_refresh_minutes: 120, refresh_lines_on_change: false } })
+    configureBackend({ appSettingsResponses: [{ activity_refresh_minutes: 30, lines_refresh_minutes: 720, refresh_lines_on_change: false }] })
     const user = await renderDashboard()
 
     await user.click(screen.getByRole('button', { name: 'Settings' }))
     expect(await screen.findByRole('heading', { name: 'Settings' })).toBeInTheDocument()
 
-    const activityRefresh = screen.getByRole('radiogroup', { name: 'Activity refresh' })
-    const lineRefresh = screen.getByRole('radiogroup', { name: 'Line count refresh' })
+    const activityRefresh = screen.getByRole('radiogroup', { name: 'PR & issue refresh' })
+    const lineRefresh = screen.getByRole('radiogroup', { name: 'Code verification' })
+    const updateChecks = screen.getByRole('radiogroup', { name: 'App update checks' })
     const codeChangeRefresh = screen.getByRole('switch', { name: /Refresh line counts when code changes/i })
     await waitFor(() => {
       expect(within(activityRefresh).getByRole('radio', { name: '30 minutes' })).toBeChecked()
-      expect(within(lineRefresh).getByRole('radio', { name: '120 minutes' })).toBeChecked()
+      expect(within(lineRefresh).getByRole('radio', { name: '720 minutes' })).toBeChecked()
+      expect(within(updateChecks).getByRole('radio', { name: 'Daily' })).toBeChecked()
       expect(codeChangeRefresh).not.toBeChecked()
     })
+    for (const label of ['Daily', 'Weekly', 'Monthly', 'Never']) {
+      expect(within(updateChecks).getByRole('radio', { name: label })).toBeInTheDocument()
+    }
     for (const minutes of [15, 30, 60, 120]) {
       expect(within(activityRefresh).getByRole('radio', { name: `${minutes} minutes` })).toBeInTheDocument()
     }
-    for (const minutes of [60, 120, 240, 480]) {
+    for (const minutes of [360, 720, 1440]) {
       expect(within(lineRefresh).getByRole('radio', { name: `${minutes} minutes` })).toBeInTheDocument()
     }
+    await user.click(screen.getByRole('button', { name: 'About Code verification' }))
+    const codeVerificationHelp = await screen.findByRole('tooltip')
+    expect(codeVerificationHelp).toHaveTextContent('pushedAt')
+    expect(codeVerificationHelp).toHaveTextContent('commit SHA')
 
     await user.click(within(activityRefresh).getByRole('radio', { name: '15 minutes' }))
-    await user.click(within(lineRefresh).getByRole('radio', { name: '240 minutes' }))
+    await user.click(within(lineRefresh).getByRole('radio', { name: '1440 minutes' }))
     await user.click(codeChangeRefresh)
+    for (const interval of ['daily', 'weekly', 'monthly', 'never'] as const) {
+      await user.click(within(updateChecks).getByRole('radio', { name: interval[0].toUpperCase() + interval.slice(1) }))
+      await waitFor(() => expect(savedSettings()[savedSettings().length - 1]).toEqual(expect.objectContaining({ update_check_interval: interval })))
+    }
 
     await waitFor(() => {
       const writes = savedSettings()
       expect(writes[writes.length - 1]).toEqual(expect.objectContaining({
         activity_refresh_minutes: 15,
-        lines_refresh_minutes: 240,
-        refresh_lines_on_change: true
+        lines_refresh_minutes: 1440,
+        refresh_lines_on_change: true,
+        update_check_interval: 'never'
       }))
     })
     expect(screen.getByRole('heading', { name: 'Settings' })).toBeInTheDocument()
@@ -1057,34 +1067,48 @@ describe('dashboard UI', () => {
 
     await user.click(screen.getByRole('button', { name: 'Settings' }))
     const drawer = await screen.findByRole('dialog', { name: 'Settings' })
-    const activityRefresh = within(drawer).getByRole('radiogroup', { name: 'Activity refresh' })
-    const lineRefresh = within(drawer).getByRole('radiogroup', { name: 'Line count refresh' })
+    const activityRefresh = within(drawer).getByRole('radiogroup', { name: 'PR & issue refresh' })
+    const lineRefresh = within(drawer).getByRole('radiogroup', { name: 'Code verification' })
 
     await user.click(within(activityRefresh).getByRole('radio', { name: 'Custom' }))
-    const activityInput = within(drawer).getByRole('textbox', { name: 'Custom activity refresh minutes' }) as HTMLInputElement
+    const activityInput = within(drawer).getByRole('textbox', { name: 'Custom pr & issue refresh minutes' }) as HTMLInputElement
     expect(activityInput).toHaveAttribute('inputmode', 'numeric')
     expect(activityInput).toHaveValue('30')
 
     await user.clear(activityInput)
     fireEvent.blur(activityInput)
-    expect(await within(drawer).findByRole('alert')).toHaveTextContent('Enter a whole number from 1 to 1440 minutes.')
+    expect(await within(drawer).findByRole('alert')).toHaveTextContent('Enter a whole number from 15 to 1440 minutes.')
     const writesAfterEmpty = savedSettings().length
+
+    await user.click(activityInput)
+    await user.clear(activityInput)
+    await user.type(activityInput, '14')
+    fireEvent.blur(activityInput)
+    expect(await within(drawer).findByRole('alert')).toHaveTextContent('Enter a whole number from 15 to 1440 minutes.')
+    expect(savedSettings()).toHaveLength(writesAfterEmpty)
 
     await user.click(activityInput)
     await user.clear(activityInput)
     await user.type(activityInput, '1441')
     fireEvent.blur(activityInput)
-    expect(await within(drawer).findByRole('alert')).toHaveTextContent('Enter a whole number from 1 to 1440 minutes.')
+    expect(await within(drawer).findByRole('alert')).toHaveTextContent('Enter a whole number from 15 to 1440 minutes.')
     expect(savedSettings()).toHaveLength(writesAfterEmpty)
 
     await user.click(activityInput)
     await user.clear(activityInput)
-    await user.type(activityInput, '12')
+    await user.type(activityInput, '15')
     fireEvent.blur(activityInput)
-    await waitFor(() => expect(savedSettings()[savedSettings().length - 1]).toEqual(expect.objectContaining({ activity_refresh_minutes: 12 })))
+    await waitFor(() => expect(savedSettings()[savedSettings().length - 1]).toEqual(expect.objectContaining({ activity_refresh_minutes: 15 })))
+
+    await user.click(within(activityRefresh).getByRole('radio', { name: 'Custom' }))
+    const customActivityInput = within(drawer).getByRole('textbox', { name: 'Custom pr & issue refresh minutes' }) as HTMLInputElement
+    await user.clear(customActivityInput)
+    await user.type(customActivityInput, '17')
+    fireEvent.blur(customActivityInput)
+    await waitFor(() => expect(savedSettings()[savedSettings().length - 1]).toEqual(expect.objectContaining({ activity_refresh_minutes: 17 })))
 
     await user.click(within(lineRefresh).getByRole('radio', { name: 'Custom' }))
-    const lineInput = within(drawer).getByRole('textbox', { name: 'Custom line count refresh minutes' }) as HTMLInputElement
+    const lineInput = within(drawer).getByRole('textbox', { name: 'Custom code verification minutes' }) as HTMLInputElement
     await user.clear(lineInput)
     await user.type(lineInput, '90')
     await user.keyboard('{Enter}')
@@ -1093,9 +1117,9 @@ describe('dashboard UI', () => {
     await user.click(within(drawer).getByRole('button', { name: 'Close settings' }))
     await user.click(screen.getByRole('button', { name: 'Settings' }))
     const reopened = await screen.findByRole('dialog', { name: 'Settings' })
-    expect(within(within(reopened).getByRole('radiogroup', { name: 'Activity refresh' })).getByRole('radio', { name: 'Custom' })).toBeChecked()
-    expect(within(reopened).getByRole('textbox', { name: 'Custom activity refresh minutes' })).toHaveValue('12')
-    expect(within(reopened).getByRole('textbox', { name: 'Custom line count refresh minutes' })).toHaveValue('90')
+    expect(within(within(reopened).getByRole('radiogroup', { name: 'PR & issue refresh' })).getByRole('radio', { name: 'Custom' })).toBeChecked()
+    expect(within(reopened).getByRole('textbox', { name: 'Custom pr & issue refresh minutes' })).toHaveValue('17')
+    expect(within(reopened).getByRole('textbox', { name: 'Custom code verification minutes' })).toHaveValue('90')
   })
 
   it('serializes rapid setting changes and persists the latest intended value', async () => {
@@ -1117,7 +1141,7 @@ describe('dashboard UI', () => {
     const user = await renderDashboard()
 
     await user.click(screen.getByRole('button', { name: 'Settings' }))
-    const activityRefresh = screen.getByRole('radiogroup', { name: 'Activity refresh' })
+    const activityRefresh = screen.getByRole('radiogroup', { name: 'PR & issue refresh' })
     await user.click(within(activityRefresh).getByRole('radio', { name: '15 minutes' }))
     await waitFor(() => expect(writes).toHaveLength(1))
 

@@ -7,7 +7,6 @@ pub mod github;
 pub mod github_sync;
 pub mod models;
 pub mod native;
-pub mod personal_activity;
 pub mod sync;
 pub mod updates;
 

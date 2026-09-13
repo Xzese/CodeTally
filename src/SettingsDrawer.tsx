@@ -2,7 +2,7 @@ import { createPortal } from 'react-dom'
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react'
 import { AlertCircle, Check, ChevronDown, ChevronUp, HardDrive, LoaderCircle, ChartNoAxesColumnIncreasing, CodeXml, FlaskConical, GitPullRequest, CircleDot, Sun, Moon, Monitor, X } from 'lucide-react'
 import { getDatabaseLocation, getRepositorySelection, revealDatabase } from './api'
-import type { AppSettings, MenuBarMetric, RepositorySelection, ThemeMode } from './types'
+import type { AppSettings, MenuBarMetric, RepositorySelection, ThemeMode, UpdateCheckInterval } from './types'
 import type { NormalizedMetrics } from './utils'
 
 const METRICS: { key: MenuBarMetric; label: string; field: keyof NormalizedMetrics; suffix: string }[] = [
@@ -21,6 +21,12 @@ export function menuBarTitle(metric: MenuBarMetric, metrics: NormalizedMetrics):
 }
 
 const THEME_OPTIONS: { key: ThemeMode; label: string; icon: typeof Sun }[] = [{ key: 'light', label: 'Light', icon: Sun }, { key: 'dark', label: 'Dark', icon: Moon }, { key: 'system', label: 'Follow system', icon: Monitor }]
+const UPDATE_CHECK_OPTIONS: { key: UpdateCheckInterval; label: string }[] = [
+  { key: 'daily', label: 'Daily' },
+  { key: 'weekly', label: 'Weekly' },
+  { key: 'monthly', label: 'Monthly' },
+  { key: 'never', label: 'Never' }
+]
 const METRIC_ICONS = { total_lines: ChartNoAxesColumnIncreasing, source_lines: CodeXml, test_lines: FlaskConical, open_prs: GitPullRequest, open_issues: CircleDot }
 
 function Help({ label, children }: { label: string; children: ReactNode }) {
@@ -49,7 +55,7 @@ function SectionHeading({ title, help }: { title: string; help: string }) {
   return <div className="settings-section-heading"><h3>{title}</h3><Help label={title}>{help}</Help></div>
 }
 
-function Interval({ label, value, options, onChange }: { label: string; value: number; options: number[]; onChange: (value: number) => void }) {
+function Interval({ label, value, options, minMinutes = 1, help, onChange }: { label: string; value: number; options: number[]; minMinutes?: number; help: string; onChange: (value: number) => void }) {
   const [custom, setCustom] = useState(!options.includes(value))
   const [draft, setDraft] = useState(String(value))
   const [error, setError] = useState<string | null>(null)
@@ -61,8 +67,8 @@ function Interval({ label, value, options, onChange }: { label: string; value: n
     setError(null)
   }, [value])
   const commit = () => {
-    if (!/^\d+$/.test(draft) || Number(draft) < 1 || Number(draft) > 1440) {
-      setError('Enter a whole number from 1 to 1440 minutes.')
+    if (!/^\d+$/.test(draft) || Number(draft) < minMinutes || Number(draft) > 1440) {
+      setError(`Enter a whole number from ${minMinutes} to 1440 minutes.`)
       return
     }
     setError(null)
@@ -71,7 +77,7 @@ function Interval({ label, value, options, onChange }: { label: string; value: n
     if (minutes !== value) onChange(minutes)
   }
   const customId = `${errorId}-custom`
-  const customLabel = `Custom ${label === 'Activity refresh' ? 'activity refresh' : 'line count refresh'} minutes`
+  const customLabel = `Custom ${label.toLowerCase()} minutes`
   const selectCustom = () => {
     setCustom(true)
     setDraft(String(value))
@@ -81,7 +87,11 @@ function Interval({ label, value, options, onChange }: { label: string; value: n
       inputRef.current?.select()
     })
   }
-  return <div className="settings-row settings-interval-row"><div className="settings-row-label">{label} <span className="settings-row-unit">(min)</span><Help label={label}>{label === 'Activity refresh' ? 'Checks pull requests and issues while CodeTally is running.' : 'Recounts source and test lines. Longer intervals use fewer resources.'} Choose Custom for any whole number from 1 to 1440; changes apply when you leave the field or press Enter.</Help></div><div className="settings-interval-control"><div className="settings-interval-options" role="radiogroup" aria-label={label}>{options.map((minutes) => <label key={minutes} className={!custom && value === minutes ? 'selected' : ''}><input type="radio" name={label} aria-label={`${minutes} ${minutes === 1 ? 'minute' : 'minutes'}`} checked={!custom && value === minutes} onChange={() => { setCustom(false); setError(null); setDraft(String(minutes)); if (minutes !== value) onChange(minutes) }} /><span>{minutes}</span></label>)}<div className={`settings-custom-option${custom ? ' selected' : ''}`} onClick={() => { if (!custom) selectCustom() }}><input id={customId} type="radio" name={label} aria-label="Custom" checked={custom} onChange={selectCustom} />{custom ? <input ref={inputRef} className="settings-inline-custom" type="text" inputMode="numeric" aria-label={customLabel} aria-invalid={!!error} aria-describedby={error ? errorId : undefined} value={draft} onClick={(event) => event.stopPropagation()} onChange={(event) => { setDraft(event.target.value); setError(null) }} onBlur={commit} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); commit() } }} /> : <label htmlFor={customId}>Custom</label>}</div></div>{error && <span id={errorId} role="alert" className="settings-interval-error">{error}</span>}</div></div>
+  return <div className="settings-row settings-interval-row"><div className="settings-row-label">{label} <span className="settings-row-unit">(min)</span><Help label={label}>{help} Choose Custom for any whole number from {minMinutes} to 1440 minutes; changes apply when you leave the field or press Enter.</Help></div><div className="settings-interval-control"><div className="settings-interval-options" role="radiogroup" aria-label={label}>{options.map((minutes) => <label key={minutes} className={!custom && value === minutes ? 'selected' : ''}><input type="radio" name={label} aria-label={`${minutes} ${minutes === 1 ? 'minute' : 'minutes'}`} checked={!custom && value === minutes} onChange={() => { setCustom(false); setError(null); setDraft(String(minutes)); if (minutes !== value) onChange(minutes) }} /><span>{minutes}</span></label>)}<div className={`settings-custom-option${custom ? ' selected' : ''}`} onClick={() => { if (!custom) selectCustom() }}><input id={customId} type="radio" name={label} aria-label="Custom" checked={custom} onChange={selectCustom} />{custom ? <input ref={inputRef} className="settings-inline-custom" type="text" inputMode="numeric" aria-label={customLabel} aria-invalid={!!error} aria-describedby={error ? errorId : undefined} value={draft} onClick={(event) => event.stopPropagation()} onChange={(event) => { setDraft(event.target.value); setError(null) }} onBlur={commit} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); commit() } }} /> : <label htmlFor={customId}>Custom</label>}</div></div>{error && <span id={errorId} role="alert" className="settings-interval-error">{error}</span>}</div></div>
+}
+
+function UpdateCheckIntervalControl({ value, onChange }: { value: UpdateCheckInterval; onChange: (value: UpdateCheckInterval) => void }) {
+  return <div className="settings-row settings-update-interval-row"><div className="settings-row-label">App update checks<Help label="App update checks">Automatically checks GitHub releases at the selected interval. Never disables automatic checks; use Check for updates in the app updates panel whenever you want.</Help></div><div className="settings-update-interval-options" role="radiogroup" aria-label="App update checks">{UPDATE_CHECK_OPTIONS.map((option) => <label key={option.key} className={value === option.key ? 'selected' : ''}><input type="radio" name="app-update-check-interval" aria-label={option.label} checked={value === option.key} onChange={() => onChange(option.key)} /><span>{option.label}</span></label>)}</div></div>
 }
 
 type Props = { settings: AppSettings; loaded: boolean; metrics: NormalizedMetrics; saving: boolean; error: string | null; onChange: (update: (current: AppSettings) => AppSettings) => void; onRetry: () => void; onClose: () => void }
@@ -238,10 +248,10 @@ export default function SettingsDrawer({ settings, loaded, metrics, saving, erro
     </section>
     <section className="settings-section" id="settings-refresh"><SectionHeading title="Background & refresh" help="Scheduled refreshes continue while CodeTally is running. Background operation keeps the app running when its window closes; it does not launch at login or keep your Mac awake." />
       <div className="settings-row"><div className="settings-row-label">Run in background<Help label="Run in background">Close the window and keep refreshing. Reopen or quit CodeTally from the menu bar.</Help></div><input className="mac-switch" role="switch" type="checkbox" aria-label="Keep running in the background when the window closes" checked={settings.run_in_background} onChange={(event) => { const checked = event.target.checked; onChange((current) => ({ ...current, run_in_background: checked })) }} /></div>
-      <Interval label="Activity refresh" value={settings.activity_refresh_minutes} options={[15, 30, 60, 120]} onChange={(value) => onChange((current) => ({ ...current, activity_refresh_minutes: value }))} />
-      <p className="settings-metric-hint">Activity involvement in the feed controls the extra 2-minute check: authored by you by default, assigned to you, or either. Everyone uses the regular refresh above.</p>
-      <Interval label="Line count refresh" value={settings.lines_refresh_minutes} options={[60, 120, 240, 480]} onChange={(value) => onChange((current) => ({ ...current, lines_refresh_minutes: value }))} />
-      <div className="settings-row"><div className="settings-row-label">Refresh on code changes<Help label="Refresh on code changes">Also recount a repository when GitHub reports new pushed code during an activity refresh.</Help></div><input className="mac-switch" role="switch" type="checkbox" aria-label="Refresh line counts when code changes" checked={settings.refresh_lines_on_change} onChange={(event) => { const checked = event.target.checked; onChange((current) => ({ ...current, refresh_lines_on_change: checked })) }} /></div>
+      <UpdateCheckIntervalControl value={settings.update_check_interval} onChange={(value) => onChange((current) => ({ ...current, update_check_interval: value }))} />
+      <Interval label="PR & issue refresh" value={settings.activity_refresh_minutes} options={[15, 30, 60, 120]} minMinutes={15} help="Fetches pull requests and issues from all selected repositories. Activity involvement only filters which of those items appear in the live feed." onChange={(value) => onChange((current) => ({ ...current, activity_refresh_minutes: value }))} />
+      <Interval label="Code verification" value={settings.lines_refresh_minutes} options={[360, 720, 1440]} help="GitHub's pushedAt value causes changed repositories to be fetched promptly. CodeTally checks the exact commit SHA before scanning, so an already measured commit is never recounted. This interval is the fallback verification when no changed repository has been reported." onChange={(value) => onChange((current) => ({ ...current, lines_refresh_minutes: value }))} />
+      <div className="settings-row"><div className="settings-row-label">Refresh on code changes<Help label="Refresh on code changes">When enabled, GitHub's pushedAt value causes a changed repository to be fetched promptly during a PR &amp; issue refresh. CodeTally checks the exact commit SHA before scanning, so an already measured commit is not recounted.</Help></div><input className="mac-switch" role="switch" type="checkbox" aria-label="Refresh line counts when code changes" checked={settings.refresh_lines_on_change} onChange={(event) => { const checked = event.target.checked; onChange((current) => ({ ...current, refresh_lines_on_change: checked })) }} /></div>
     </section>
     <section className="settings-section repository-selection-block" id="settings-repositories"><SectionHeading title="Repositories" help="Deselected repositories disappear from the dashboard and future refreshes. Their local cache and history stay on this device. Work already in progress may finish." />
       <div className="settings-row"><div className="settings-row-label">Include forks in totals<Help label="Include forks in totals">Count selected forks in portfolio line totals and history. Off by default.</Help></div><input className="mac-switch" role="switch" type="checkbox" aria-label="Include forks in line totals" checked={settings.include_forks_in_totals} onChange={(event) => { const checked = event.target.checked; onChange((current) => ({ ...current, include_forks_in_totals: checked })) }} /></div>

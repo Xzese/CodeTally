@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import UpdateStatus from '../UpdateStatus'
 import type { AppUpdate } from '../api'
+import type { UpdateCheckInterval } from '../types'
 
 const invokeMock = vi.hoisted(() => vi.fn())
 
@@ -22,7 +23,12 @@ const updateAvailable: AppUpdate = {
   update_available: true
 }
 
-const CHECK_INTERVAL = 6 * 60 * 60 * 1000
+const CHECK_INTERVALS: Record<UpdateCheckInterval, number> = {
+  daily: 24 * 60 * 60 * 1000,
+  weekly: 7 * 24 * 60 * 60 * 1000,
+  monthly: 30 * 24 * 60 * 60 * 1000,
+  never: 0
+}
 
 async function flushPromises() {
   await act(async () => {
@@ -32,6 +38,10 @@ async function flushPromises() {
 
 function updatesPanel() {
   return screen.getByRole('region', { name: 'App updates' })
+}
+
+function renderUpdateStatus(interval: UpdateCheckInterval = 'daily') {
+  return render(<UpdateStatus updateCheckInterval={interval} />)
 }
 
 beforeEach(() => {
@@ -50,7 +60,7 @@ describe('UpdateStatus', () => {
     invokeMock.mockResolvedValue(upToDate)
     const user = userEvent.setup()
 
-    render(<UpdateStatus />)
+    renderUpdateStatus()
 
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('check_for_updates', undefined))
     const trigger = screen.getByRole('button', { name: 'App updates' })
@@ -66,7 +76,7 @@ describe('UpdateStatus', () => {
     invokeMock.mockResolvedValue(updateAvailable)
     const user = userEvent.setup()
 
-    render(<UpdateStatus />)
+    renderUpdateStatus()
 
     const trigger = await screen.findByRole('button', { name: 'Update available: v0.2.0' })
     expect(trigger).toHaveAttribute('title', 'CodeTally v0.2.0 is available')
@@ -86,7 +96,7 @@ describe('UpdateStatus', () => {
       .mockResolvedValueOnce(upToDate)
     const user = userEvent.setup()
 
-    render(<UpdateStatus />)
+    renderUpdateStatus()
     await waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === 'check_for_updates')).toHaveLength(1))
 
     await user.click(screen.getByRole('button', { name: 'App updates' }))
@@ -104,17 +114,27 @@ describe('UpdateStatus', () => {
     expect(within(panel).queryByRole('alert')).not.toBeInTheDocument()
   })
 
-  it('polls every six hours and stops polling after unmount', async () => {
+  it.each([
+    ['daily', CHECK_INTERVALS.daily],
+    ['weekly', CHECK_INTERVALS.weekly],
+    ['monthly', CHECK_INTERVALS.monthly]
+  ] as const)('polls on the %s cadence and stops polling after unmount', async (interval, checkInterval) => {
     vi.useFakeTimers()
     invokeMock.mockResolvedValue(upToDate)
-    const { unmount } = render(<UpdateStatus />)
+    const { unmount } = renderUpdateStatus(interval)
 
     await flushPromises()
     const checks = () => invokeMock.mock.calls.filter(([command]) => command === 'check_for_updates').length
     expect(checks()).toBe(1)
 
     await act(async () => {
-      vi.advanceTimersByTime(CHECK_INTERVAL)
+      vi.advanceTimersByTime(checkInterval - 1)
+      await Promise.resolve()
+    })
+    expect(checks()).toBe(1)
+
+    await act(async () => {
+      vi.advanceTimersByTime(1)
       await Promise.resolve()
       await Promise.resolve()
     })
@@ -122,7 +142,7 @@ describe('UpdateStatus', () => {
 
     unmount()
     await act(async () => {
-      vi.advanceTimersByTime(CHECK_INTERVAL * 2)
+      vi.advanceTimersByTime(checkInterval * 2)
       await Promise.resolve()
     })
     expect(checks()).toBe(2)
@@ -133,11 +153,11 @@ describe('UpdateStatus', () => {
     let resolve!: (value: AppUpdate) => void
     const pending = new Promise<AppUpdate>((promiseResolve) => { resolve = promiseResolve })
     invokeMock.mockReturnValue(pending)
-    const { unmount } = render(<UpdateStatus />)
+    const { unmount } = renderUpdateStatus()
 
     await flushPromises()
     await act(async () => {
-      vi.advanceTimersByTime(CHECK_INTERVAL)
+      vi.advanceTimersByTime(CHECK_INTERVALS.daily)
       await Promise.resolve()
     })
     expect(invokeMock.mock.calls.filter(([command]) => command === 'check_for_updates')).toHaveLength(1)
@@ -147,11 +167,25 @@ describe('UpdateStatus', () => {
     unmount()
   })
 
+  it('does not check automatically when the update cadence is never, while manual checks remain available', async () => {
+    invokeMock.mockResolvedValue(upToDate)
+    const user = userEvent.setup()
+
+    renderUpdateStatus('never')
+    await flushPromises()
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'check_for_updates')).toHaveLength(0)
+
+    await user.click(screen.getByRole('button', { name: 'App updates' }))
+    await user.click(within(updatesPanel()).getByRole('button', { name: 'Check for updates' }))
+    await flushPromises()
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'check_for_updates')).toHaveLength(1)
+  })
+
   it('closes the panel with Escape and returns focus to the trigger', async () => {
     invokeMock.mockResolvedValue(upToDate)
     const user = userEvent.setup()
 
-    render(<UpdateStatus />)
+    renderUpdateStatus()
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('check_for_updates', undefined))
     const trigger = screen.getByRole('button', { name: 'App updates' })
     await user.click(trigger)
