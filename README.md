@@ -119,7 +119,7 @@ Older builds such as `v0.1.2` can show “CodeTally is damaged” because the ex
 
 ## Everyday use
 
-The **Updates** button next to Settings checks for the latest stable [GitHub release](https://github.com/Xzese/CodeTally/releases). It checks when the app starts and every day by default. In **Settings → Background & refresh**, you can change this to weekly, monthly, or never. If an update is available, open the button to see the installed and available versions, **Check again**, or **Download update**. **Settings → About CodeTally** also checks once when you open it. **Download update** fetches and installs the signed updater archive for your Mac, then restarts CodeTally.
+The **Updates** button next to Settings checks for the latest stable [GitHub release](https://github.com/Xzese/CodeTally/releases). It checks when the app starts and every day by default. In **Settings → Background & refresh**, you can change this to weekly, monthly, or never. Open the button to compare the current and new versions, **Check for updates**, or **Download update** when one is available. **Settings → About CodeTally** also checks once when you open it. **Download update** fetches and installs the signed updater archive for your Mac, then restarts CodeTally.
 
 The rightmost **Refresh** control performs an immediate full synchronization of GitHub activity and line counts. While work is running, that same control becomes **Syncing** or **Importing**. Hover, focus, or click it to see progress; click again to pin or dismiss the details.
 
@@ -131,7 +131,7 @@ Automatic PR & issue refreshes keep repository metadata, pull requests, and issu
 
 Settings apply automatically when you change a control and are stored in the local database. The status at the top shows when changes are being saved and provides a retry if saving fails. Rapid changes are saved in order, and the drawer stays open. Supporting explanations are available from the **?** buttons by hovering, focusing, or clicking.
 
-**Settings → About CodeTally** displays the installed app name, version, bundle identifier, a link to the project repository, and the latest update status.
+**Settings → About CodeTally** displays the installed and latest versions together, update actions, and the project repository. An **About me** section introduces Sam and links to [www.samfaid.com](https://www.samfaid.com/) and [Buy Me a Coffee](https://www.buymeacoffee.com/samfaid).
 
 The **Background & refresh** section lets you choose how often CodeTally refreshes pull requests and issues (15, 30, 60, or 120 minutes; 30 by default) and Lines of Code (6, 12, or 24 hours; daily by default). You can also enter a custom interval. Your change saves when you leave the field or press Enter.
 

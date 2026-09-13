@@ -926,7 +926,7 @@ describe('dashboard UI', () => {
       await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('sync_github_data', undefined))
       await waitFor(() => {
         expect(syncControls()).toHaveLength(1)
-        expect(syncControls()[0]).toHaveAccessibleName(/Updating|Importing/i)
+        expect(syncControls()[0]).toHaveAccessibleName(/Refreshing|Importing/i)
       })
 
       const activeControl = syncControls()[0]
@@ -1341,7 +1341,7 @@ describe('dashboard UI', () => {
     }
   })
 
-  it('shows the app version and About details and opens the CodeTally repository', async () => {
+  it('shows the app version and About links', async () => {
     const user = await renderDashboard()
 
     await user.click(screen.getByRole('button', { name: 'Settings' }))
@@ -1350,11 +1350,23 @@ describe('dashboard UI', () => {
     expect(await within(drawer).findByText('0.1.2', { exact: true })).toBeInTheDocument()
     expect(invokeMock).toHaveBeenCalledWith('get_app_info', undefined)
     expect(within(drawer).getByText('com.samfaid.codetally', { exact: true })).toBeInTheDocument()
+    expect(within(drawer).getByRole('heading', { name: 'About me' })).toBeInTheDocument()
+    expect(within(drawer).getByText(/independent UK software developer/i)).toBeInTheDocument()
 
     const repositoryLink = within(drawer).getByRole('link', { name: /GitHub|repository|source/i })
     expect(repositoryLink).toHaveAttribute('href', 'https://github.com/Xzese/CodeTally')
     await user.click(repositoryLink)
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('open_external_url', { url: 'https://github.com/Xzese/CodeTally' }))
+
+    const websiteLink = within(drawer).getByRole('link', { name: /Visit www\.samfaid\.com/i })
+    expect(websiteLink).toHaveAttribute('href', 'https://www.samfaid.com/')
+    await user.click(websiteLink)
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('open_external_url', { url: 'https://www.samfaid.com/' }))
+
+    const coffeeLink = within(drawer).getByRole('link', { name: /Buy me a coffee/i })
+    expect(coffeeLink).toHaveAttribute('href', 'https://www.buymeacoffee.com/samfaid')
+    await user.click(coffeeLink)
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('open_external_url', { url: 'https://www.buymeacoffee.com/samfaid' }))
   })
 
   it('checks for updates when About opens and installs an available release', async () => {
@@ -1368,7 +1380,8 @@ describe('dashboard UI', () => {
     const drawer = await screen.findByRole('dialog', { name: 'Settings' })
     await waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === 'check_for_updates')).toHaveLength(1))
 
-    expect(within(drawer).getByText('v0.2.0 available')).toBeInTheDocument()
+    expect(within(drawer).getByText('v0.2.0', { exact: true })).toHaveClass('update-available')
+    expect(within(drawer).queryByText('Latest version', { exact: true })).not.toBeInTheDocument()
 
     await user.click(within(drawer).getByRole('button', { name: 'Download update' }))
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('install_update', undefined))

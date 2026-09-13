@@ -606,7 +606,7 @@ function App() {
             <button
               className={syncActive ? 'sync-status sync-status-trigger' : 'button primary compact refresh-button'}
               type="button"
-              aria-label={syncActive ? `${importing ? 'Importing' : 'Updating'}; show refresh details` : 'Refresh dashboard'}
+              aria-label={syncActive ? `${importing ? 'Importing' : 'Refreshing'}; show refresh details` : 'Refresh dashboard'}
               aria-expanded={syncDetailsAvailable ? syncPopoverOpen : undefined}
               aria-haspopup={syncDetailsAvailable ? 'dialog' : undefined}
               title={lastSync ? `${syncActive ? 'Show refresh details' : 'Refresh dashboard'}. Last refresh: ${exactDate(lastSync)}` : syncActive ? 'Show refresh details' : 'Refresh dashboard'}
@@ -630,7 +630,7 @@ function App() {
               }}
             >
               {syncActive ? <LoaderCircle className="spin" size={14} /> : <RefreshCw size={15} />}
-              <span className="refresh-button-copy"><strong>{syncActive ? importing ? 'Importing' : 'Updating' : 'Refresh'}</strong><small>Last refresh: {relativeTime(lastSync)}</small></span>
+              <span className="refresh-button-copy"><strong>{syncActive ? importing ? 'Importing' : 'Refreshing' : 'Refresh'}</strong><small>Last refresh: {relativeTime(lastSync)}</small></span>
             </button>
             {syncDetailsAvailable && syncPopoverOpen && <div className="sync-popover" role="dialog" aria-label="Refresh details">
               <div className="sync-popover-heading"><span>Refresh details</span><button className="icon-button subtle" type="button" aria-label="Close refresh details" onClick={() => { syncPopoverDismissedRef.current = true; setSyncPopoverOpen(false); setSyncPopoverPinned(false) }}><X size={14} /></button></div>
