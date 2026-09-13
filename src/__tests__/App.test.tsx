@@ -1356,10 +1356,10 @@ describe('dashboard UI', () => {
     await user.click(repositoryLink)
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('open_external_url', { url: 'https://github.com/Xzese/CodeTally' }))
 
-    const websiteLink = within(drawer).getByRole('link', { name: /Visit samfaid\.com/i })
-    expect(websiteLink).toHaveAttribute('href', 'https://samfaid.com/')
+    const websiteLink = within(drawer).getByRole('link', { name: /Visit www\.samfaid\.com/i })
+    expect(websiteLink).toHaveAttribute('href', 'https://www.samfaid.com/')
     await user.click(websiteLink)
-    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('open_external_url', { url: 'https://samfaid.com/' }))
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('open_external_url', { url: 'https://www.samfaid.com/' }))
 
     const coffeeLink = within(drawer).getByRole('link', { name: /Buy me a coffee/i })
     expect(coffeeLink).toHaveAttribute('href', 'https://www.buymeacoffee.com/samfaid')
@@ -1378,7 +1378,8 @@ describe('dashboard UI', () => {
     const drawer = await screen.findByRole('dialog', { name: 'Settings' })
     await waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === 'check_for_updates')).toHaveLength(1))
 
-    expect(within(drawer).getByText('v0.2.0 available')).toBeInTheDocument()
+    expect(within(drawer).getByText('v0.2.0', { exact: true })).toHaveClass('update-available')
+    expect(within(drawer).queryByText('Latest version', { exact: true })).not.toBeInTheDocument()
 
     await user.click(within(drawer).getByRole('button', { name: 'Download update' }))
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('install_update', undefined))

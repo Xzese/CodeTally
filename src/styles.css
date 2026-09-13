@@ -477,6 +477,10 @@ td:first-child { padding-left: 18px; }
 .settings-about-details > div + div { border-top: 1px solid var(--line); }
 .settings-about-details dt { color: var(--muted); font-size: 11px; }
 .settings-about-details dd { min-width: 0; margin: 0; color: var(--control-text); font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; text-align: right; overflow-wrap: anywhere; }
+.settings-about-version { display: inline-flex; align-items: center; gap: 7px; }
+.settings-about-version svg { color: var(--muted); }
+.settings-about-version span:last-child { color: var(--muted); }
+.settings-about-version span.update-available { color: var(--blue); }
 .settings-about-links { display: flex; flex-wrap: wrap; gap: 8px; }
 .settings-about-link { text-decoration: none; }
 .settings-coffee-button { display: inline-flex; align-items: center; justify-content: center; justify-self: start; gap: 9px; min-height: 42px; padding: 0 16px; border: 1px solid #d1b500; border-radius: 10px; color: #111; background: #ffdd00; box-shadow: 0 1px 1px rgb(0 0 0 / 12%); font-size: 13px; font-weight: 650; text-decoration: none; transition: background .12s, border-color .12s, transform .12s; }
