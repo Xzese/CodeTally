@@ -1,5 +1,6 @@
 #!/usr/bin/env swift
 import AppKit
+import CoreImage
 import Foundation
 import Vision
 
@@ -83,7 +84,7 @@ Options:
   --window-id ID              Capture a particular window; otherwise locate CodeTally's main window.
   --screen-rect X,Y,W,H        Capture a screen rectangle in macOS screen points.
   --menu-bar                  Allow a names-free menu-bar crop (requires --screen-rect or --input with --crop).
-  --mask X,Y,W,H              Additional solid mask in OUTPUT PIXELS, top-left origin; repeatable.
+  --mask X,Y,W,H              Additional blurred mask in OUTPUT PIXELS, top-left origin; repeatable.
   --extra-sensitive-file PATH Additional identifiers, one per line (keep this file outside the repo).
   --output PATH               Sanitized PNG destination; must be under docs/screenshots.
   --list-windows              Print all CodeTally window IDs, layers, and bounds, never titles.
@@ -251,14 +252,33 @@ do {
         try fail("Could not create redaction image.")
     }
     let bounds = CGRect(x: 0, y: 0, width: original.width, height: original.height)
-    context.draw(original, in: bounds)
-    context.setFillColor(CGColor(red: 0.28, green: 0.32, blue: 0.38, alpha: 1))
-    for region in detected { context.fill(region.intersection(bounds)) }
+    context.setFillColor(CGColor(gray: 0, alpha: 1))
+    context.fill(bounds)
+    context.setFillColor(CGColor(gray: 1, alpha: 1))
+    let blurred = CIImage(cgImage: original).clampedToExtent()
+        .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: 8.0])
+        .cropped(to: bounds)
+    guard let blurredImage = CIContext().createCGImage(blurred, from: bounds) else {
+        try fail("Could not create blurred redaction image.")
+    }
+    func blurRegion(_ region: CGRect) {
+        context.fill(region.intersection(bounds))
+    }
+    for region in detected { blurRegion(region) }
     for mask in masks {
         guard bounds.contains(mask) else { try fail("An explicit mask falls outside the output image.") }
-        context.fill(CGRect(x: mask.minX, y: CGFloat(original.height) - mask.maxY, width: mask.width, height: mask.height))
+        blurRegion(CGRect(x: mask.minX, y: CGFloat(original.height) - mask.maxY, width: mask.width, height: mask.height))
     }
-    guard let sanitized = context.makeImage() else { try fail("Could not finalize masked image.") }
+    guard let maskImage = context.makeImage() else { try fail("Could not finalize redaction mask.") }
+    let softMask = CIImage(cgImage: maskImage).clampedToExtent()
+        .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: 2.0])
+        .cropped(to: bounds)
+    let composite = CIImage(cgImage: blurredImage).applyingFilter("CIBlendWithMask", parameters: [
+        kCIInputBackgroundImageKey: CIImage(cgImage: original), kCIInputMaskImageKey: softMask
+    ])
+    guard let sanitized = CIContext().createCGImage(composite, from: bounds) else {
+        try fail("Could not finalize masked image.")
+    }
     guard try sensitiveRegions(sanitized, expressions).isEmpty else {
         try fail("Post-mask OCR still detected identifiers. No output written; add explicit --mask regions.")
     }
