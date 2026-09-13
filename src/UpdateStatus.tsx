@@ -13,13 +13,6 @@ const CHECK_INTERVALS: Record<Exclude<UpdateCheckInterval, 'never'>, number> = {
 // Split monthly waits so they cannot turn into a rapid polling loop.
 const MAX_TIMER_DELAY = 2_147_483_647
 
-const CHECK_INTERVAL_LABELS: Record<UpdateCheckInterval, string> = {
-  daily: 'every day',
-  weekly: 'every week',
-  monthly: 'every month',
-  never: 'disabled'
-}
-
 type Props = { updateCheckInterval?: UpdateCheckInterval | null }
 
 export default function UpdateStatus({ updateCheckInterval = 'daily' }: Props) {
@@ -28,6 +21,7 @@ export default function UpdateStatus({ updateCheckInterval = 'daily' }: Props) {
   const [checking, setChecking] = useState(false)
   const [installing, setInstalling] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [checkFailed, setCheckFailed] = useState(false)
   const [open, setOpen] = useState(false)
   const running = useRef(false)
   const mounted = useRef(false)
@@ -39,11 +33,15 @@ export default function UpdateStatus({ updateCheckInterval = 'daily' }: Props) {
     running.current = true
     setChecking(true)
     setError(null)
+    setCheckFailed(false)
     try {
       const result = await checkForUpdates()
       if (mounted.current) setUpdate(result)
     } catch {
-      if (mounted.current) setError("Couldn't check for updates. Check your connection and GitHub sign-in, then try again.")
+      if (mounted.current) {
+        setCheckFailed(true)
+        setError("Couldn't check for updates. Check your connection and GitHub sign-in, then try again.")
+      }
     } finally {
       running.current = false
       if (mounted.current) setChecking(false)
@@ -110,14 +108,9 @@ export default function UpdateStatus({ updateCheckInterval = 'daily' }: Props) {
     </button>
     {open && <section className="update-panel" id="app-update-panel" aria-label="Updates">
       <div className="update-heading"><strong>Updates</strong><button type="button" className="icon-button" aria-label="Close updates" onClick={() => { setOpen(false); trigger.current?.focus() }}><X size={15} /></button></div>
-      {update && <p>Current version: {update.current_version}</p>}
-      <div role="status">
-        {checking ? <p>Checking for updates…</p> : update && (!error || update.update_available) && <p>{update.update_available ? `CodeTally ${update.latest_version} is available.` : 'You’re up to date.'}</p>}
-      </div>
+      {update ? <div className="update-versions" role="status"><p><span>Current version:</span><strong>{update.current_version}</strong></p><p><span>New version:</span><strong className={!checking && !checkFailed && update.update_available ? 'available' : ''}>{checking ? 'Checking…' : checkFailed ? 'Unavailable' : update.update_available ? update.latest_version : 'No update available'}</strong></p></div> : checking ? <p role="status">Checking for updates…</p> : null}
       {error && <p role="alert" className="update-error">{error}</p>}
-      {update?.update_available && <><p>CodeTally will download the right version for this Mac, install it, and restart.</p><button type="button" className="button primary" disabled={installing} onClick={() => void installUpdate()}>{installing ? <LoaderCircle size={14} className="spin" /> : <Download size={14} />}{installing ? 'Installing…' : 'Download update'}</button></>}
-      <button type="button" className="button" disabled={checking || installing} onClick={() => void check()}>{checking && <LoaderCircle size={14} className="spin" />}{checking ? 'Checking…' : 'Check again'}</button>
-      <p className="update-note">{interval === null || interval === 'never' ? 'Automatic checks are off. Check again whenever you like.' : `Checks when the app opens and ${CHECK_INTERVAL_LABELS[interval]}.`}</p>
+      <div className="update-actions">{update?.update_available && <button type="button" className="button primary" disabled={installing} onClick={() => void installUpdate()}>{installing ? <LoaderCircle size={14} className="spin" /> : <Download size={14} />}{installing ? 'Installing…' : 'Download update'}</button>}<button type="button" className="button" disabled={checking || installing} onClick={() => void check()}>{checking && <LoaderCircle size={14} className="spin" />}{checking ? 'Checking…' : 'Check for updates'}</button></div>
     </section>}
   </div>
 }

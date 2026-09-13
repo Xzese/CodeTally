@@ -68,8 +68,8 @@ describe('UpdateStatus', () => {
 
     await user.click(trigger)
     const panel = updatesPanel()
-    expect(within(panel).getByText('Current version: v0.1.2')).toBeInTheDocument()
-    await waitFor(() => expect(within(panel).getByText('You’re up to date.')).toBeInTheDocument())
+    expect(within(panel).getByText('Current version:').nextSibling).toHaveTextContent('v0.1.2')
+    await waitFor(() => expect(within(panel).getByText('New version:').nextSibling).toHaveTextContent('No update available'))
   })
 
   it('announces an available update and installs it through the backend', async () => {
@@ -82,11 +82,26 @@ describe('UpdateStatus', () => {
     expect(trigger).toHaveAttribute('title', 'CodeTally v0.2.0 is available')
     await user.click(trigger)
     const panel = updatesPanel()
-    expect(within(panel).getByText('Current version: v0.1.2')).toBeInTheDocument()
-    expect(within(panel).getByText('CodeTally v0.2.0 is available.')).toBeInTheDocument()
+    expect(within(panel).getByText('Current version:').nextSibling).toHaveTextContent('v0.1.2')
+    expect(within(panel).getByText('New version:').nextSibling).toHaveTextContent('v0.2.0')
 
     await user.click(within(panel).getByRole('button', { name: 'Download update' }))
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('install_update', undefined))
+  })
+
+  it('keeps the available version visible when installation fails', async () => {
+    invokeMock.mockImplementation((command: string) => command === 'install_update' ? Promise.reject(new Error('Installation failed')) : Promise.resolve(updateAvailable))
+    const user = userEvent.setup()
+
+    renderUpdateStatus()
+    const trigger = await screen.findByRole('button', { name: 'Update available: v0.2.0' })
+    await user.click(trigger)
+    const panel = updatesPanel()
+    await user.click(within(panel).getByRole('button', { name: 'Download update' }))
+
+    expect(await within(panel).findByRole('alert')).toHaveTextContent('Installation failed')
+    expect(within(panel).getByText('New version:').nextSibling).toHaveTextContent('v0.2.0')
+    expect(within(panel).getByRole('button', { name: 'Download update' })).toBeEnabled()
   })
 
   it('shows a retry error without stale status and recovers after a rejected check', async () => {
@@ -101,16 +116,16 @@ describe('UpdateStatus', () => {
 
     await user.click(screen.getByRole('button', { name: 'Updates' }))
     const panel = updatesPanel()
-    await waitFor(() => expect(within(panel).getByText('You’re up to date.')).toBeInTheDocument())
+    await waitFor(() => expect(within(panel).getByText('New version:').nextSibling).toHaveTextContent('No update available'))
 
-    await user.click(within(panel).getByRole('button', { name: 'Check again' }))
+    await user.click(within(panel).getByRole('button', { name: 'Check for updates' }))
     await waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === 'check_for_updates')).toHaveLength(2))
     expect(await within(panel).findByRole('alert')).toHaveTextContent("Couldn't check for updates.")
-    expect(within(panel).queryByText('You’re up to date.')).not.toBeInTheDocument()
+    expect(within(panel).getByText('New version:').nextSibling).toHaveTextContent('Unavailable')
 
-    await user.click(within(panel).getByRole('button', { name: 'Check again' }))
+    await user.click(within(panel).getByRole('button', { name: 'Check for updates' }))
     await waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === 'check_for_updates')).toHaveLength(3))
-    await waitFor(() => expect(within(panel).getByText('You’re up to date.')).toBeInTheDocument())
+    await waitFor(() => expect(within(panel).getByText('New version:').nextSibling).toHaveTextContent('No update available'))
     expect(within(panel).queryByRole('alert')).not.toBeInTheDocument()
   })
 
@@ -176,7 +191,7 @@ describe('UpdateStatus', () => {
     expect(invokeMock.mock.calls.filter(([command]) => command === 'check_for_updates')).toHaveLength(0)
 
     await user.click(screen.getByRole('button', { name: 'Updates' }))
-    await user.click(within(updatesPanel()).getByRole('button', { name: 'Check again' }))
+    await user.click(within(updatesPanel()).getByRole('button', { name: 'Check for updates' }))
     await flushPromises()
     expect(invokeMock.mock.calls.filter(([command]) => command === 'check_for_updates')).toHaveLength(1)
   })
