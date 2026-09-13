@@ -3,11 +3,12 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import { AreaChart, CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { AlertCircle, ArrowDown, ArrowLeft, ArrowUp, BarChart3, Check, ChevronDown, ChevronUp, CircleDot, ExternalLink, GitBranch, Github, HardDrive, ListFilter, LoaderCircle, RefreshCw, Settings, Terminal, X, Zap } from 'lucide-react'
 import { checkDependencies, discoverRepositories, getActivityFeed, getAppSettings, getDashboard, getGithubUser, getLocHistory, getSyncProgress, openExternalUrl, setAppSettings, syncActivity, syncGithubData } from './api'
-import type { AppSettings, DashboardData, DependencyStatus, FeedKind, Issue, LocSnapshot, PullRequest, Repository, SyncProgress, TimeRange } from './types'
+import type { ActivityRelationship, AppSettings, DashboardData, DependencyStatus, FeedKind, Issue, LocSnapshot, PullRequest, Repository, SyncProgress, TimeRange } from './types'
 import { aggregateHistory, filterIssues, filterPullRequests, isDraft, isMerged, sortRepositories, type FeedState } from './model'
 import { activityRepo, exactDate, formatCompact, formatCount, formatSigned, normalizeDashboard, normalizeLabels, relativeTime, repoActivity, repoBaseline30Available, repoChange, repoChangePercent, repoForks, repoLocAvailable, repoName, repoOpenIssues, repoOpenPrs, repoSource, repoStars, repoTests, repoTotal, repositoryId, repositoryLabel } from './utils'
 import codetallyMark from './assets/codetally-mark.png'
 import SettingsDrawer from './SettingsDrawer'
+import UpdateStatus from './UpdateStatus'
 import { DEFAULT_APP_SETTINGS, normalizeAppSettings } from './settings'
 import GitHubConnection from './GitHubConnection'
 import ActivityRepositoryMenu, { activityScopeRepositories } from './ActivityRepositoryMenu'
@@ -15,6 +16,13 @@ import './styles.css'
 
 type Screen = 'dashboard' | 'detail'
 type RepoSort = 'name' | 'loc' | 'source' | 'tests' | 'growth' | 'prs' | 'issues' | 'stars' | 'forks' | 'activity'
+
+const ACTIVITY_RELATIONSHIP_OPTIONS: Array<{ value: ActivityRelationship; label: string }> = [
+  { value: 'everyone', label: 'Everyone' },
+  { value: 'author', label: 'Authored by me' },
+  { value: 'assignee', label: 'Assigned to me' },
+  { value: 'author_or_assignee', label: 'Authored or assigned to me' }
+]
 
 const EMPTY_DEPS: DependencyStatus = { gh: false, git: false, tokei: false, gh_authenticated: false, authenticated: false, login: null }
 
@@ -91,6 +99,7 @@ function App() {
   const [settingsLoaded, setSettingsLoaded] = useState(false)
   const [settingsSaving, setSettingsSaving] = useState(false)
   const [settingsError, setSettingsError] = useState<string | null>(null)
+  const feedRelationship = appSettings.activity_relationship
   const settingsIntentRef = useRef(DEFAULT_APP_SETTINGS)
   const settingsPersistedRef = useRef(DEFAULT_APP_SETTINGS)
   const settingsRevisionRef = useRef(0)
@@ -117,6 +126,7 @@ function App() {
   const importingRef = useRef(false)
   const startupRef = useRef(false)
   const feedRequestRef = useRef(0)
+  const feedLoadingRef = useRef({ prs: false, issues: false })
   const lastActiveProgressRef = useRef<SyncProgress | null>(null)
   const cachedRefreshRef = useRef(false)
   const cachedRefreshVersionRef = useRef(0)
@@ -129,10 +139,12 @@ function App() {
 
   const applyDashboard = useCallback((raw: DashboardData, reloadFeeds = true, preserveFeedCache = true) => {
     const next = toDashboard(raw)
+    const prsRequestPending = feedLoadingRef.current.prs
+    const issuesRequestPending = feedLoadingRef.current.issues
     setDashboard((current) => ({
       ...next,
-      pull_requests: preserveFeedCache && current.pull_requests.length ? current.pull_requests : next.pull_requests,
-      issues: preserveFeedCache && current.issues.length ? current.issues : next.issues
+      pull_requests: preserveFeedCache && (prsRequestPending || current.pull_requests.length) ? current.pull_requests : next.pull_requests,
+      issues: preserveFeedCache && (issuesRequestPending || current.issues.length) ? current.issues : next.issues
     }))
     if (reloadFeeds) setFeedRevision((revision) => revision + 1)
     setSelectedRepo((previous) => previous ? next.repositories.find((repo) => String(repositoryId(repo)) === String(repositoryId(previous))) ?? previous : previous)
@@ -464,19 +476,31 @@ function App() {
   const feedRepositoryIdsKey = JSON.stringify(scopedFeedRepositories.map((repo) => backendRepositoryId(String(repositoryId(repo)))).filter((id): id is number => id !== null))
   const groupedFeedScope = feedRepo === 'personal' || feedRepo === 'companies' || feedRepo.startsWith('owner:')
   useEffect(() => {
+    if (!settingsLoaded) return
     const requestId = ++feedRequestRef.current
     let alive = true
-    void getActivityFeed({ kind: feedKind, state: feedState, repositoryId: backendRepositoryId(feedRepo), ...(groupedFeedScope ? { repositoryIds: JSON.parse(feedRepositoryIdsKey) as number[] } : {}) }).then((items) => {
+    feedLoadingRef.current[feedKind === 'prs' ? 'prs' : 'issues'] = true
+    if (feedKind === 'prs') setDashboard((current) => ({ ...current, pull_requests: [] }))
+    else setDashboard((current) => ({ ...current, issues: [] }))
+    void getActivityFeed({ kind: feedKind, state: feedState, repositoryId: backendRepositoryId(feedRepo), relationship: feedRelationship, ...(groupedFeedScope ? { repositoryIds: JSON.parse(feedRepositoryIdsKey) as number[] } : {}) }).then((items) => {
       if (!alive || requestId !== feedRequestRef.current) return
-      if (feedKind === 'prs') setDashboard((current) => ({ ...current, pull_requests: items as PullRequest[] }))
-      else setDashboard((current) => ({ ...current, issues: items as Issue[] }))
+      if (feedKind === 'prs') {
+        feedLoadingRef.current.prs = false
+        setDashboard((current) => ({ ...current, pull_requests: items as PullRequest[] }))
+      } else {
+        feedLoadingRef.current.issues = false
+        setDashboard((current) => ({ ...current, issues: items as Issue[] }))
+      }
     }).catch((reason) => {
       if (!alive || requestId !== feedRequestRef.current) return
+      feedLoadingRef.current[feedKind === 'prs' ? 'prs' : 'issues'] = false
+      if (feedKind === 'prs') setDashboard((current) => ({ ...current, pull_requests: [] }))
+      else setDashboard((current) => ({ ...current, issues: [] }))
       const message = reason instanceof Error ? reason.message : String(reason)
       setError(`Unable to load ${feedKind === 'prs' ? 'pull requests' : 'issues'}: ${message}`)
     })
     return () => { alive = false }
-  }, [feedKind, feedRepo, feedRevision, feedState, groupedFeedScope, feedRepositoryIdsKey])
+  }, [feedKind, feedRelationship, feedRepo, feedRevision, feedState, groupedFeedScope, feedRepositoryIdsKey, settingsLoaded, login])
 
   const visibleHistory = useMemo(() => aggregateHistory(
     screen === 'detail' && detailHistory !== null ? detailHistory : dashboard.loc_history,
@@ -557,6 +581,10 @@ function App() {
     void flushSettings()
   }, [flushSettings])
 
+  const handleFeedRelationship = useCallback((relationship: ActivityRelationship) => {
+    changeSettings((current) => ({ ...current, activity_relationship: relationship }))
+  }, [changeSettings])
+
   return (
     <div className={lightMode ? 'app-shell light' : 'app-shell'}>
       <header className="topbar">
@@ -564,6 +592,7 @@ function App() {
         <div className="topbar-status">
           {login ? <span className="identity"><span className="status-dot" />{login}</span> : <span className="muted">Local desktop dashboard</span>}
           <button className="icon-button" title="Settings" onClick={() => setSettingsOpen(true)}><Settings size={17} /></button>
+          <UpdateStatus />
           <div
             className={syncDetailsAvailable ? 'sync-popover-wrap active' : 'sync-popover-wrap'}
             ref={syncPopoverRef}
@@ -628,7 +657,7 @@ function App() {
           ) : selectedRepo ? (
             <RepositoryDetails repo={selectedRepo} history={visibleHistory} historyLoading={detailLoading} metric={metric} range={range} onMetric={setMetric} onRange={setRange} onBack={backToDashboard} pullRequests={detailPrs} issues={detailIssues} onOpenUrl={(url) => void openUrl(url, setError)} />
           ) : null}
-          <ActivitySidebar login={login} kind={feedKind} state={feedState} repository={feedRepo} lockedRepository={screen === 'detail' && selectedRepo ? String(repositoryId(selectedRepo)) : null} repositories={activeRepositories} prs={filteredPrs} issues={filteredIssues} onKind={handleFeedKind} onState={handleFeedState} onRepository={handleFeedRepository} onOpenUrl={(url) => void openUrl(url, setError)} />
+          <ActivitySidebar login={login} kind={feedKind} state={feedState} relationship={feedRelationship} repository={feedRepo} lockedRepository={screen === 'detail' && selectedRepo ? String(repositoryId(selectedRepo)) : null} repositories={activeRepositories} prs={filteredPrs} issues={filteredIssues} onKind={handleFeedKind} onState={handleFeedState} onRelationship={handleFeedRelationship} onRepository={handleFeedRepository} onOpenUrl={(url) => void openUrl(url, setError)} />
         </div>
       )}
 
@@ -844,10 +873,10 @@ function detailChangeValue(repo: Repository): string {
   return repoLocAvailable(repo) && repoBaseline30Available(repo) ? formatSigned(repoChange(repo), true) : '—'
 }
 
-function ActivitySidebar({ login, kind, state, repository, lockedRepository, repositories, prs, issues, onKind, onState, onRepository, onOpenUrl }: { login: string; kind: FeedKind; state: FeedState; repository: string; lockedRepository?: string | null; repositories: Repository[]; prs: PullRequest[]; issues: Issue[]; onKind: (kind: FeedKind) => void; onState: (state: FeedState) => void; onRepository: (repository: string) => void; onOpenUrl: (url: string | undefined) => void }) {
+function ActivitySidebar({ login, kind, state, relationship, repository, lockedRepository, repositories, prs, issues, onKind, onState, onRelationship, onRepository, onOpenUrl }: { login: string; kind: FeedKind; state: FeedState; relationship: ActivityRelationship; repository: string; lockedRepository?: string | null; repositories: Repository[]; prs: PullRequest[]; issues: Issue[]; onKind: (kind: FeedKind) => void; onState: (state: FeedState) => void; onRelationship: (relationship: ActivityRelationship) => void; onRepository: (repository: string) => void; onOpenUrl: (url: string | undefined) => void }) {
   const feed = kind === 'prs' ? prs : issues
   const selectedRepository = lockedRepository ?? repository
-  return <aside className="activity-sidebar"><div className="sidebar-sticky"><div className="sidebar-heading"><div><p className="eyebrow">Live feed</p><h2>Recent activity</h2></div><span className="feed-count">{feed.length}</span></div><div className="feed-tabs" role="tablist"><button className={kind === 'prs' ? 'active' : ''} onClick={() => onKind('prs')}>Pull requests</button><button className={kind === 'issues' ? 'active' : ''} onClick={() => onKind('issues')}>Issues</button></div><div className="feed-filters"><div className="filter-pills">{(kind === 'prs' ? (['all', 'open', 'merged'] as FeedState[]) : (['all', 'open', 'closed'] as FeedState[])).map((key) => <button key={key} className={state === key ? 'active' : ''} onClick={() => onState(key)}>{key[0].toUpperCase() + key.slice(1)}</button>)}</div><ActivityRepositoryMenu repositories={repositories} login={login} value={selectedRepository} disabled={Boolean(lockedRepository)} onChange={onRepository} /></div></div><div className="feed-list">{feed.length ? feed.map((item) => kind === 'prs' ? <PullRequestItem key={`${activityRepo(item)}-${item.number}`} item={item} onOpen={() => onOpenUrl(item.url)} /> : <IssueItem key={`${activityRepo(item)}-${item.number}`} item={item} onOpen={() => onOpenUrl(item.url)} />) : <div className="feed-empty"><CircleDot size={21} /><p>No {kind === 'prs' ? 'pull requests' : 'issues'} match these filters</p><span>Activity will appear here after the next sync.</span></div>}</div></aside>
+  return <aside className="activity-sidebar"><div className="sidebar-sticky"><div className="sidebar-heading"><div><p className="eyebrow">Live feed</p><h2>Recent activity</h2></div><span className="feed-count">{feed.length}</span></div><div className="feed-tabs" role="tablist"><button className={kind === 'prs' ? 'active' : ''} onClick={() => onKind('prs')}>Pull requests</button><button className={kind === 'issues' ? 'active' : ''} onClick={() => onKind('issues')}>Issues</button></div><div className="feed-filters"><div className="filter-pills">{(kind === 'prs' ? (['all', 'open', 'merged'] as FeedState[]) : (['all', 'open', 'closed'] as FeedState[])).map((key) => <button key={key} className={state === key ? 'active' : ''} onClick={() => onState(key)}>{key[0].toUpperCase() + key.slice(1)}</button>)}</div><div className="activity-involvement-filter"><label htmlFor="activity-involvement-select">Activity involvement</label><div className="select-wrap"><select id="activity-involvement-select" aria-label="Activity involvement" value={relationship} onChange={(event) => onRelationship(event.target.value as ActivityRelationship)}>{ACTIVITY_RELATIONSHIP_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select><ChevronDown size={14} /></div>{login && <span className="activity-involvement-note">Signed in as {login}</span>}</div><ActivityRepositoryMenu repositories={repositories} login={login} value={selectedRepository} disabled={Boolean(lockedRepository)} onChange={onRepository} /></div></div><div className="feed-list">{feed.length ? feed.map((item) => kind === 'prs' ? <PullRequestItem key={`${activityRepo(item)}-${item.number}`} item={item} onOpen={() => onOpenUrl(item.url)} /> : <IssueItem key={`${activityRepo(item)}-${item.number}`} item={item} onOpen={() => onOpenUrl(item.url)} />) : <div className="feed-empty"><CircleDot size={21} /><p>No {kind === 'prs' ? 'pull requests' : 'issues'} match these filters</p><span>Activity will appear here after the next sync.</span></div>}</div></aside>
 }
 
 function PullRequestItem({ item, onOpen }: { item: PullRequest; onOpen: () => void }) {

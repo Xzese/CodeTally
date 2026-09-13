@@ -111,6 +111,10 @@ pub struct PullRequest {
     pub merged_at: Option<String>,
     pub closed_at: Option<String>,
     pub url: String,
+    #[serde(default)]
+    pub author: Option<String>,
+    #[serde(default)]
+    pub assignees: Vec<String>,
     pub additions: i64,
     pub deletions: i64,
     pub changed_files: i64,
@@ -208,11 +212,23 @@ pub enum ThemeMode {
     System,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityRelationship {
+    Everyone,
+    #[default]
+    Author,
+    Assignee,
+    AuthorOrAssignee,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     #[serde(default)]
     pub theme_mode: ThemeMode,
     pub activity_refresh_minutes: i64,
+    #[serde(default)]
+    pub activity_relationship: ActivityRelationship,
     pub lines_refresh_minutes: i64,
     pub refresh_lines_on_change: bool,
     #[serde(default = "default_run_in_background")]
@@ -255,6 +271,7 @@ impl Default for AppSettings {
         Self {
             theme_mode: ThemeMode::default(),
             activity_refresh_minutes: 30,
+            activity_relationship: ActivityRelationship::default(),
             lines_refresh_minutes: 120,
             refresh_lines_on_change: true,
             run_in_background: true,
@@ -362,6 +379,10 @@ pub struct GithubPullRequestJson {
     #[serde(rename = "closedAt")]
     pub closed_at: Option<String>,
     pub url: String,
+    #[serde(default)]
+    pub author: Option<GithubActor>,
+    #[serde(default)]
+    pub assignees: Vec<GithubActor>,
     pub additions: Option<i64>,
     pub deletions: Option<i64>,
     #[serde(rename = "changedFiles")]

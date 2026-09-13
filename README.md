@@ -119,11 +119,14 @@ Older builds such as `v0.1.2` can show “CodeTally is damaged” because the ex
 
 ## Everyday use
 
+The **App updates** arrow next to Settings checks the latest stable [GitHub release](https://github.com/Xzese/CodeTally/releases) at startup and every six hours while the app runs. A newer release shows **Update available** in the header. Open it to see the installed and available versions, manually **Check for updates**, or **View release** for release notes and downloads. Install the appropriate DMG manually; the app does not download or install updates automatically. Checks use the existing authenticated GitHub CLI connection. If a check fails, the update panel offers a retry and the dashboard continues working.
+
 The rightmost **Refresh** control performs an immediate full synchronization of GitHub activity and line counts. While work is running, that same control becomes **Syncing** or **Importing**. Hover, focus, or click it to see progress; click again to pin or dismiss the details.
 
 Automatic activity refreshes keep repository metadata, pull requests, and issues current while CodeTally is running, including with its window closed when background operation is enabled. The defaults are:
 
 - activity refresh every 30 minutes;
+- an additional personal-activity check every two minutes for open PRs and issues matching the selected involvement (authored by the signed-in account by default);
 - line-count sweep every 120 minutes;
 - refresh a repository's line counts when its GitHub `pushedAt` value changes.
 
@@ -153,7 +156,13 @@ Large feeds are processed up to five pages of 100 items per feed per cycle, then
 
 When GitHub reports a low or exhausted API quota, CodeTally saves a pause until the reset time and stops further requests. Secondary rate limits also trigger a cooldown. Pauses survive restarts, cached data stays readable, and scheduled refreshes resume after the cooldown. Manual refreshes respect the same pause. This reduces API consumption and handles limits shared with other applications using your GitHub account.
 
+Quick searches have a separate persisted cooldown because GitHub search and GraphQL use separate quotas. Author or assignee mode makes up to 60 search requests per hour; combined mode makes up to 120, in bursts of at most four. Refreshing the matching repositories also consumes GraphQL points, on top of the regular refresh, startup, and manual work. The app records the reported query cost and remaining GraphQL allowance, and pauses at 100 remaining points. More matching repositories, pagination, transient retries, or other tools using the account can still exhaust the shared allowance and delay refreshes. The six-hour release check uses the separate core REST allowance.
+
 The activity sidebar starts on open pull requests. Switching between pull requests and issues resets the state filter to **Open**. On a repository detail page, the feed remains locked to that repository; returning to the portfolio restores the previous dashboard filter.
+
+Use **Activity involvement** in the feed to choose **Everyone**, **Authored by me** (default), **Assigned to me**, or **Authored or assigned to me**. “Me” is the connected GitHub account. The choice is saved automatically and applies to both PRs and issues alongside the repository and state filters. It filters the feed without changing portfolio or menu-bar totals. Existing cached PRs gain author and assignee details when their activity is next refreshed.
+
+The two-minute check runs `gh search prs` and `gh search issues` with `--state open`: author mode runs two `--author @me` searches, assignee mode runs two `--assignee @me` searches, and combined mode runs all four. **Everyone** uses the regular repository refresh without personal searches. Each quick search requests at most 100 results, sorted by most recently updated, keeping a pass to at most four search API requests. These results identify repositories to refresh; they never replace full counts or mark missing items closed. Previously matched repositories are checked again to catch closures and merges. Only selected, already imported repositories participate; this check does not clone repositories or count lines. The regular activity refresh still covers all selected repositories, including items outside the quick search limit. Checks wait for active sync work and respect API cooldowns, so two minutes is a target cadence rather than a guarantee.
 
 The activity repository filter opens collapsed **Personal repositories** and named company groups. Expand a group to choose all its repositories or one repository, or choose **All company repositories** across organizations. The selected scope carries across PR and issue tabs and only filters the feed; it does not change tracking. Group selection is applied before the activity result limit.
 

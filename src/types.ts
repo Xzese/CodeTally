@@ -1,4 +1,5 @@
 export type FeedKind = 'prs' | 'issues'
+export type ActivityRelationship = 'everyone' | 'author' | 'assignee' | 'author_or_assignee'
 export type LocMetric = 'total' | 'source' | 'tests'
 export type TimeRange = '3M' | '1Y' | '3Y' | 'ALL'
 
@@ -125,6 +126,7 @@ export interface PullRequest {
   status_check_rollup?: unknown
   statusCheckRollup?: unknown
   author?: string | null
+  assignees?: string[]
 }
 
 export interface Issue {
@@ -237,6 +239,7 @@ export type ThemeMode = 'light' | 'dark' | 'system'
 
 export interface AppSettings {
   theme_mode: ThemeMode
+  activity_relationship: ActivityRelationship
   run_in_background: boolean
   menu_bar_metric: MenuBarMetric
   menu_bar_metrics: MenuBarMetric[]
@@ -267,4 +270,5 @@ export interface FeedRequest {
   repositoryId?: number | string | null
   repositoryIds?: number[]
   state?: string
+  relationship?: ActivityRelationship
 }

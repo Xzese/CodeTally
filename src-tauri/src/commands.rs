@@ -2,7 +2,7 @@ use crate::error;
 use crate::models::{ActivityFeed, AppSettings, ClassificationConfig, Dashboard, GithubUser, LocHistory, RepositorySummary, SyncProgress, SyncResult};
 use crate::sync::{self, AppState};
 use chrono::Utc;
-use tauri::State;
+use tauri::{Manager, State};
 
 #[tauri::command(rename_all = "snake_case")]
 pub async fn check_dependencies() -> crate::models::DependencyStatus {
@@ -10,15 +10,28 @@ pub async fn check_dependencies() -> crate::models::DependencyStatus {
 }
 
 #[tauri::command(rename_all = "snake_case")]
+pub async fn check_for_updates(app: tauri::AppHandle) -> Result<crate::updates::UpdateCheck, String> {
+    let current_version = app.package_info().version.to_string();
+    tokio::task::spawn_blocking(move || crate::updates::check_for_updates(&current_version))
+        .await
+        .map_err(|error| format!("update check failed: {error}"))?
+}
+
+#[tauri::command(rename_all = "snake_case")]
 pub async fn get_github_user(state: State<'_, AppState>) -> Result<GithubUser, String> {
     let state = state.inner().clone();
     tokio::task::spawn_blocking(move || {
-        crate::github_sync::guarded(&state.database(), crate::github::current_user).or_else(|_| {
-            state.database().metadata("github_login")
+        let database = state.database();
+        match crate::github_sync::guarded(&database, crate::github::current_user) {
+            Ok(user) => {
+                database.set_metadata("github_login", &user.login).map_err(|error| error.to_string())?;
+                Ok(user)
+            }
+            Err(_) => database.metadata("github_login")
                 .map_err(|error| error.to_string())?
                 .map(|login| GithubUser { login })
-                .ok_or_else(|| "GitHub CLI is not authenticated".to_string())
-        })
+                .ok_or_else(|| "GitHub CLI is not authenticated".to_string()),
+        }
     }).await.map_err(|error| error.to_string())?
 }
 
@@ -186,9 +199,19 @@ pub async fn get_loc_history(state: State<'_, AppState>, repository_id: Option<i
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub fn get_activity_feed(app_state: State<'_, AppState>, kind: String, state: Option<String>, repository_id: Option<i64>, repository_ids: Option<Vec<i64>>, limit: Option<usize>) -> Result<ActivityFeed, String> {
+pub fn get_activity_feed(app_state: State<'_, AppState>, kind: String, state: Option<String>, repository_id: Option<i64>, repository_ids: Option<Vec<i64>>, limit: Option<usize>, relationship: Option<String>) -> Result<ActivityFeed, String> {
     let state_value = state.as_deref().and_then(|value| if value.eq_ignore_ascii_case("all") { None } else { Some(value) });
-    let items = app_state.database().scoped_activity(&kind, repository_id, repository_ids.as_deref(), state_value, limit.unwrap_or(100).min(1000)).map_err(|error| error.to_string())?;
+    let relationship = relationship.unwrap_or_else(|| "everyone".into()).to_ascii_lowercase();
+    if !matches!(relationship.as_str(), "everyone" | "author" | "assignee" | "author_or_assignee") {
+        return Err(error::AppError::InvalidArgument("relationship must be one of everyone, author, assignee, author_or_assignee".into()).to_string());
+    }
+    let database = app_state.database();
+    let login = if relationship == "everyone" {
+        None
+    } else {
+        database.metadata("github_login").map_err(|error| error.to_string())?.filter(|login| !login.trim().is_empty())
+    };
+    let items = database.scoped_activity_for_relationship(&kind, repository_id, repository_ids.as_deref(), state_value, limit.unwrap_or(100).min(1000), &relationship, login.as_deref()).map_err(|error| error.to_string())?;
     Ok(ActivityFeed { kind, items })
 }
 

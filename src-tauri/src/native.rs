@@ -1,5 +1,6 @@
 //! Native lifecycle and scheduling remain active when the dashboard is hidden.
 use crate::models::{DashboardTotals, MenuBarMetric};
+use crate::personal_activity;
 use crate::sync::{self, AppState};
 use std::time::{Duration, Instant};
 use tauri::{menu::{Menu, MenuBuilder}, tray::TrayIconBuilder, AppHandle, Emitter, Manager};
@@ -200,27 +201,56 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     let state = app.state::<AppState>().inner().clone();
     std::thread::spawn(move || {
         refresh_menu(&app, &state);
-        let mut last_attempt = Instant::now();
+        let mut last_full_attempt = Instant::now();
+        let mut last_personal_attempt = Instant::now();
         loop {
             std::thread::sleep(Duration::from_secs(5));
             let db = state.database();
             let Ok(settings) = sync::app_settings(&db) else { continue; };
-            if last_attempt.elapsed() < Duration::from_secs(settings.activity_refresh_minutes.max(1) as u64 * 60) { continue; }
-            // Never queue an automatic refresh behind an active manual job.
+            let full_due = last_full_attempt.elapsed() >= Duration::from_secs(settings.activity_refresh_minutes.max(1) as u64 * 60);
+            let personal_due = last_personal_attempt.elapsed() >= Duration::from_secs(personal_activity::INTERVAL_SECONDS);
+
+            // Full activity refresh takes precedence when both clocks are due;
+            // this keeps discovery and its LOC policy independent of the fast
+            // personal activity path.
+            if full_due {
+                // Never queue an automatic refresh behind an active manual job.
+                let Ok(_job) = state.job_lock.try_lock() else {
+                    last_full_attempt = Instant::now();
+                    continue;
+                };
+                // First import remains an explicit user action.
+                if !db.repositories().is_ok_and(|repos| !repos.is_empty()) {
+                    last_full_attempt = Instant::now();
+                    continue;
+                }
+                // Existing activity sync owns discovery cadence, LOC sweeps and persisted rate-limit pauses.
+                if let Err(error) = sync::sync_activity(&state) {
+                    let mut progress = state.progress();
+                    progress.running = false;
+                    progress.error = Some(error.to_string());
+                    state.set_progress(progress);
+                }
+                last_full_attempt = Instant::now();
+                drop(_job);
+                refresh_menu(&app, &state);
+                let _ = app.emit("background-sync-completed", ());
+                continue;
+            }
+
+            if !personal_due { continue; }
+            // Never run a quick refresh concurrently with a manual or full job.
             let Ok(_job) = state.job_lock.try_lock() else {
-                last_attempt = Instant::now();
+                last_personal_attempt = Instant::now();
                 continue;
             };
-            last_attempt = Instant::now();
-            // First import remains an explicit user action.
-            if !db.repositories().is_ok_and(|repos| !repos.is_empty()) { continue; }
-            // Existing activity sync owns discovery cadence, LOC sweeps and persisted rate-limit pauses.
-            if let Err(error) = sync::sync_activity(&state) {
+            if let Err(error) = personal_activity::sync(&state) {
                 let mut progress = state.progress();
                 progress.running = false;
                 progress.error = Some(error.to_string());
                 state.set_progress(progress);
             }
+            last_personal_attempt = Instant::now();
             drop(_job);
             refresh_menu(&app, &state);
             let _ = app.emit("background-sync-completed", ());

@@ -107,6 +107,7 @@ export async function getActivityFeed(request: FeedRequest): Promise<PullRequest
     repository_id: request.repositoryId ?? null,
     state: request.state ?? 'all',
     ...(request.repositoryIds !== undefined ? { repository_ids: request.repositoryIds } : {}),
+    ...(request.relationship !== undefined && request.relationship !== 'everyone' ? { relationship: request.relationship } : {}),
     limit: 1000
   })
   if (Array.isArray(raw)) return raw as PullRequest[] | Issue[]
@@ -119,6 +120,17 @@ export async function getActivityFeed(request: FeedRequest): Promise<PullRequest
 
 export async function openExternalUrl(url: string): Promise<void> {
   await call('open_external_url', { url })
+}
+
+export interface AppUpdate {
+  current_version: string
+  latest_version: string
+  release_url: string
+  update_available: boolean
+}
+
+export async function checkForUpdates(): Promise<AppUpdate> {
+  return call<AppUpdate>('check_for_updates')
 }
 
 export async function getSyncProgress(): Promise<SyncProgress> {

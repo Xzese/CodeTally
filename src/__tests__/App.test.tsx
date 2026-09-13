@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from '../App'
-import type { AppSettings, DashboardData, DependencyStatus, Issue, LocSnapshot, MenuBarMetric, PullRequest, Repository, SyncProgress, SyncResult, ThemeMode } from '../types'
+import type { AppSettings, DashboardData, DependencyStatus, FeedKind, Issue, LocSnapshot, MenuBarMetric, PullRequest, Repository, SyncProgress, SyncResult, ThemeMode } from '../types'
 
 const invokeMock = vi.hoisted(() => vi.fn())
 const backgroundSyncListener = vi.hoisted(() => vi.fn())
@@ -170,6 +170,7 @@ const readyDependencies: DependencyStatus = { gh: true, git: true, tokei: true, 
 const syncOk: SyncResult = { ok: true, message: 'Sync complete', repositories_synced: 2, pull_requests_synced: 2, issues_synced: 2, snapshots_created: 0, errors: [] }
 const defaultAppSettings: AppSettings = {
   activity_refresh_minutes: 30,
+  activity_relationship: 'everyone',
   lines_refresh_minutes: 120,
   refresh_lines_on_change: true,
   run_in_background: true,
@@ -213,9 +214,10 @@ type BackendOptions = {
   repositorySelection?: typeof defaultRepositorySelection
   appSettingsResponses?: Array<Partial<AppSettings> | Error>
   setAppSettings?: (next: Partial<AppSettings>, current: AppSettings) => AppSettings | Promise<AppSettings>
+  activityFeed?: (kind: FeedKind, args: Record<string, unknown>) => PullRequest[] | Issue[] | Promise<PullRequest[] | Issue[]>
 }
 
-function configureBackend({ dependencies = readyDependencies, syncResult = syncOk, cachedDashboard = dashboard, dashboardResponses, historyPromise, syncPromise, activitySyncPromise, fullSyncPromise, progress, settings, repositorySelection = defaultRepositorySelection, appSettingsResponses, setAppSettings }: BackendOptions = {}) {
+function configureBackend({ dependencies = readyDependencies, syncResult = syncOk, cachedDashboard = dashboard, dashboardResponses, historyPromise, syncPromise, activitySyncPromise, fullSyncPromise, progress, settings, repositorySelection = defaultRepositorySelection, appSettingsResponses, setAppSettings, activityFeed }: BackendOptions = {}) {
   let progressIndex = 0
   let dashboardIndex = 0
   let dependencyIndex = 0
@@ -242,6 +244,7 @@ function configureBackend({ dependencies = readyDependencies, syncResult = syncO
         return history.filter((snapshot) => String(snapshot.repository_id) === String(repositoryId))
       }
       case 'get_activity_feed':
+        if (activityFeed) return activityFeed(args?.kind === 'issues' ? 'issues' : 'prs', args ?? {})
         return args?.kind === 'issues' ? issues : prs
       case 'sync_github_data':
         return fullSyncPromise ?? syncPromise ?? syncResult
@@ -351,8 +354,8 @@ describe('dashboard UI', () => {
     expect(screen.getByRole('heading', { name: 'Total Lines' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Repositories' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Recent activity' })).toBeInTheDocument()
-    expect(screen.getByText('Fix alpha flow')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /sam\/alpha #12/ })).toBeInTheDocument()
+    expect(await screen.findByText('Fix alpha flow')).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: /sam\/alpha #12/ })).toBeInTheDocument()
   })
 
   it('keeps the settings retry available when an empty dashboard opens Settings after a read failure', async () => {
@@ -511,6 +514,91 @@ describe('dashboard UI', () => {
         limit: 1000
       })
     })
+  })
+
+  it('sends each Activity involvement choice through the activity request', async () => {
+    const user = await renderDashboard()
+    const involvement = screen.getByRole('combobox', { name: 'Activity involvement' }) as HTMLSelectElement
+    const callsFor = (kind: FeedKind) => invokeMock.mock.calls.filter(([command, args]) => command === 'get_activity_feed' && (args as Record<string, unknown> | undefined)?.kind === kind)
+    const latestPrArgs = () => callsFor('prs').at(-1)?.[1] as Record<string, unknown>
+
+    await waitFor(() => expect(callsFor('prs').length).toBeGreaterThan(0))
+    expect(latestPrArgs()).not.toHaveProperty('relationship')
+
+    await user.selectOptions(involvement, 'author')
+    await waitFor(() => expect(latestPrArgs()).toEqual(expect.objectContaining({ relationship: 'author' })))
+    expect(involvement).toHaveValue('author')
+
+    await user.selectOptions(involvement, 'assignee')
+    await waitFor(() => expect(latestPrArgs()).toEqual(expect.objectContaining({ relationship: 'assignee' })))
+    expect(involvement).toHaveValue('assignee')
+
+    await user.selectOptions(involvement, 'author_or_assignee')
+    await waitFor(() => expect(latestPrArgs()).toEqual(expect.objectContaining({ relationship: 'author_or_assignee' })))
+    expect(involvement).toHaveValue('author_or_assignee')
+
+    await user.selectOptions(involvement, 'everyone')
+    await waitFor(() => expect(latestPrArgs()).not.toHaveProperty('relationship'))
+    expect(involvement).toHaveValue('everyone')
+  })
+
+  it('retains Activity involvement when switching between pull requests and issues', async () => {
+    const user = await renderDashboard()
+    const sidebar = () => screen.getByRole('heading', { name: 'Recent activity' }).closest('aside') as HTMLElement
+    const involvement = () => within(sidebar()).getByRole('combobox', { name: 'Activity involvement' }) as HTMLSelectElement
+    const activityCalls = (kind: FeedKind) => invokeMock.mock.calls.filter(([command, args]) => command === 'get_activity_feed' && (args as Record<string, unknown> | undefined)?.kind === kind)
+
+    await user.selectOptions(involvement(), 'assignee')
+    await waitFor(() => expect((activityCalls('prs').at(-1)?.[1] as Record<string, unknown>).relationship).toBe('assignee'))
+    expect(involvement()).toHaveValue('assignee')
+
+    await user.click(within(sidebar()).getByRole('button', { name: 'Issues' }))
+    await waitFor(() => expect((activityCalls('issues').at(-1)?.[1] as Record<string, unknown>).relationship).toBe('assignee'))
+    expect(involvement()).toHaveValue('assignee')
+
+    await user.click(within(sidebar()).getByRole('button', { name: 'Pull requests' }))
+    await waitFor(() => expect((activityCalls('prs').at(-1)?.[1] as Record<string, unknown>).relationship).toBe('assignee'))
+    expect(involvement()).toHaveValue('assignee')
+  })
+
+  it('defaults missing Activity involvement settings to author and saves a changed choice', async () => {
+    configureBackend({ appSettingsResponses: [{}] })
+    const user = await renderDashboard()
+    const involvement = screen.getByRole('combobox', { name: 'Activity involvement' }) as HTMLSelectElement
+    const activityCalls = () => invokeMock.mock.calls.filter(([command, args]) => command === 'get_activity_feed' && (args as Record<string, unknown> | undefined)?.kind === 'prs')
+
+    await waitFor(() => expect(involvement).toHaveValue('author'))
+    await waitFor(() => expect((activityCalls().at(-1)?.[1] as Record<string, unknown>).relationship).toBe('author'))
+
+    await user.selectOptions(involvement, 'assignee')
+    await waitFor(() => expect(savedSettings()).toEqual(expect.arrayContaining([expect.objectContaining({ activity_relationship: 'assignee' })])))
+  })
+
+  it('ignores a stale Activity involvement response after a newer filter request resolves', async () => {
+    const staleResponse = deferred<PullRequest[]>()
+    const freshResponse = deferred<PullRequest[]>()
+    const staleItem: PullRequest = { ...prs[0], title: 'Stale everyone result' }
+    const freshItem: PullRequest = { ...prs[0], title: 'Fresh author result' }
+    configureBackend({
+      activityFeed: (kind, args) => {
+        if (kind === 'issues') return issues
+        return args.relationship === 'author' ? freshResponse.promise : staleResponse.promise
+      }
+    })
+    const user = userEvent.setup()
+    render(<App />)
+    const involvement = await screen.findByRole('combobox', { name: 'Activity involvement' }) as HTMLSelectElement
+    const activityCalls = () => invokeMock.mock.calls.filter(([command, args]) => command === 'get_activity_feed' && (args as Record<string, unknown> | undefined)?.kind === 'prs')
+
+    await waitFor(() => expect(activityCalls().some(([, args]) => !(args as Record<string, unknown>).relationship)).toBe(true))
+    await user.selectOptions(involvement, 'author')
+    await waitFor(() => expect(activityCalls().some(([, args]) => (args as Record<string, unknown>).relationship === 'author')).toBe(true))
+
+    freshResponse.resolve([freshItem])
+    expect(await screen.findByText('Fresh author result')).toBeInTheDocument()
+    staleResponse.resolve([staleItem])
+    await act(async () => { await Promise.resolve() })
+    expect(screen.queryByText('Stale everyone result')).not.toBeInTheDocument()
   })
 
   it('opens a repository detail view with repository-scoped LOC history and activity', async () => {

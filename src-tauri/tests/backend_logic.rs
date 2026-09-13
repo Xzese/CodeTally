@@ -197,6 +197,8 @@ fn github_json_models_parse_ids_and_nested_activity_fields() {
         "mergedAt": null,
         "closedAt": null,
         "url": "https://github.com/owner/portfolio/pull/17",
+        "author": {"login": "octocat"},
+        "assignees": [{"login": "maintainer"}],
         "additions": 12,
         "deletions": 4,
         "changedFiles": 2,
@@ -207,6 +209,8 @@ fn github_json_models_parse_ids_and_nested_activity_fields() {
     assert!(pull_request.is_draft);
     assert_eq!(pull_request.changed_files, Some(2));
     assert_eq!(pull_request.status_check_rollup.expect("checks")[0]["state"], "SUCCESS");
+    assert_eq!(pull_request.author.expect("author").login, "octocat");
+    assert_eq!(pull_request.assignees[0].login, "maintainer");
 
     let issue: GithubIssueJson = serde_json::from_value(json!({
         "number": 8,
@@ -1067,6 +1071,252 @@ fn sqlite_upserts_preserve_one_repository_and_update_activity_rows() {
 }
 
 #[test]
+fn sqlite_upserts_round_trip_pull_request_actor_fields() {
+    let (database, path) = temp_database("pull-request-actors");
+    let repository_id = database
+        .upsert_repository(&repository("repo-actors", "actors"))
+        .expect("repository");
+    let mut pull_request = PullRequest {
+        repository_id,
+        repository: "owner/actors".into(),
+        number: 7,
+        title: "Actor fields".into(),
+        state: "OPEN".into(),
+        created_at: "2026-09-01T00:00:00Z".into(),
+        updated_at: "2026-09-02T00:00:00Z".into(),
+        author: Some("octocat".into()),
+        assignees: vec!["maintainer".into(), "reviewer".into()],
+        ..PullRequest::default()
+    };
+    database
+        .upsert_pull_request(&pull_request)
+        .expect("pull request insert");
+
+    let stored = database
+        .pull_requests(Some(repository_id), None, 10)
+        .expect("pull request feed");
+    assert_eq!(stored[0].author.as_deref(), Some("octocat"));
+    assert_eq!(stored[0].assignees, vec!["maintainer", "reviewer"]);
+
+    pull_request.author = Some("octocat-renamed".into());
+    pull_request.assignees = vec!["new-reviewer".into()];
+    database
+        .upsert_pull_request(&pull_request)
+        .expect("pull request update");
+    let updated = database
+        .pull_requests(Some(repository_id), None, 10)
+        .expect("updated pull request feed");
+    assert_eq!(updated[0].author.as_deref(), Some("octocat-renamed"));
+    assert_eq!(updated[0].assignees, vec!["new-reviewer"]);
+    remove_database(path);
+}
+
+#[test]
+fn sqlite_init_migrates_legacy_pull_request_actor_columns() {
+    let (database, path) = temp_database("pull-request-actor-migration");
+    let repository_id = database
+        .upsert_repository(&repository("repo-actor-migration", "actor-migration"))
+        .expect("repository");
+    let connection = Connection::open(&path).expect("legacy pull request database");
+    connection
+        .execute_batch(
+            r#"
+            DROP TABLE pull_requests;
+            CREATE TABLE pull_requests (
+                repository_id INTEGER NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+                number INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                state TEXT NOT NULL,
+                is_draft INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                merged_at TEXT,
+                closed_at TEXT,
+                url TEXT NOT NULL,
+                additions INTEGER NOT NULL DEFAULT 0,
+                deletions INTEGER NOT NULL DEFAULT 0,
+                changed_files INTEGER NOT NULL DEFAULT 0,
+                ci_state TEXT,
+                PRIMARY KEY(repository_id, number)
+            );
+            "#,
+        )
+        .expect("legacy pull request schema");
+    connection
+        .execute(
+            "INSERT INTO pull_requests (repository_id,number,title,state,created_at,updated_at,url) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            params![
+                repository_id,
+                8,
+                "Legacy actor row",
+                "OPEN",
+                "2026-09-01T00:00:00Z",
+                "2026-09-02T00:00:00Z",
+                "https://github.com/owner/actor-migration/pull/8",
+            ],
+        )
+        .expect("legacy pull request row");
+    drop(connection);
+    database
+        .set_metadata("activity_actor_fields_version", "legacy")
+        .expect("legacy actor fields version");
+
+    database.init().expect("actor column migration");
+    let migrated = database
+        .pull_requests(Some(repository_id), None, 10)
+        .expect("migrated pull request feed");
+    assert_eq!(migrated.len(), 1);
+    assert_eq!(migrated[0].title, "Legacy actor row");
+    assert_eq!(migrated[0].author, None);
+    assert!(migrated[0].assignees.is_empty());
+    assert_eq!(
+        database
+            .metadata("activity_actor_fields_version")
+            .expect("actor fields version")
+            .as_deref(),
+        Some("1")
+    );
+    remove_database(path);
+}
+
+#[test]
+fn sqlite_init_rewinds_activity_checkpoints_per_repository_and_is_idempotent() {
+    let (database, path) = temp_database("pull-request-actor-checkpoints");
+    let repository_a = database
+        .upsert_repository(&repository("repo-checkpoint-a", "checkpoint-a"))
+        .expect("first repository");
+    let repository_b = database
+        .upsert_repository(&repository("repo-checkpoint-b", "checkpoint-b"))
+        .expect("second repository");
+    for item in [
+        PullRequest {
+            repository_id: repository_a,
+            number: 1,
+            title: "Older closed PR".into(),
+            state: "CLOSED".into(),
+            updated_at: "2026-09-01T00:00:00Z".into(),
+            ..PullRequest::default()
+        },
+        PullRequest {
+            repository_id: repository_a,
+            number: 2,
+            title: "Newer closed PR".into(),
+            state: "MERGED".into(),
+            updated_at: "2026-09-03T00:00:00Z".into(),
+            ..PullRequest::default()
+        },
+        PullRequest {
+            repository_id: repository_b,
+            number: 3,
+            title: "Second repository PR".into(),
+            state: "CLOSED".into(),
+            updated_at: "2026-09-08T00:00:00Z".into(),
+            ..PullRequest::default()
+        },
+    ] {
+        database
+            .upsert_pull_request(&item)
+            .expect("closed pull request");
+    }
+
+    let checkpoint_a_key = format!("github_activity_v2:{repository_a}:pullRequests:false");
+    database
+        .set_metadata(
+            &checkpoint_a_key,
+            &json!({
+                "completed_at": "2026-09-10T00:00:00Z",
+                "started_at": "2026-09-10T00:00:00Z",
+                "after": "cursor"
+            })
+            .to_string(),
+        )
+        .expect("existing activity checkpoint");
+    // Simulate a pre-actor-fields database. Repository B deliberately has no
+    // checkpoint, so migration must create its per-repository entry too.
+    database
+        .set_metadata("activity_actor_fields_version", "legacy")
+        .expect("legacy actor fields version");
+
+    database.init().expect("actor checkpoint migration");
+    let checkpoint_a: serde_json::Value = serde_json::from_str(
+        &database
+            .metadata(&checkpoint_a_key)
+            .expect("first checkpoint")
+            .expect("first checkpoint value"),
+    )
+    .expect("first checkpoint JSON");
+    assert_eq!(checkpoint_a["completed_at"], "2026-09-01T00:00:00Z");
+    assert!(checkpoint_a["started_at"].is_null());
+    assert!(checkpoint_a["after"].is_null());
+
+    let checkpoint_b_key = format!("github_activity_v2:{repository_b}:pullRequests:false");
+    let checkpoint_b: serde_json::Value = serde_json::from_str(
+        &database
+            .metadata(&checkpoint_b_key)
+            .expect("second checkpoint")
+            .expect("second checkpoint value"),
+    )
+    .expect("second checkpoint JSON");
+    assert_eq!(checkpoint_b["completed_at"], "2026-09-08T00:00:00Z");
+    assert!(checkpoint_b["started_at"].is_null());
+    assert!(checkpoint_b["after"].is_null());
+
+    database.init().expect("repeat actor checkpoint migration");
+    let repeated_checkpoint_a: serde_json::Value = serde_json::from_str(
+        &database
+            .metadata(&checkpoint_a_key)
+            .expect("first checkpoint after repeat")
+            .expect("first repeated checkpoint value"),
+    )
+    .expect("first repeated checkpoint JSON");
+    let repeated_checkpoint_b: serde_json::Value = serde_json::from_str(
+        &database
+            .metadata(&checkpoint_b_key)
+            .expect("second checkpoint after repeat")
+            .expect("second repeated checkpoint value"),
+    )
+    .expect("second repeated checkpoint JSON");
+    assert_eq!(repeated_checkpoint_a, checkpoint_a);
+    assert_eq!(repeated_checkpoint_b, checkpoint_b);
+    remove_database(path);
+}
+
+#[test]
+fn graphql_rate_limit_response_persists_remaining_and_query_cost_metadata() {
+    let (database, path) = temp_database("graphql-rate-limit-metadata");
+    let response = codetally_lib::github_sync::parse_response(
+        &database,
+        true,
+        r#"{"data":{"rateLimit":{"remaining":4321,"cost":17,"resetAt":"2099-01-01T00:00:00Z"}}}"#,
+        "",
+    )
+    .expect("GraphQL response");
+    assert_eq!(response["data"]["rateLimit"]["remaining"], 4321);
+    assert_eq!(
+        database
+            .metadata("github_quota_remaining")
+            .expect("remaining metadata")
+            .as_deref(),
+        Some("4321")
+    );
+    assert_eq!(
+        database
+            .metadata("github_last_query_cost")
+            .expect("query cost metadata")
+            .as_deref(),
+        Some("17")
+    );
+    assert_eq!(
+        database
+            .metadata("github_quota_reset")
+            .expect("reset metadata")
+            .as_deref(),
+        Some("2099-01-01T00:00:00Z")
+    );
+    remove_database(path);
+}
+
+#[test]
 fn activity_feeds_sort_newest_first_and_apply_state_and_repository_filters() {
     let (database, path) = temp_database("feeds");
     let repo_a = database.upsert_repository(&repository("repo-a", "alpha")).expect("repo a");
@@ -1347,6 +1597,166 @@ fn activity_group_scopes_apply_before_limit_and_empty_scope_returns_nothing() {
     }
     sync::save_app_settings(&database, &AppSettings { excluded_repository_ids: vec!["company".into()], ..AppSettings::default() }).unwrap();
     assert!(database.scoped_activity("prs", None, Some(&[company]), Some("open"), 100).unwrap().is_empty());
+    remove_database(path);
+}
+
+#[test]
+fn activity_relationship_filters_are_case_insensitive_scoped_and_applied_before_limit() {
+    let (database, path) = temp_database("activity-relationships");
+    let repo_a = database
+        .upsert_repository(&Repository {
+            owner: "sam".into(),
+            name: "alpha".into(),
+            name_with_owner: "sam/alpha".into(),
+            ..repository("relationship-a", "alpha")
+        })
+        .expect("selected repository");
+    let repo_b = database
+        .upsert_repository(&Repository {
+            owner: "acme".into(),
+            name: "beta".into(),
+            name_with_owner: "acme/beta".into(),
+            ..repository("relationship-b", "beta")
+        })
+        .expect("second repository");
+    sync::save_app_settings(
+        &database,
+        &AppSettings {
+            excluded_repository_ids: vec!["relationship-b".into()],
+            ..AppSettings::default()
+        },
+    )
+    .expect("exclude second repository");
+
+    let pr = |repository_id, number, title, state, updated_at, author, assignees| PullRequest {
+        repository_id,
+        repository: if repository_id == repo_a { "sam/alpha".into() } else { "acme/beta".into() },
+        number,
+        title: title.into(),
+        state: state.into(),
+        created_at: updated_at.into(),
+        updated_at: updated_at.into(),
+        author: author.map(str::to_string),
+        assignees: assignees.into_iter().map(str::to_string).collect(),
+        ..PullRequest::default()
+    };
+    let issue = |repository_id, number, title, state, updated_at, author, assignees| Issue {
+        repository_id,
+        repository: if repository_id == repo_a { "sam/alpha".into() } else { "acme/beta".into() },
+        number,
+        title: title.into(),
+        state: state.into(),
+        created_at: updated_at.into(),
+        updated_at: updated_at.into(),
+        url: format!("https://github.com/example/{number}"),
+        author: author.map(str::to_string),
+        assignees: assignees.into_iter().map(str::to_string).collect(),
+        ..Issue::default()
+    };
+
+    for kind in ["prs", "issues"] {
+        if kind == "prs" {
+            for item in [
+                pr(repo_a, 1, "Selected author", "OPEN", "2026-09-05T00:00:00Z", Some("sam"), vec!["other"]),
+                pr(repo_a, 2, "Selected assignee", "OPEN", "2026-09-04T00:00:00Z", Some("other"), vec!["SAM"]),
+                pr(repo_a, 3, "Selected neither", "OPEN", "2026-09-06T00:00:00Z", Some("other"), vec!["third"]),
+                pr(repo_a, 4, "Selected closed author", "CLOSED", "2026-09-07T00:00:00Z", Some("SAM"), vec!["other"]),
+                pr(repo_b, 5, "Other repository author", "OPEN", "2026-09-08T00:00:00Z", Some("sam"), vec![]),
+            ] {
+                database.upsert_pull_request(&item).expect("pull request");
+            }
+        } else {
+            for item in [
+                issue(repo_a, 11, "Selected author", "OPEN", "2026-09-05T00:00:00Z", Some("sam"), vec!["other"]),
+                issue(repo_a, 12, "Selected assignee", "OPEN", "2026-09-04T00:00:00Z", Some("other"), vec!["SAM"]),
+                issue(repo_a, 13, "Selected neither", "OPEN", "2026-09-06T00:00:00Z", Some("other"), vec!["third"]),
+                issue(repo_a, 14, "Selected closed author", "CLOSED", "2026-09-07T00:00:00Z", Some("SAM"), vec!["other"]),
+                issue(repo_b, 15, "Other repository author", "OPEN", "2026-09-08T00:00:00Z", Some("sam"), vec![]),
+            ] {
+                database.upsert_issue(&item).expect("issue");
+            }
+        }
+
+        // An explicit login must still leave the everyone query subject to
+        // repository scope, state, and the selected-repository exclusion.
+        let everyone_scoped = database
+            .scoped_activity_for_relationship(
+                kind,
+                None,
+                Some(&[repo_a, repo_b]),
+                Some("oPeN"),
+                10,
+                "everyone",
+                Some("sAm"),
+            )
+            .expect("everyone scoped activity");
+        assert_eq!(everyone_scoped.len(), 3);
+        assert!(everyone_scoped.iter().all(|item| match item {
+            ActivityItem::PullRequest(item) => item.repository_id == repo_a,
+            ActivityItem::Issue(item) => item.repository_id == repo_a,
+        }));
+
+        let titles = |relationship: &str, login| {
+            database
+                .scoped_activity_for_relationship(
+                    kind,
+                    Some(repo_a),
+                    Some(&[repo_a]),
+                    Some("oPeN"),
+                    10,
+                    relationship,
+                    login,
+                )
+                .expect("relationship-filtered activity")
+                .into_iter()
+                .map(|item| match item {
+                    ActivityItem::PullRequest(item) => item.title,
+                    ActivityItem::Issue(item) => item.title,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            titles("everyone", Some("sAm")),
+            vec!["Selected neither", "Selected author", "Selected assignee"]
+        );
+        assert_eq!(titles("author", Some("sAm")), vec!["Selected author"]);
+        assert_eq!(titles("ASSIGNEE", Some("sAm")), vec!["Selected assignee"]);
+        assert_eq!(
+            titles("author_or_assignee", Some("sAm")),
+            vec!["Selected author", "Selected assignee"]
+        );
+
+        // Actor matching requires a login, while the everyone view remains
+        // useful before GitHub authentication has supplied one.
+        assert!(titles("author", None::<&str>).is_empty());
+        assert!(titles("assignee", None::<&str>).is_empty());
+        assert!(titles("author_or_assignee", None::<&str>).is_empty());
+        assert_eq!(
+            titles("everyone", None::<&str>),
+            vec!["Selected neither", "Selected author", "Selected assignee"]
+        );
+
+        // The repository and state predicates must run before LIMIT. The
+        // newest rows belong to another repository or are closed, and the
+        // matching open row still appears when callers request one item.
+        let limited = database
+            .scoped_activity_for_relationship(
+                kind,
+                None,
+                Some(&[repo_a]),
+                Some("OPEN"),
+                1,
+                "author",
+                Some("SAM"),
+            )
+            .expect("limited scoped relationship activity");
+        assert_eq!(limited.len(), 1);
+        assert_eq!(match &limited[0] {
+            ActivityItem::PullRequest(item) => item.title.as_str(),
+            ActivityItem::Issue(item) => item.title.as_str(),
+        }, "Selected author");
+    }
     remove_database(path);
 }
 
