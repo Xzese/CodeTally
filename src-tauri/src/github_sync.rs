@@ -4,8 +4,13 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::process::Command;
+use std::time::Duration as StdDuration;
 
 pub const PAUSE_KEY: &str = "github_pause_until";
+// Four total attempts with 250 ms, 500 ms, and 1 s waits between retries.
+const GRAPHQL_TRANSIENT_RETRIES: u32 = 3;
+const GRAPHQL_RETRY_BASE_MILLIS: u64 = 250;
+const GRAPHQL_RETRY_MAX_MILLIS: u64 = 2_000;
 
 pub fn ensure_available(db: &Database) -> AppResult<()> {
     if let Some(until) = db.metadata(PAUSE_KEY)? {
@@ -48,13 +53,42 @@ fn limited(message: &str) -> bool {
 }
 
 pub fn graphql(db: &Database, query: &str, variables: Value) -> AppResult<Value> {
-    ensure_available(db)?;
     let mut args = vec!["api".to_string(), "graphql".into(), "--include".into(), "-f".into(), format!("query={query}")];
     for (key, value) in variables.as_object().expect("object variables") {
         args.extend([if value.is_string() { "-f" } else { "-F" }.into(), format!("{key}={}", value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string()))]);
     }
-    let output = Command::new(github::command_path("gh")).args(args).output()?;
-    parse_response(db, output.status.success(), &String::from_utf8_lossy(&output.stdout), &String::from_utf8_lossy(&output.stderr))
+    let mut retries = 0;
+    loop {
+        ensure_available(db)?;
+        let output = Command::new(github::command_path("gh")).args(&args).output()?;
+        let success = output.status.success();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        match parse_response(db, success, &stdout, &stderr) {
+            Ok(value) => return Ok(value),
+            Err(error) if retries < GRAPHQL_TRANSIENT_RETRIES && transient_network_failure(&error, &stdout, &stderr) => {
+                std::thread::sleep(graphql_retry_delay(retries));
+                retries += 1;
+            },
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn transient_network_failure(error: &AppError, stdout: &str, stderr: &str) -> bool {
+    if matches!(error, AppError::RateLimited { .. }) {
+        return false;
+    }
+    let message = format!("{stdout}\n{stderr}\n{error}").to_ascii_lowercase();
+    if limited(&message) {
+        return false;
+    }
+    message.contains("reset by peer") || message.contains("operation timed out") || message.contains("i/o timeout")
+}
+
+fn graphql_retry_delay(retry: u32) -> StdDuration {
+    let multiplier = 1_u64 << retry.min(3);
+    StdDuration::from_millis((GRAPHQL_RETRY_BASE_MILLIS * multiplier).min(GRAPHQL_RETRY_MAX_MILLIS))
 }
 
 pub fn parse_response(db: &Database, success: bool, stdout: &str, stderr: &str) -> AppResult<Value> {

@@ -8,7 +8,8 @@ use codetally_lib::db::Database;
 use codetally_lib::gitops::{earliest_commit, scan_worktree_with_config};
 use codetally_lib::models::{
     ActivityItem, AppSettings, ClassificationConfig, GithubIssueJson, GithubPullRequestJson,
-    GithubRepositoryJson, Issue, PullRequest, Repository, Snapshot, SyncProgress,
+    DashboardTotals, GithubRepositoryJson, Issue, MenuBarMetric, PullRequest, Repository,
+    Snapshot, SyncProgress, ThemeMode,
 };
 use codetally_lib::sync::{self, decide_loc_sync, AppState};
 use serde_json::json;
@@ -116,6 +117,20 @@ fn snapshot(repository_id: i64, sha: &str, date: &str, total: i64) -> Snapshot {
         total_loc: total,
         source_loc: total - 20,
         test_loc: 20,
+        created_at: date.to_string(),
+        ..Snapshot::default()
+    }
+}
+
+fn snapshot_with_counts(repository_id: i64, sha: &str, date: &str, total: i64, source: i64, tests: i64) -> Snapshot {
+    Snapshot {
+        repository_id,
+        commit_sha: sha.to_string(),
+        commit_date: date.to_string(),
+        snapshot_date: date.to_string(),
+        total_loc: total,
+        source_loc: source,
+        test_loc: tests,
         created_at: date.to_string(),
         ..Snapshot::default()
     }
@@ -303,14 +318,14 @@ fn automatic_loc_cadence_always_scans_new_or_incomplete_repositories() {
 }
 
 #[test]
-fn automatic_loc_cadence_runs_at_the_45_minute_boundary_and_manual_sync_forces_fetch() {
+fn automatic_loc_cadence_runs_at_the_120_minute_boundary_and_manual_sync_forces_fetch() {
     let now: DateTime<Utc> = "2026-09-08T12:00:00Z".parse().expect("cadence instant");
     let repository = completed_repository("cadence-boundary", "boundary", "2026-09-08T10:00:00Z", "2026-09-08T10:00:00Z");
-    let before_boundary = decide_loc_sync(&repository, now, Some("2026-09-08T11:16:00Z"), false);
+    let before_boundary = decide_loc_sync(&repository, now, Some("2026-09-08T10:01:00Z"), false);
     assert!(!before_boundary.run);
     assert!(!before_boundary.force_fetch);
 
-    let at_boundary = decide_loc_sync(&repository, now, Some("2026-09-08T11:15:00Z"), false);
+    let at_boundary = decide_loc_sync(&repository, now, Some("2026-09-08T10:00:00Z"), false);
     assert!(at_boundary.run);
     assert!(at_boundary.force_fetch);
 
@@ -322,30 +337,82 @@ fn automatic_loc_cadence_runs_at_the_45_minute_boundary_and_manual_sync_forces_f
 #[test]
 fn cadence_settings_have_expected_defaults_and_validate_supported_intervals() {
     let defaults = AppSettings::default();
-    assert_eq!(defaults.activity_refresh_minutes, 10);
-    assert_eq!(defaults.lines_refresh_minutes, 45);
+    assert_eq!(defaults.theme_mode, ThemeMode::System);
+    assert_eq!(defaults.activity_refresh_minutes, 30);
+    assert_eq!(defaults.lines_refresh_minutes, 120);
     assert!(defaults.refresh_lines_on_change);
+    assert!(defaults.run_in_background);
+    assert_eq!(defaults.menu_bar_metric, MenuBarMetric::TotalLines);
+    assert!(defaults.menu_bar_metrics.is_empty());
+    assert!(defaults.show_menu_bar);
+    assert_eq!(
+        defaults.effective_menu_bar_metrics(),
+        vec![MenuBarMetric::TotalLines]
+    );
+    assert!(!defaults.include_forks_in_totals);
+    assert!(defaults.include_personal_repositories);
+    assert!(defaults.include_company_repositories);
+    assert!(defaults.excluded_repository_ids.is_empty());
     assert!(sync::validate_app_settings(&defaults).is_ok());
 
-    let invalid_activity = AppSettings {
+    let custom_activity = AppSettings {
         activity_refresh_minutes: 3,
         ..defaults.clone()
     };
-    assert!(sync::validate_app_settings(&invalid_activity).is_err());
-    let invalid_lines = AppSettings {
-        lines_refresh_minutes: 31,
-        ..defaults
+    assert!(sync::validate_app_settings(&custom_activity).is_ok());
+    let custom_lines = AppSettings {
+        lines_refresh_minutes: 15,
+        ..defaults.clone()
     };
-    assert!(sync::validate_app_settings(&invalid_lines).is_err());
+    assert!(sync::validate_app_settings(&custom_lines).is_ok());
+
+    for invalid_activity in [0, -1, 1_441] {
+        let settings = AppSettings {
+            activity_refresh_minutes: invalid_activity,
+            ..defaults.clone()
+        };
+        assert!(
+            sync::validate_app_settings(&settings).is_err(),
+            "activity interval {invalid_activity} must be rejected"
+        );
+    }
+    for invalid_lines in [0, -1, 1_441] {
+        let settings = AppSettings {
+            lines_refresh_minutes: invalid_lines,
+            ..defaults.clone()
+        };
+        assert!(
+            sync::validate_app_settings(&settings).is_err(),
+            "lines interval {invalid_lines} must be rejected"
+        );
+    }
+
+    for (mode, encoded) in [
+        (ThemeMode::Light, "light"),
+        (ThemeMode::Dark, "dark"),
+        (ThemeMode::System, "system"),
+    ] {
+        assert_eq!(serde_json::to_value(mode).unwrap(), json!(encoded));
+        assert_eq!(serde_json::from_value::<ThemeMode>(json!(encoded)).unwrap(), mode);
+    }
 }
 
 #[test]
 fn cadence_settings_round_trip_through_persisted_app_metadata() {
     let (database, path) = temp_database("cadence-settings");
     let configured = AppSettings {
+        theme_mode: ThemeMode::System,
         activity_refresh_minutes: 5,
         lines_refresh_minutes: 60,
         refresh_lines_on_change: false,
+        run_in_background: false,
+        menu_bar_metric: MenuBarMetric::OpenPrs,
+        menu_bar_metrics: Vec::new(),
+        show_menu_bar: true,
+        include_forks_in_totals: true,
+        include_personal_repositories: false,
+        include_company_repositories: true,
+        excluded_repository_ids: vec!["repo-excluded".into()],
     };
     sync::save_app_settings(&database, &configured).expect("save cadence settings");
     database
@@ -357,6 +424,13 @@ fn cadence_settings_round_trip_through_persisted_app_metadata() {
     assert_eq!(loaded.activity_refresh_minutes, 5);
     assert_eq!(loaded.lines_refresh_minutes, 60);
     assert!(!loaded.refresh_lines_on_change);
+    assert!(!loaded.run_in_background);
+    assert_eq!(loaded.menu_bar_metric, MenuBarMetric::OpenPrs);
+    assert_eq!(loaded.effective_menu_bar_metrics(), vec![MenuBarMetric::OpenPrs]);
+    assert!(loaded.include_forks_in_totals);
+    assert!(!loaded.include_personal_repositories);
+    assert!(loaded.include_company_repositories);
+    assert_eq!(loaded.excluded_repository_ids, vec!["repo-excluded"]);
     assert_eq!(
         reopened
             .metadata(sync::LOC_SWEEP_METADATA_KEY)
@@ -365,6 +439,212 @@ fn cadence_settings_round_trip_through_persisted_app_metadata() {
         Some("2026-09-08T12:00:00Z")
     );
     remove_database(path);
+}
+
+#[test]
+fn custom_cadence_minute_boundaries_persist_and_invalid_values_are_rejected() {
+    let (database, path) = temp_database("custom-cadence-boundaries");
+    let lower = AppSettings {
+        activity_refresh_minutes: 1,
+        lines_refresh_minutes: 1,
+        ..AppSettings::default()
+    };
+    sync::save_app_settings(&database, &lower).expect("minimum intervals should persist");
+    let loaded_lower = sync::app_settings(&database).expect("load minimum intervals");
+    assert_eq!(loaded_lower.activity_refresh_minutes, 1);
+    assert_eq!(loaded_lower.lines_refresh_minutes, 1);
+
+    let upper = AppSettings {
+        activity_refresh_minutes: 1_440,
+        lines_refresh_minutes: 1_440,
+        ..AppSettings::default()
+    };
+    sync::save_app_settings(&database, &upper).expect("maximum intervals should persist");
+    let loaded_upper = sync::app_settings(&database).expect("load maximum intervals");
+    assert_eq!(loaded_upper.activity_refresh_minutes, 1_440);
+    assert_eq!(loaded_upper.lines_refresh_minutes, 1_440);
+
+    for invalid_activity in [0, -1, 1_441] {
+        let settings = AppSettings {
+            activity_refresh_minutes: invalid_activity,
+            ..AppSettings::default()
+        };
+        assert!(
+            sync::save_app_settings(&database, &settings).is_err(),
+            "activity interval {invalid_activity} must not persist"
+        );
+    }
+    for invalid_lines in [0, -1, 1_441] {
+        let settings = AppSettings {
+            lines_refresh_minutes: invalid_lines,
+            ..AppSettings::default()
+        };
+        assert!(
+            sync::save_app_settings(&database, &settings).is_err(),
+            "lines interval {invalid_lines} must not persist"
+        );
+    }
+    let after_rejected_values = sync::app_settings(&database).expect("load settings after rejected values");
+    assert_eq!(after_rejected_values.activity_refresh_minutes, 1_440);
+    assert_eq!(after_rejected_values.lines_refresh_minutes, 1_440);
+    remove_database(path);
+}
+
+#[test]
+fn legacy_saved_app_settings_keep_cadence_and_receive_new_defaults() {
+    let (database, path) = temp_database("legacy-settings");
+    database
+        .set_metadata(
+            sync::APP_SETTINGS_METADATA_KEY,
+            r#"{"activity_refresh_minutes":5,"lines_refresh_minutes":60,"refresh_lines_on_change":false,"menu_bar_metric":"open_prs"}"#,
+        )
+        .expect("save legacy settings JSON");
+
+    let loaded = sync::app_settings(&database).expect("load legacy settings");
+    assert_eq!(loaded.activity_refresh_minutes, 5);
+    assert_eq!(loaded.lines_refresh_minutes, 60);
+    assert!(!loaded.refresh_lines_on_change);
+    assert!(loaded.run_in_background);
+    assert_eq!(loaded.theme_mode, ThemeMode::System);
+    assert_eq!(loaded.menu_bar_metric, MenuBarMetric::OpenPrs);
+    assert!(loaded.menu_bar_metrics.is_empty());
+    assert!(loaded.show_menu_bar);
+    assert_eq!(loaded.effective_menu_bar_metrics(), vec![MenuBarMetric::OpenPrs]);
+    assert!(!loaded.include_forks_in_totals);
+    assert!(loaded.include_personal_repositories);
+    assert!(loaded.include_company_repositories);
+    assert!(loaded.excluded_repository_ids.is_empty());
+    remove_database(path);
+}
+
+#[test]
+fn previous_refresh_defaults_migrate_once_without_overriding_later_custom_values() {
+    let (database, path) = temp_database("refresh-default-migration");
+    database
+        .set_metadata(
+            sync::APP_SETTINGS_METADATA_KEY,
+            r#"{"activity_refresh_minutes":10,"lines_refresh_minutes":45,"refresh_lines_on_change":true}"#,
+        )
+        .expect("save previous defaults");
+
+    let migrated = sync::app_settings(&database).expect("migrate previous defaults");
+    assert_eq!(migrated.activity_refresh_minutes, 30);
+    assert_eq!(migrated.lines_refresh_minutes, 120);
+
+    let custom = AppSettings {
+        activity_refresh_minutes: 10,
+        lines_refresh_minutes: 45,
+        ..migrated
+    };
+    sync::save_app_settings(&database, &custom).expect("save later custom cadence");
+    let reloaded = sync::app_settings(&database).expect("reload later custom cadence");
+    assert_eq!(reloaded.activity_refresh_minutes, 10);
+    assert_eq!(reloaded.lines_refresh_minutes, 45);
+    remove_database(path);
+}
+
+#[test]
+fn all_menu_bar_metrics_round_trip_through_saved_app_settings() {
+    let (database, path) = temp_database("menu-bar-metrics");
+    for metric in [
+        MenuBarMetric::TotalLines,
+        MenuBarMetric::TestLines,
+        MenuBarMetric::SourceLines,
+        MenuBarMetric::OpenPrs,
+        MenuBarMetric::OpenIssues,
+    ] {
+        let settings = AppSettings {
+            menu_bar_metric: metric,
+            ..AppSettings::default()
+        };
+        sync::save_app_settings(&database, &settings).expect("save menu bar metric");
+        let loaded = sync::app_settings(&database).expect("load menu bar metric");
+        assert_eq!(loaded.menu_bar_metric, metric);
+        assert_eq!(loaded.menu_bar_metrics, vec![metric]);
+    }
+    remove_database(path);
+}
+
+#[test]
+fn multiple_menu_bar_metrics_round_trip_in_canonical_order_without_duplicates() {
+    let (database, path) = temp_database("multiple-menu-bar-metrics");
+    let settings = AppSettings {
+        menu_bar_metric: MenuBarMetric::OpenPrs,
+        menu_bar_metrics: vec![
+            MenuBarMetric::OpenIssues,
+            MenuBarMetric::TotalLines,
+            MenuBarMetric::OpenIssues,
+            MenuBarMetric::SourceLines,
+        ],
+        ..AppSettings::default()
+    };
+    sync::save_app_settings(&database, &settings).expect("save multiple menu bar metrics");
+    let loaded = sync::app_settings(&database).expect("load multiple menu bar metrics");
+    assert_eq!(
+        loaded.menu_bar_metrics,
+        vec![
+            MenuBarMetric::TotalLines,
+            MenuBarMetric::SourceLines,
+            MenuBarMetric::OpenIssues,
+        ]
+    );
+    assert_eq!(loaded.menu_bar_metric, MenuBarMetric::TotalLines);
+    assert_eq!(
+        loaded.effective_menu_bar_metrics(),
+        loaded.menu_bar_metrics.clone()
+    );
+    remove_database(path);
+}
+
+#[test]
+fn menu_bar_metric_titles_select_the_matching_dashboard_total() {
+    let totals = DashboardTotals {
+        total_loc: 12_345,
+        source_loc: 8_765,
+        test_loc: 3_580,
+        open_prs: 23,
+        open_issues: 41,
+        ..DashboardTotals::default()
+    };
+
+    assert_eq!(codetally_lib::native::metric_title(MenuBarMetric::TotalLines, &totals), "12.3K lines");
+    assert_eq!(codetally_lib::native::metric_title(MenuBarMetric::TestLines, &totals), "3.6K tests");
+    assert_eq!(codetally_lib::native::metric_title(MenuBarMetric::SourceLines, &totals), "8.8K source");
+    assert_eq!(codetally_lib::native::metric_title(MenuBarMetric::OpenPrs, &totals), "23 PRs");
+    assert_eq!(codetally_lib::native::metric_title(MenuBarMetric::OpenIssues, &totals), "41 issues");
+}
+
+#[test]
+fn menu_bar_titles_are_split_so_each_native_item_can_use_an_aligned_icon() {
+    let totals = DashboardTotals {
+        total_loc: 12_345,
+        source_loc: 8_765,
+        test_loc: 3_580,
+        open_prs: 23,
+        open_issues: 41,
+        ..DashboardTotals::default()
+    };
+
+    assert_eq!(
+        codetally_lib::native::menu_titles(
+            &[
+                MenuBarMetric::TotalLines,
+                MenuBarMetric::SourceLines,
+                MenuBarMetric::TestLines,
+                MenuBarMetric::OpenPrs,
+                MenuBarMetric::OpenIssues,
+            ],
+            &totals,
+        ),
+        vec!["12.3K lines", "8.8K source", "3.6K tests", "23 PRs", "41 issues"]
+    );
+    assert_eq!(
+        codetally_lib::native::menu_titles(
+            &[MenuBarMetric::OpenPrs, MenuBarMetric::TotalLines],
+            &totals,
+        ),
+        vec!["23 PRs", "12.3K lines"]
+    );
 }
 
 #[test]
@@ -810,6 +1090,215 @@ fn activity_feeds_sort_newest_first_and_apply_state_and_repository_filters() {
 }
 
 #[test]
+fn repository_selection_keeps_all_nonarchived_inventory_for_reselection() {
+    let (database, path) = temp_database("repository-selection");
+    database
+        .set_metadata("github_login", "sam")
+        .expect("current GitHub login");
+    let personal_id = database
+        .upsert_repository(&Repository {
+            github_id: "personal-id".into(),
+            owner: "sam".into(),
+            name: "alpha".into(),
+            name_with_owner: "sam/alpha".into(),
+            ..repository("personal-id", "alpha")
+        })
+        .expect("personal repository");
+    let company_id = database
+        .upsert_repository(&Repository {
+            github_id: "company-id".into(),
+            owner: "acme".into(),
+            name: "company".into(),
+            name_with_owner: "acme/company".into(),
+            ..repository("company-id", "company")
+        })
+        .expect("company repository");
+    let excluded_id = database
+        .upsert_repository(&Repository {
+            github_id: "excluded-id".into(),
+            owner: "sam".into(),
+            name: "disabled".into(),
+            name_with_owner: "sam/disabled".into(),
+            ..repository("excluded-id", "disabled")
+        })
+        .expect("excluded repository");
+    database
+        .upsert_repository(&Repository {
+            github_id: "archived-id".into(),
+            owner: "sam".into(),
+            name: "archived".into(),
+            name_with_owner: "sam/archived".into(),
+            is_archived: true,
+            ..repository("archived-id", "archived")
+        })
+        .expect("archived repository");
+
+    sync::save_app_settings(
+        &database,
+        &AppSettings {
+            include_personal_repositories: false,
+            include_company_repositories: false,
+            excluded_repository_ids: vec!["excluded-id".into()],
+            ..AppSettings::default()
+        },
+    )
+    .expect("save repository selection");
+
+    let inventory = database
+        .repository_selection()
+        .expect("repository inventory");
+    assert_eq!(
+        inventory
+            .iter()
+            .map(|item| (item.github_id.as_str(), item.name_with_owner.as_str(), item.owner.as_str(), item.group.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("company-id", "acme/company", "acme", "company"),
+            ("personal-id", "sam/alpha", "sam", "personal"),
+            ("excluded-id", "sam/disabled", "sam", "personal"),
+        ]
+    );
+    assert!(inventory.iter().any(|item| item.github_id == "excluded-id"));
+    assert!(inventory.iter().all(|item| item.github_id != "archived-id"));
+
+    let selected = database
+        .selected_repositories()
+        .expect("selected repositories");
+    assert!(selected.is_empty(), "both groups are disabled");
+    let personal = database
+        .repository(personal_id)
+        .expect("personal lookup")
+        .expect("personal row");
+    let company = database
+        .repository(company_id)
+        .expect("company lookup")
+        .expect("company row");
+    let excluded = database
+        .repository(excluded_id)
+        .expect("excluded lookup")
+        .expect("excluded row");
+    assert!(!database.repository_enabled(&personal).expect("personal enabled state"));
+    assert!(!database.repository_enabled(&company).expect("company enabled state"));
+    assert!(!database.repository_enabled(&excluded).expect("excluded enabled state"));
+    remove_database(path);
+}
+
+#[test]
+fn dashboard_history_and_activity_filter_disabled_repositories_before_limits() {
+    let (database, path) = temp_database("repository-filtering");
+    database
+        .set_metadata("github_login", "sam")
+        .expect("current GitHub login");
+    let selected_id = database
+        .upsert_repository(&Repository {
+            github_id: "selected-id".into(),
+            owner: "sam".into(),
+            name: "selected".into(),
+            name_with_owner: "sam/selected".into(),
+            ..repository("selected-id", "selected")
+        })
+        .expect("selected repository");
+    let disabled_id = database
+        .upsert_repository(&Repository {
+            github_id: "disabled-id".into(),
+            owner: "sam".into(),
+            name: "disabled".into(),
+            name_with_owner: "sam/disabled".into(),
+            ..repository("disabled-id", "disabled")
+        })
+        .expect("disabled repository");
+    sync::save_app_settings(
+        &database,
+        &AppSettings {
+            excluded_repository_ids: vec!["disabled-id".into()],
+            ..AppSettings::default()
+        },
+    )
+    .expect("save disabled repository");
+
+    database
+        .upsert_snapshot(&snapshot(selected_id, "selected-sha", "2026-09-01T00:00:00Z", 100))
+        .expect("selected snapshot");
+    database
+        .upsert_snapshot(&snapshot(disabled_id, "disabled-sha", "2026-09-02T00:00:00Z", 900))
+        .expect("disabled snapshot");
+    database
+        .upsert_pull_request(&PullRequest {
+            repository_id: selected_id,
+            repository: "sam/selected".into(),
+            number: 1,
+            title: "Selected PR".into(),
+            state: "OPEN".into(),
+            created_at: "2026-09-01T00:00:00Z".into(),
+            updated_at: "2026-09-01T00:00:00Z".into(),
+            ..PullRequest::default()
+        })
+        .expect("selected pull request");
+    database
+        .upsert_pull_request(&PullRequest {
+            repository_id: disabled_id,
+            repository: "sam/disabled".into(),
+            number: 2,
+            title: "Disabled PR".into(),
+            state: "OPEN".into(),
+            created_at: "2026-09-02T00:00:00Z".into(),
+            updated_at: "2026-09-02T00:00:00Z".into(),
+            ..PullRequest::default()
+        })
+        .expect("disabled pull request");
+    database
+        .upsert_issue(&Issue {
+            repository_id: selected_id,
+            repository: "sam/selected".into(),
+            number: 3,
+            title: "Selected issue".into(),
+            state: "OPEN".into(),
+            created_at: "2026-09-01T00:00:00Z".into(),
+            updated_at: "2026-09-01T00:00:00Z".into(),
+            ..Issue::default()
+        })
+        .expect("selected issue");
+    database
+        .upsert_issue(&Issue {
+            repository_id: disabled_id,
+            repository: "sam/disabled".into(),
+            number: 4,
+            title: "Disabled issue".into(),
+            state: "OPEN".into(),
+            created_at: "2026-09-02T00:00:00Z".into(),
+            updated_at: "2026-09-02T00:00:00Z".into(),
+            ..Issue::default()
+        })
+        .expect("disabled issue");
+
+    let summaries = database.summaries().expect("filtered summaries");
+    assert_eq!(summaries.len(), 1);
+    assert_eq!(summaries[0].github_id, "selected-id");
+    let totals = database.totals(&summaries).expect("filtered totals");
+    assert_eq!(totals.repositories, 1);
+    assert_eq!(totals.total_loc, 100);
+    assert_eq!(database.history(None).expect("filtered history").len(), 1);
+
+    let prs = database
+        .pull_requests(None, None, 1)
+        .expect("limited pull request feed");
+    assert!(matches!(&prs[..], [item] if item.title == "Selected PR"));
+    let issues = database
+        .issues(None, None, 1)
+        .expect("limited issue feed");
+    assert!(matches!(&issues[..], [item] if item.title == "Selected issue"));
+    assert!(database
+        .pull_requests(Some(disabled_id), None, 100)
+        .expect("disabled pull request feed")
+        .is_empty());
+    assert!(database
+        .issues(Some(disabled_id), None, 100)
+        .expect("disabled issue feed")
+        .is_empty());
+    remove_database(path);
+}
+
+#[test]
 fn repository_star_and_fork_counts_round_trip_and_appear_in_summary() {
     let (database, path) = temp_database("repository-counts");
     let repo_id = database
@@ -835,6 +1324,29 @@ fn repository_star_and_fork_counts_round_trip_and_appear_in_summary() {
         .expect("repository summary");
     assert_eq!(summary.star_count, 123);
     assert_eq!(summary.fork_count, 45);
+    remove_database(path);
+}
+
+#[test]
+fn activity_group_scopes_apply_before_limit_and_empty_scope_returns_nothing() {
+    let (database, path) = temp_database("activity-group-scopes");
+    let personal = database.upsert_repository(&repository("personal", "personal")).unwrap();
+    let company = database.upsert_repository(&repository("company", "company")).unwrap();
+    for (id, date) in [(personal, "2026-09-01T00:00:00Z"), (company, "2026-09-02T00:00:00Z")] {
+        database.upsert_pull_request(&PullRequest { repository_id: id, number: 1, title: "Open PR".into(), state: "OPEN".into(), updated_at: date.into(), ..PullRequest::default() }).unwrap();
+        database.upsert_issue(&Issue { repository_id: id, number: 2, title: "Open issue".into(), state: "OPEN".into(), updated_at: date.into(), ..Issue::default() }).unwrap();
+    }
+    for kind in ["prs", "issues"] {
+        let scoped = database.scoped_activity(kind, None, Some(&[personal]), Some("open"), 1).unwrap();
+        assert_eq!(scoped.len(), 1);
+        let id = match &scoped[0] { codetally_lib::models::ActivityItem::PullRequest(item) => item.repository_id, codetally_lib::models::ActivityItem::Issue(item) => item.repository_id };
+        assert_eq!(id, personal);
+        assert!(database.scoped_activity(kind, None, Some(&[]), Some("open"), 100).unwrap().is_empty());
+        assert!(database.scoped_activity(kind, Some(company), Some(&[personal]), Some("open"), 100).unwrap().is_empty());
+        assert_eq!(database.scoped_activity(kind, None, Some(&[personal, company]), Some("open"), 100).unwrap().len(), 2);
+    }
+    sync::save_app_settings(&database, &AppSettings { excluded_repository_ids: vec!["company".into()], ..AppSettings::default() }).unwrap();
+    assert!(database.scoped_activity("prs", None, Some(&[company]), Some("open"), 100).unwrap().is_empty());
     remove_database(path);
 }
 
@@ -964,9 +1476,104 @@ fn history_carries_forward_snapshots_and_totals_exclude_forks_and_archived_repos
     assert_eq!(history[0].total_loc, 100);
     assert_eq!(history[1].total_loc, 125);
     let summaries = database.summaries().expect("summaries");
-    let totals = database.totals(&summaries);
+    let totals = database.totals(&summaries).expect("summaries totals");
     assert_eq!(totals.repositories, 2);
     assert_eq!(totals.total_loc, 125);
+    remove_database(path);
+}
+
+#[test]
+fn fork_line_totals_and_history_follow_opt_in_setting_and_exclusions() {
+    let (database, path) = temp_database("fork-line-totals");
+    let active_id = database
+        .upsert_repository(&repository("active", "active"))
+        .expect("active repository");
+    let included_fork_id = database
+        .upsert_repository(&Repository {
+            github_id: "included-fork".into(),
+            name: "included-fork".into(),
+            name_with_owner: "owner/included-fork".into(),
+            is_fork: true,
+            ..repository("included-fork", "included-fork")
+        })
+        .expect("included fork");
+    let excluded_fork_id = database
+        .upsert_repository(&Repository {
+            github_id: "excluded-fork".into(),
+            name: "excluded-fork".into(),
+            name_with_owner: "owner/excluded-fork".into(),
+            is_fork: true,
+            ..repository("excluded-fork", "excluded-fork")
+        })
+        .expect("excluded fork");
+
+    let current_date = (Utc::now() - Duration::days(1)).to_rfc3339();
+    let baseline_date = (Utc::now() - Duration::days(31)).to_rfc3339();
+    database
+        .upsert_snapshot(&snapshot_with_counts(active_id, "active-baseline", &baseline_date, 100, 70, 30))
+        .expect("active baseline");
+    database
+        .upsert_snapshot(&snapshot_with_counts(active_id, "active-current", &current_date, 140, 100, 40))
+        .expect("active current");
+    database
+        .upsert_snapshot(&snapshot_with_counts(included_fork_id, "included-baseline", &baseline_date, 500, 300, 200))
+        .expect("included fork baseline");
+    database
+        .upsert_snapshot(&snapshot_with_counts(included_fork_id, "included-current", &current_date, 900, 600, 300))
+        .expect("included fork current");
+    database
+        .upsert_snapshot(&snapshot_with_counts(excluded_fork_id, "excluded-baseline", &baseline_date, 700, 400, 300))
+        .expect("excluded fork baseline");
+    database
+        .upsert_snapshot(&snapshot_with_counts(excluded_fork_id, "excluded-current", &current_date, 1_200, 800, 400))
+        .expect("excluded fork current");
+
+    let default_summaries = database.summaries().expect("default summaries");
+    let default_totals = database.totals(&default_summaries).expect("default totals");
+    assert_eq!(default_totals.repositories, 3);
+    assert_eq!(default_totals.total_loc, 140);
+    assert_eq!(default_totals.source_loc, 100);
+    assert_eq!(default_totals.test_loc, 40);
+    assert_eq!(default_totals.loc_change_30d, 40);
+    assert_eq!(
+        database
+            .history(None)
+            .expect("default history")
+            .iter()
+            .map(|point| point.total_loc)
+            .collect::<Vec<_>>(),
+        vec![100, 140]
+    );
+
+    sync::save_app_settings(
+        &database,
+        &AppSettings {
+            include_forks_in_totals: true,
+            excluded_repository_ids: vec!["excluded-fork".into()],
+            ..AppSettings::default()
+        },
+    )
+    .expect("save fork total settings");
+
+    let opted_in_summaries = database.summaries().expect("opted-in summaries");
+    assert_eq!(opted_in_summaries.len(), 2);
+    assert!(opted_in_summaries.iter().any(|summary| summary.id == included_fork_id));
+    assert!(opted_in_summaries.iter().all(|summary| summary.id != excluded_fork_id));
+    let opted_in_totals = database.totals(&opted_in_summaries).expect("opted-in totals");
+    assert_eq!(opted_in_totals.repositories, 2);
+    assert_eq!(opted_in_totals.total_loc, 1_040);
+    assert_eq!(opted_in_totals.source_loc, 700);
+    assert_eq!(opted_in_totals.test_loc, 340);
+    assert_eq!(opted_in_totals.loc_change_30d, 440);
+    assert_eq!(
+        database
+            .history(None)
+            .expect("opted-in history")
+            .iter()
+            .map(|point| point.total_loc)
+            .collect::<Vec<_>>(),
+        vec![600, 1_040]
+    );
     remove_database(path);
 }
 

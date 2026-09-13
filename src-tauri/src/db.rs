@@ -256,6 +256,33 @@ impl Database {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// The inventory remains unfiltered so disabled repositories can be reenabled.
+    pub fn repository_selection(&self) -> AppResult<Vec<crate::models::RepositorySelection>> {
+        let login = self.metadata("github_login")?.unwrap_or_default();
+        Ok(self.repositories()?.into_iter().filter(|repo| !repo.is_archived).map(|repo| {
+            let group = if repo.owner.eq_ignore_ascii_case(&login) { "personal" } else { "company" }.to_string();
+            crate::models::RepositorySelection { github_id: repo.github_id, name_with_owner: repo.name_with_owner, owner: repo.owner, group }
+        }).collect())
+    }
+
+    pub fn repository_enabled(&self, repo: &Repository) -> AppResult<bool> {
+        let settings = crate::sync::app_settings(self)?;
+        let login = self.metadata("github_login")?.unwrap_or_default();
+        Ok(repository_selected(repo, &settings, &login))
+    }
+
+    pub fn selected_repositories(&self) -> AppResult<Vec<Repository>> {
+        let settings = crate::sync::app_settings(self)?;
+        let login = self.metadata("github_login")?.unwrap_or_default();
+        Ok(self.repositories()?.into_iter().filter(|repo| repository_selected(repo, &settings, &login)).collect())
+    }
+
+    fn activity_repository_ids_json(&self, scope: Option<&[i64]>) -> AppResult<String> {
+        let ids: Vec<i64> = self.selected_repositories()?.iter().map(|repo| repo.id)
+            .filter(|id| scope.is_none_or(|scope| scope.contains(id))).collect();
+        Ok(serde_json::to_string(&ids)?)
+    }
+
     pub fn set_local_path(&self, id: i64, path: &str) -> AppResult<()> {
         let conn = self.connect()?;
         conn.execute("UPDATE repositories SET local_path=?1, last_error=NULL WHERE id=?2", params![path, id])?;
@@ -468,21 +495,29 @@ impl Database {
     }
 
     pub fn pull_requests(&self, repository_id: Option<i64>, state: Option<&str>, limit: usize) -> AppResult<Vec<PullRequest>> {
+        self.scoped_pull_requests(repository_id, None, state, limit)
+    }
+
+    fn scoped_pull_requests(&self, repository_id: Option<i64>, scope: Option<&[i64]>, state: Option<&str>, limit: usize) -> AppResult<Vec<PullRequest>> {
         let conn = self.connect()?;
-        let mut stmt = conn.prepare("SELECT p.repository_id,r.name_with_owner,p.number,p.title,p.state,p.is_draft,p.created_at,p.updated_at,p.merged_at,p.closed_at,p.url,p.additions,p.deletions,p.changed_files,p.ci_state FROM pull_requests p JOIN repositories r ON r.id=p.repository_id WHERE r.is_archived=0 AND (?1 IS NULL OR p.repository_id=?1) AND (?2 IS NULL OR lower(p.state)=lower(?2)) ORDER BY p.updated_at DESC LIMIT ?3")?;
-        let rows = stmt.query_map(params![repository_id, state, limit as i64], pull_request_from_row)?;
+        let mut stmt = conn.prepare("SELECT p.repository_id,r.name_with_owner,p.number,p.title,p.state,p.is_draft,p.created_at,p.updated_at,p.merged_at,p.closed_at,p.url,p.additions,p.deletions,p.changed_files,p.ci_state FROM pull_requests p JOIN repositories r ON r.id=p.repository_id WHERE r.is_archived=0 AND r.id IN (SELECT value FROM json_each(?4)) AND (?1 IS NULL OR p.repository_id=?1) AND (?2 IS NULL OR lower(p.state)=lower(?2)) ORDER BY p.updated_at DESC LIMIT ?3")?;
+        let rows = stmt.query_map(params![repository_id, state, limit as i64, self.activity_repository_ids_json(scope)?], pull_request_from_row)?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     pub fn issues(&self, repository_id: Option<i64>, state: Option<&str>, limit: usize) -> AppResult<Vec<Issue>> {
+        self.scoped_issues(repository_id, None, state, limit)
+    }
+
+    fn scoped_issues(&self, repository_id: Option<i64>, scope: Option<&[i64]>, state: Option<&str>, limit: usize) -> AppResult<Vec<Issue>> {
         let conn = self.connect()?;
-        let mut stmt = conn.prepare("SELECT i.repository_id,r.name_with_owner,i.number,i.title,i.state,i.created_at,i.updated_at,i.closed_at,i.url,i.author,i.labels_json,i.assignees_json FROM issues i JOIN repositories r ON r.id=i.repository_id WHERE r.is_archived=0 AND (?1 IS NULL OR i.repository_id=?1) AND (?2 IS NULL OR lower(i.state)=lower(?2)) ORDER BY i.updated_at DESC LIMIT ?3")?;
-        let rows = stmt.query_map(params![repository_id, state, limit as i64], issue_from_row)?;
+        let mut stmt = conn.prepare("SELECT i.repository_id,r.name_with_owner,i.number,i.title,i.state,i.created_at,i.updated_at,i.closed_at,i.url,i.author,i.labels_json,i.assignees_json FROM issues i JOIN repositories r ON r.id=i.repository_id WHERE r.is_archived=0 AND r.id IN (SELECT value FROM json_each(?4)) AND (?1 IS NULL OR i.repository_id=?1) AND (?2 IS NULL OR lower(i.state)=lower(?2)) ORDER BY i.updated_at DESC LIMIT ?3")?;
+        let rows = stmt.query_map(params![repository_id, state, limit as i64, self.activity_repository_ids_json(scope)?], issue_from_row)?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     pub fn summaries(&self) -> AppResult<Vec<RepositorySummary>> {
-        let repos = self.repositories()?;
+        let repos = self.selected_repositories()?;
         let now = Utc::now();
         let day_7 = (now - Duration::days(7)).to_rfc3339();
         let day_30 = (now - Duration::days(30)).to_rfc3339();
@@ -548,10 +583,11 @@ impl Database {
         Ok(conn.query_row("SELECT count(*) FROM issues WHERE repository_id=?1 AND upper(state)='OPEN'", [repository_id], |row| row.get(0))?)
     }
 
-    pub fn totals(&self, summaries: &[RepositorySummary]) -> DashboardTotals {
-        summaries.iter().filter(|r| !r.is_archived).fold(DashboardTotals::default(), |mut totals, repo| {
+    pub fn totals(&self, summaries: &[RepositorySummary]) -> AppResult<DashboardTotals> {
+        let settings = crate::sync::app_settings(self)?;
+        Ok(summaries.iter().filter(|r| !r.is_archived).fold(DashboardTotals::default(), |mut totals, repo| {
             totals.repositories += 1;
-            if !repo.is_fork {
+            if settings.include_forks_in_totals || !repo.is_fork {
                 totals.total_loc += repo.total_loc;
                 totals.source_loc += repo.source_loc;
                 totals.test_loc += repo.test_loc;
@@ -560,11 +596,12 @@ impl Database {
             totals.open_prs += repo.open_prs;
             totals.open_issues += repo.open_issues;
             totals
-        })
+        }))
     }
 
     pub fn history(&self, repository_id: Option<i64>) -> AppResult<Vec<HistoryPoint>> {
-        let repos: Vec<Repository> = if let Some(id) = repository_id { self.repository(id)?.into_iter().collect() } else { self.repositories()?.into_iter().filter(|r| !r.is_archived && !r.is_fork).collect() };
+        let settings = crate::sync::app_settings(self)?;
+        let repos: Vec<Repository> = self.selected_repositories()?.into_iter().filter(|repo| repository_id.map(|id| repo.id == id).unwrap_or(settings.include_forks_in_totals || !repo.is_fork)).collect();
         let allowed: std::collections::HashSet<i64> = repos.iter().map(|repo| repo.id).collect();
         let conn = self.connect()?;
         let mut dates = BTreeSet::new();
@@ -603,10 +640,14 @@ impl Database {
     }
 
     pub fn all_activity(&self, kind: &str, repository_id: Option<i64>, state: Option<&str>, limit: usize) -> AppResult<Vec<ActivityItem>> {
+        self.scoped_activity(kind, repository_id, None, state, limit)
+    }
+
+    pub fn scoped_activity(&self, kind: &str, repository_id: Option<i64>, scope: Option<&[i64]>, state: Option<&str>, limit: usize) -> AppResult<Vec<ActivityItem>> {
         if kind.eq_ignore_ascii_case("issues") || kind.eq_ignore_ascii_case("issue") {
-            Ok(self.issues(repository_id, state, limit)?.into_iter().map(ActivityItem::Issue).collect())
+            Ok(self.scoped_issues(repository_id, scope, state, limit)?.into_iter().map(ActivityItem::Issue).collect())
         } else {
-            Ok(self.pull_requests(repository_id, state, limit)?.into_iter().map(ActivityItem::PullRequest).collect())
+            Ok(self.scoped_pull_requests(repository_id, scope, state, limit)?.into_iter().map(ActivityItem::PullRequest).collect())
         }
     }
 }
@@ -629,4 +670,10 @@ fn issue_from_row(row: &Row<'_>) -> rusqlite::Result<Issue> {
     let labels_json: String = row.get(10)?;
     let assignees_json: String = row.get(11)?;
     Ok(Issue { repository_id: row.get(0)?, repository: row.get(1)?, number: row.get(2)?, title: row.get(3)?, state: row.get(4)?, created_at: row.get(5)?, updated_at: row.get(6)?, closed_at: row.get(7)?, url: row.get(8)?, author: row.get(9)?, labels: serde_json::from_str(&labels_json).unwrap_or_default(), assignees: serde_json::from_str(&assignees_json).unwrap_or_default(), })
+}
+
+fn repository_selected(repo: &Repository, settings: &crate::models::AppSettings, login: &str) -> bool {
+    !repo.is_archived
+        && (if repo.owner.eq_ignore_ascii_case(login) { settings.include_personal_repositories } else { settings.include_company_repositories })
+        && !settings.excluded_repository_ids.contains(&repo.github_id)
 }
