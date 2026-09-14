@@ -1,5 +1,13 @@
 # CodeTally
 
+<p align="center">
+  <a href="https://github.com/Xzese/CodeTally/stargazers"><img src="https://img.shields.io/github/stars/Xzese/CodeTally?style=flat-square" alt="Stars"></a>
+  <a href="https://github.com/Xzese/CodeTally/commits/main"><img src="https://img.shields.io/github/last-commit/Xzese/CodeTally?style=flat-square" alt="Last commit"></a>
+  <a href="https://tauri.app"><img src="https://img.shields.io/badge/Tauri-2-24C8D8?style=flat-square&logo=tauri&logoColor=white" alt="Tauri 2"></a>
+  <a href="https://github.com/Xzese/CodeTally"><img src="https://img.shields.io/github/languages/top/Xzese/CodeTally?style=flat-square" alt="Top language"></a>
+  <a href="https://github.com/Xzese/CodeTally/releases"><img src="https://img.shields.io/github/v/release/Xzese/CodeTally?style=flat-square" alt="Latest release"></a>
+</p>
+
 CodeTally is a local desktop dashboard for understanding the repositories available to your GitHub account. It combines source and test line history, repository metadata, and recent pull-request and issue activity in one read-only view.
 
 The app is built with Tauri 2, React, TypeScript, Rust, SQLite, Recharts, the GitHub CLI, Git, and Tokei. It runs on your computer, stores its database and repository cache locally, and does not operate a hosted service.
