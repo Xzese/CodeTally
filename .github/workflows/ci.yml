@@ -59,9 +59,11 @@ jobs:
           - architecture: Apple Silicon
             os: macos-latest
             target: aarch64-apple-darwin
+            run_tests: true
           - architecture: Intel
-            os: macos-15-intel
+            os: macos-latest
             target: x86_64-apple-darwin
+            run_tests: false
 
     steps:
       - name: Check out repository
@@ -80,13 +82,21 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: ci-${{ matrix.target }}
+
       - name: Install JavaScript dependencies
         run: npm ci
 
       - name: Install Tokei for backend tests
+        if: matrix.run_tests
         run: brew install tokei
 
       - name: Run backend tests
+        if: matrix.run_tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked
 
       - name: Build native app

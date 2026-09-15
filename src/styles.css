@@ -51,7 +51,8 @@ button { color: inherit; }
 .refresh-button-copy { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; line-height: 1.1; }
 .refresh-button-copy strong { font-size: 12px; font-weight: 650; }
 .refresh-button-copy small { color: rgba(255, 255, 255, .72); font-size: 9px; font-weight: 500; white-space: nowrap; }
-.light .refresh-button-copy small { color: rgba(255, 255, 255, .8); }
+.light .refresh-button-copy strong { color: var(--subtle); }
+.light .refresh-button-copy small { color: var(--muted); }
 .muted, .small-note, .relative { color: var(--muted); }
 .small-note { font-size: 11px; display: inline-flex; align-items: center; gap: 6px; }
 
