@@ -23,6 +23,7 @@ thiserror = "1"
 open = "5"
 tokio = { version = "1", features = ["sync", "rt", "macros"] }
 tauri-plugin-updater = "=2.11.0"
+tauri-plugin-autostart = "2.5.1"
 
 [profile.release]
 codegen-units = 1

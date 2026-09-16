@@ -14,6 +14,11 @@ const listenMock = vi.hoisted(() => vi.fn(async (_event: string, callback: () =>
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: invokeMock }))
 vi.mock('@tauri-apps/api/event', () => ({ listen: listenMock }))
+vi.mock('@tauri-apps/plugin-autostart', () => ({
+  isEnabled: () => invokeMock('plugin:autostart|is_enabled'),
+  enable: () => invokeMock('plugin:autostart|enable'),
+  disable: () => invokeMock('plugin:autostart|disable')
+}))
 
 const repoAlpha: Repository = {
   id: 1,
@@ -232,14 +237,16 @@ type BackendOptions = {
   appUpdateResponses?: Array<AppUpdate | Error>
   setAppSettings?: (next: Partial<AppSettings>, current: AppSettings) => AppSettings | Promise<AppSettings>
   activityFeed?: (kind: FeedKind, args: Record<string, unknown>) => PullRequest[] | Issue[] | Promise<PullRequest[] | Issue[]>
+  openAtLogin?: boolean
 }
 
-function configureBackend({ dependencies = readyDependencies, syncResult = syncOk, cachedDashboard = dashboard, dashboardResponses, historyPromise, syncPromise, activitySyncPromise, fullSyncPromise, progress, settings, repositorySelection = defaultRepositorySelection, appSettingsResponses, appUpdateResponses, setAppSettings, activityFeed }: BackendOptions = {}) {
+function configureBackend({ dependencies = readyDependencies, syncResult = syncOk, cachedDashboard = dashboard, dashboardResponses, historyPromise, syncPromise, activitySyncPromise, fullSyncPromise, progress, settings, repositorySelection = defaultRepositorySelection, appSettingsResponses, appUpdateResponses, setAppSettings, activityFeed, openAtLogin = false }: BackendOptions = {}) {
   let progressIndex = 0
   let dashboardIndex = 0
   let dependencyIndex = 0
   let appSettingsReadIndex = 0
   let appUpdateReadIndex = 0
+  let autostartEnabled = openAtLogin
   let appSettings = { ...defaultAppSettings, ...settings }
   const writeAppSettings = setAppSettings ?? ((next: Partial<AppSettings>, current: AppSettings) => {
     appSettings = { ...current, ...next }
@@ -306,6 +313,14 @@ function configureBackend({ dependencies = readyDependencies, syncResult = syncO
         return { running: false, phase: 'idle', current: 0, total: 0, message: 'Idle' }
       }
       case 'open_external_url':
+        return null
+      case 'plugin:autostart|is_enabled':
+        return autostartEnabled
+      case 'plugin:autostart|enable':
+        autostartEnabled = true
+        return null
+      case 'plugin:autostart|disable':
+        autostartEnabled = false
         return null
       default:
         throw new Error(`Unexpected Tauri command: ${command}`)
@@ -1414,6 +1429,21 @@ describe('dashboard UI', () => {
     })
     expect(screen.getByRole('heading', { name: 'Settings' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /Save settings/i })).not.toBeInTheDocument()
+  })
+
+  it('reads and changes the native Open at login setting', async () => {
+    configureBackend({ openAtLogin: true })
+    const user = await renderDashboard()
+
+    await user.click(screen.getByRole('button', { name: 'Settings' }))
+    const openAtLogin = await screen.findByRole('switch', { name: 'Open CodeTally at login' })
+    await waitFor(() => expect(openAtLogin).toBeEnabled())
+    expect(openAtLogin).toBeChecked()
+
+    await user.click(openAtLogin)
+    await waitFor(() => expect(openAtLogin).not.toBeChecked())
+    expect(invokeMock).toHaveBeenCalledWith('plugin:autostart|disable')
+    expect(invokeMock.mock.calls.some(([command]) => command === 'set_app_settings')).toBe(false)
   })
 
   it('persists the fork inclusion setting through off, on, and off states', async () => {
