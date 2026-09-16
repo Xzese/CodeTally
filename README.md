@@ -1,5 +1,13 @@
 # CodeTally
 
+<p align="center">
+  <a href="https://github.com/Xzese/CodeTally/stargazers"><img src="https://img.shields.io/github/stars/Xzese/CodeTally?style=flat-square" alt="Stars"></a>
+  <a href="https://github.com/Xzese/CodeTally/commits/main"><img src="https://img.shields.io/github/last-commit/Xzese/CodeTally?style=flat-square" alt="Last commit"></a>
+  <a href="https://tauri.app"><img src="https://img.shields.io/badge/Tauri-2-24C8D8?style=flat-square&logo=tauri&logoColor=white" alt="Tauri 2"></a>
+  <a href="https://github.com/Xzese/CodeTally"><img src="https://img.shields.io/github/languages/top/Xzese/CodeTally?style=flat-square" alt="Top language"></a>
+  <a href="https://github.com/Xzese/CodeTally/releases"><img src="https://img.shields.io/github/v/release/Xzese/CodeTally?style=flat-square" alt="Latest release"></a>
+</p>
+
 CodeTally is a local desktop dashboard for understanding the repositories available to your GitHub account. It combines source and test line history, repository metadata, and recent pull-request and issue activity in one read-only view.
 
 The app is built with Tauri 2, React, TypeScript, Rust, SQLite, Recharts, the GitHub CLI, Git, and Tokei. It runs on your computer, stores its database and repository cache locally, and does not operate a hosted service.
@@ -141,7 +149,9 @@ On macOS, select one or more of **Total lines**, **Source lines**, **Test lines*
 
 **Include forks in line totals** is disabled by default. Enable it in Settings to count selected fork repositories in portfolio totals and line history.
 
-**Keep running in the background when the window closes** is enabled by default. With the menu bar visible, CodeTally runs without a Dock icon. Use **Show CodeTally** in the menu bar to reopen the dashboard and **Quit CodeTally** to stop the app. If you hide the menu bar, CodeTally keeps its Dock icon so you can still reopen it. Disable background operation to quit when the main window closes. These preferences are saved locally; background operation does not launch the app at login or keep the Mac awake.
+Enable **Open at login** to start CodeTally automatically when you sign in to your Mac. This uses the macOS login-item setting, so you can also manage it in System Settings.
+
+**Keep running in the background when the window closes** is enabled by default. With the menu bar visible, CodeTally runs without a Dock icon. Use **Show CodeTally** in the menu bar to reopen the dashboard and **Quit CodeTally** to stop the app. If you hide the menu bar, CodeTally keeps its Dock icon so you can still reopen it. Disable background operation to quit when the main window closes. Background operation does not keep the Mac awake.
 
 The **tracked** count above the repository table opens **Show in table**. Uncheck individual repositories or a whole owner group to hide rows, and use **Show all** to restore them. Personal repositories appear first, followed by each organization by name; groups start collapsed. This is a temporary table filter: tracking, background sync, portfolio totals, history, and activity continue unchanged. The filter resets when you leave the dashboard.
 

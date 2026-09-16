@@ -1,5 +1,6 @@
 import { createPortal } from 'react-dom'
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react'
+import { disable as disableAutostart, enable as enableAutostart, isEnabled as isAutostartEnabled } from '@tauri-apps/plugin-autostart'
 import { AlertCircle, ArrowRight, Check, ChevronDown, ChevronUp, Coffee, ExternalLink, Github, Globe2, HardDrive, LoaderCircle, ChartNoAxesColumnIncreasing, CodeXml, FlaskConical, GitPullRequest, CircleDot, Sun, Moon, Monitor, X } from 'lucide-react'
 import { checkForUpdates, getAppInfo, getDatabaseLocation, getRepositorySelection, installAppUpdate, openExternalUrl, revealDatabase, type AppInfo, type AppUpdate } from './api'
 import type { AppSettings, MenuBarMetric, RepositorySelection, ThemeMode, UpdateCheckInterval } from './types'
@@ -95,6 +96,47 @@ function Interval({ label, value, options, minMinutes = 1, help, onChange }: { l
 
 function UpdateCheckIntervalControl({ value, onChange }: { value: UpdateCheckInterval; onChange: (value: UpdateCheckInterval) => void }) {
   return <div className="settings-row settings-update-interval-row"><div className="settings-row-label">App update checks<Help label="App update checks">Check for new app versions automatically. Choose Never to check only when you select Check for updates.</Help></div><div className="settings-update-interval-options" role="radiogroup" aria-label="App update checks">{UPDATE_CHECK_OPTIONS.map((option) => <label key={option.key} className={value === option.key ? 'selected' : ''}><input type="radio" name="app-update-check-interval" aria-label={option.label} checked={value === option.key} onChange={() => onChange(option.key)} /><span>{option.label}</span></label>)}</div></div>
+}
+
+function OpenAtLoginControl() {
+  const [enabled, setEnabled] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const [changing, setChanging] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      setEnabled(await isAutostartEnabled())
+    } catch {
+      setError('Couldn’t read the login setting.')
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { void load() }, [load])
+
+  const change = async (next: boolean) => {
+    setChanging(true)
+    setError(null)
+    try {
+      if (next) await enableAutostart()
+      else await disableAutostart()
+      setEnabled(next)
+    } catch {
+      setError('Couldn’t change the login setting.')
+    } finally {
+      setChanging(false)
+    }
+  }
+
+  return <>
+    <div className="settings-row"><div className="settings-row-label">Open at login<Help label="Open at login">Start CodeTally automatically when you sign in to your Mac. You can also manage this in macOS System Settings.</Help></div><input className="mac-switch" role="switch" type="checkbox" aria-label="Open CodeTally at login" checked={enabled} disabled={loading || changing || !!error} onChange={(event) => void change(event.target.checked)} /></div>
+    {loading && <div className="setting-status" role="status"><LoaderCircle size={12} className="spin" /> Checking login setting…</div>}
+    {error && <div className="settings-error startup-error" role="alert"><AlertCircle size={14} /><span>{error}</span><button className="button secondary compact" type="button" onClick={() => void load()}>Retry</button></div>}
+  </>
 }
 
 type Props = { settings: AppSettings; loaded: boolean; metrics: NormalizedMetrics; saving: boolean; error: string | null; onChange: (update: (current: AppSettings) => AppSettings) => void; onRetry: () => void; onClose: () => void }
@@ -317,6 +359,7 @@ export default function SettingsDrawer({ settings, loaded, metrics, saving, erro
       <p className="settings-metric-hint">Choose the metrics you want to see. Keep at least one selected.</p>
     </section>
     <section className="settings-section" id="settings-refresh"><SectionHeading title="Background & refresh" help="Choose when CodeTally refreshes your GitHub activity and line counts." />
+      <OpenAtLoginControl />
       <div className="settings-row"><div className="settings-row-label">Run in background<Help label="Run in background">Keep CodeTally running from the menu bar without a Dock icon.</Help></div><input className="mac-switch" role="switch" type="checkbox" aria-label="Keep running in the background when the window closes" checked={settings.run_in_background} onChange={(event) => { const checked = event.target.checked; onChange((current) => ({ ...current, run_in_background: checked })) }} /></div>
       <UpdateCheckIntervalControl value={settings.update_check_interval} onChange={(value) => onChange((current) => ({ ...current, update_check_interval: value }))} />
       <Interval label="Pull requests and issues" value={settings.activity_refresh_minutes} options={[15, 30, 60, 120]} minMinutes={15} help="Choose how often CodeTally refreshes pull requests and issues." onChange={(value) => onChange((current) => ({ ...current, activity_refresh_minutes: value }))} />

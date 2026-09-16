@@ -82,6 +82,10 @@ fn copy_directory_contents_if_missing(source: &Path, destination: &Path) -> io::
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let app_data_dir = app.path().app_data_dir().map_err(|error| error.to_string())?;
