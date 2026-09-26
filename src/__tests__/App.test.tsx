@@ -401,8 +401,10 @@ describe('dashboard UI', () => {
     expect(screen.getByRole('heading', { name: 'Total Lines' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Repositories' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Recent activity' })).toBeInTheDocument()
-    expect(await screen.findByText('Fix alpha flow')).toBeInTheDocument()
-    expect(await screen.findByRole('button', { name: /sam\/alpha #12/ })).toBeInTheDocument()
+    await waitFor(() => {
+      expect(screen.getByText('Fix alpha flow')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /sam\/alpha #12/ })).toBeInTheDocument()
+    })
   })
 
   it('keeps the settings retry available when an empty dashboard opens Settings after a read failure', async () => {
