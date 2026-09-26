@@ -650,7 +650,7 @@ fn direct_sync_and_backfill_calls_reject_an_excluded_repository_before_scanning(
 }
 
 #[test]
-fn unavailable_repository_is_skipped_until_rediscovered_and_keeps_cached_data() {
+fn unavailable_repository_is_removed_with_cached_data_and_other_repositories_continue() {
     let root = unique_root("unavailable-repository");
     let mut fake = FakeGh::new("unavailable-repository", "pages", 2);
     let repos = [repository("repo-1", "one"), repository("repo-2", "two")];
@@ -660,6 +660,9 @@ fn unavailable_repository_is_skipped_until_rediscovered_and_keeps_cached_data() 
     let stored = database.repositories().unwrap().remove(0);
     let cached_prs = pull_requests(&database, stored.id).len();
     assert!(cached_prs > 0);
+    database.set_metadata("github_repository_unavailable:repo-1", "true").unwrap();
+    let cursor_key = format!("github_activity_v2:{}:pullRequests:true", stored.id);
+    database.set_metadata(&cursor_key, r#"{"completed_at":null,"started_at":null,"after":null}"#).unwrap();
 
     fake.scenario = "missing-repository:2".into();
     fake.clear_calls();
@@ -667,9 +670,16 @@ fn unavailable_repository_is_skipped_until_rediscovered_and_keeps_cached_data() 
     assert!(result.ok, "missing repository must not fail refresh: {:?}", result.errors);
     assert_eq!(result.activity_repositories_synced, 1);
     assert_eq!(fake.calls().lines().filter(|call| call.contains("name=one")).count(), 1);
-    assert!(database.repository_unavailable(&stored).unwrap());
-    assert_eq!(pull_requests(&database, stored.id).len(), cached_prs);
-    assert!(database.repository(stored.id).unwrap().unwrap().last_error.unwrap().contains("no longer have access"));
+    assert!(database.repository(stored.id).unwrap().is_none());
+    assert!(!database.repository_selection().unwrap().iter().any(|repo| repo.github_id == stored.github_id));
+    assert!(!database.summaries().unwrap().iter().any(|repo| repo.id == stored.id));
+    assert!(database.metadata("github_repository_unavailable:repo-1").unwrap().is_none());
+    assert!(database.metadata(&cursor_key).unwrap().is_none());
+    let conn = rusqlite::Connection::open(database.path()).unwrap();
+    for table in ["pull_requests", "issues", "code_snapshots", "loc_observations", "classification_rules"] {
+        let count: i64 = conn.query_row(&format!("SELECT COUNT(*) FROM {table} WHERE repository_id=?1"), [stored.id], |row| row.get(0)).unwrap();
+        assert_eq!(count, 0, "{table} should be deleted with the repository");
+    }
 
     fake.clear_calls();
     let restarted = state(sync_state.db_path.clone(), &root);
@@ -678,18 +688,13 @@ fn unavailable_repository_is_skipped_until_rediscovered_and_keeps_cached_data() 
     assert!(fake.calls().contains("name=two"));
 
     fake.clear_calls();
-    let manual = fake.with_path(|| sync::sync_one(&restarted, stored.id).unwrap());
-    assert!(!manual.ok);
-    assert!(manual.message.contains("no longer have access"));
-    assert!(fake.calls().contains("name=one"));
+    let manual = fake.with_path(|| sync::sync_one(&restarted, stored.id).expect_err("removed repository should no longer be addressable"));
+    assert!(manual.to_string().contains("was not found"));
+    assert!(!fake.calls().contains("name=one"));
 
     fake.scenario = "pages:2".into();
     fake.with_path(|| sync::discover(&restarted).unwrap());
-    assert!(!database.repository_unavailable(&stored).unwrap());
-    fake.clear_calls();
-    assert!(fake.with_path(|| sync::sync_activity(&restarted).unwrap()).ok);
-    assert!(fake.calls().contains("name=one"));
-    assert!(database.repository(stored.id).unwrap().unwrap().last_error.is_none());
+    assert!(database.repositories().unwrap().iter().any(|repo| repo.github_id == stored.github_id));
     let _ = std::fs::remove_dir_all(root);
 }
 
