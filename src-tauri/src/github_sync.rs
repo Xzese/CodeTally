@@ -115,6 +115,15 @@ pub fn parse_response(db: &Database, success: bool, stdout: &str, stderr: &str) 
         // A successful final response may still be safely committed. The next request stops.
         if !success || value.as_ref().ok().and_then(|v| v.get("errors")).is_some() { return Err(error); }
     }
+    // Only a missing repository is skippable; authentication, permission errors
+    // on child fields, and other API failures must still be reported.
+    let response_errors = value.as_ref().ok().and_then(|v| v.get("errors")).and_then(Value::as_array);
+    let missing_repository = response_errors.is_some_and(|errors| !errors.is_empty() && errors.iter().all(|error| {
+        error["type"] == "NOT_FOUND" && error["path"] == json!(["repository"])
+    }));
+    if missing_repository || (response_errors.is_none() && !success && stderr.contains("Could not resolve to a Repository with the name '")) {
+        return Err(AppError::RepositoryUnavailable);
+    }
     if !success { return Err(AppError::Command { program: "gh api graphql".into(), message: stderr.trim().to_owned() }); }
     let value = value?;
     if let Some(errors) = value.get("errors") { return Err(AppError::Command { program: "gh api graphql".into(), message: errors.to_string() }); }

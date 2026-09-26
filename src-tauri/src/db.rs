@@ -293,6 +293,14 @@ impl Database {
         }).collect())
     }
 
+    pub fn set_repository_unavailable(&self, repo: &Repository, unavailable: bool) -> AppResult<()> {
+        self.set_metadata(&format!("github_repository_unavailable:{}", repo.github_id), if unavailable { "true" } else { "false" })
+    }
+
+    pub fn repository_unavailable(&self, repo: &Repository) -> AppResult<bool> {
+        Ok(self.metadata(&format!("github_repository_unavailable:{}", repo.github_id))?.as_deref() == Some("true"))
+    }
+
     pub fn repository_enabled(&self, repo: &Repository) -> AppResult<bool> {
         let settings = crate::sync::app_settings(self)?;
         let login = self.metadata("github_login")?.unwrap_or_default();

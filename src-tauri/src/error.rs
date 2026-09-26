@@ -13,6 +13,8 @@ pub enum AppError {
     Io(#[from] std::io::Error),
     #[error("command {program} failed: {message}")]
     Command { program: String, message: String },
+    #[error("Repository is unavailable on GitHub. It may have been deleted or you may no longer have access. Cached data has been kept; refresh manually to retry.")]
+    RepositoryUnavailable,
     #[error("repository {0} was not found")]
     RepositoryNotFound(i64),
     #[error("invalid URL")]
