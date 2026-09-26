@@ -215,6 +215,11 @@ if [ "${1:-}" = "api" ] && [ "${2:-}" = "graphql" ]; then
     printf '%s\n' 'connection reset by peer' >&2
     exit 1
   fi
+  if [ "$mode" = "missing-repository" ] && printf '%s' "$*" | grep -q 'name=one'; then
+    printf '%s\n' '{"data":{"repository":null},"errors":[{"type":"NOT_FOUND","path":["repository"],"message":"Repository not found"}]}'
+    printf '%s\n' "gh: Could not resolve to a Repository with the name 'me/one'." >&2
+    exit 1
+  fi
   if [ "$mode" = "permanent" ]; then
     printf '%s\n' 'permission denied' >&2
     exit 1
@@ -642,4 +647,71 @@ fn direct_sync_and_backfill_calls_reject_an_excluded_repository_before_scanning(
 
     let _ = std::fs::remove_dir_all(root);
     let _ = std::fs::remove_file(database_path);
+}
+
+#[test]
+fn unavailable_repository_is_skipped_until_rediscovered_and_keeps_cached_data() {
+    let root = unique_root("unavailable-repository");
+    let mut fake = FakeGh::new("unavailable-repository", "pages", 2);
+    let repos = [repository("repo-1", "one"), repository("repo-2", "two")];
+    let (database, database_path) = seed_database(&root, &repos);
+    let sync_state = state(database_path, &root);
+    fake.with_path(|| sync::sync_activity(&sync_state).expect("seed cached activity"));
+    let stored = database.repositories().unwrap().remove(0);
+    let cached_prs = pull_requests(&database, stored.id).len();
+    assert!(cached_prs > 0);
+
+    fake.scenario = "missing-repository:2".into();
+    fake.clear_calls();
+    let result = fake.with_path(|| sync::sync_activity(&sync_state).unwrap());
+    assert!(result.ok, "missing repository must not fail refresh: {:?}", result.errors);
+    assert_eq!(result.activity_repositories_synced, 1);
+    assert_eq!(fake.calls().lines().filter(|call| call.contains("name=one")).count(), 1);
+    assert!(database.repository_unavailable(&stored).unwrap());
+    assert_eq!(pull_requests(&database, stored.id).len(), cached_prs);
+    assert!(database.repository(stored.id).unwrap().unwrap().last_error.unwrap().contains("no longer have access"));
+
+    fake.clear_calls();
+    let restarted = state(sync_state.db_path.clone(), &root);
+    assert!(fake.with_path(|| sync::sync_activity(&restarted).unwrap()).ok);
+    assert!(!fake.calls().contains("name=one"));
+    assert!(fake.calls().contains("name=two"));
+
+    fake.clear_calls();
+    let manual = fake.with_path(|| sync::sync_one(&restarted, stored.id).unwrap());
+    assert!(!manual.ok);
+    assert!(manual.message.contains("no longer have access"));
+    assert!(fake.calls().contains("name=one"));
+
+    fake.scenario = "pages:2".into();
+    fake.with_path(|| sync::discover(&restarted).unwrap());
+    assert!(!database.repository_unavailable(&stored).unwrap());
+    fake.clear_calls();
+    assert!(fake.with_path(|| sync::sync_activity(&restarted).unwrap()).ok);
+    assert!(fake.calls().contains("name=one"));
+    assert!(database.repository(stored.id).unwrap().unwrap().last_error.is_none());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn only_missing_repository_errors_are_classified_as_unavailable() {
+    use codetally_lib::error::AppError;
+    let root = unique_root("missing-repository-response");
+    let (database, _) = seed_database(&root, &[]);
+    for success in [true, false] {
+        let error = github_sync::parse_response(&database, success,
+            r#"{"data":{"repository":null},"errors":[{"type":"NOT_FOUND","path":["repository"]}]}"#, "").unwrap_err();
+        assert!(matches!(error, AppError::RepositoryUnavailable));
+    }
+    let error = github_sync::parse_response(&database, false, "",
+        "gh: Could not resolve to a Repository with the name 'Xzese/pnpm'.").unwrap_err();
+    assert!(matches!(error, AppError::RepositoryUnavailable));
+    for body in [
+        r#"{"errors":[{"type":"NOT_FOUND","path":["repository","issues"]}]}"#,
+        r#"{"errors":[{"type":"FORBIDDEN","path":["repository"]}]}"#,
+        r#"{"errors":[{"type":"NOT_FOUND","path":["repository"]},{"type":"INTERNAL"}]}"#,
+    ] {
+        assert!(matches!(github_sync::parse_response(&database, false, body, "gh: Could not resolve to a Repository with the name 'me/one'.").unwrap_err(), AppError::Command { .. }));
+    }
+    let _ = std::fs::remove_dir_all(root);
 }

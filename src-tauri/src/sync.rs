@@ -158,6 +158,7 @@ pub fn discover(state: &AppState) -> AppResult<Vec<Repository>> {
     let mut seen = BTreeSet::new();
     for repo in discovered.into_iter().filter(|repo| seen.insert(repo.github_id.clone())) {
         db.upsert_repository(&repo)?;
+        db.set_repository_unavailable(&repo, false)?;
     }
     if org_errors.is_empty() { db.set_metadata("github_discovered_at", &Utc::now().to_rfc3339())?; }
     db.repositories()
@@ -212,7 +213,7 @@ pub fn sync_all(state: &AppState) -> AppResult<SyncResult> {
     let repository_total = active.len() as i64;
     state.set_progress(SyncProgress { running: true, phase: "syncing".into(), current: 0, total: repository_total, repository_current: 0, repository_total, message: "Refreshing GitHub activity and line counts".into(), ..SyncProgress::default() });
     for (index, repo) in active.into_iter().enumerate() {
-        if !state.database().repository_enabled(&repo)? { continue; }
+        if !state.database().repository_enabled(&repo)? || state.database().repository_unavailable(&repo)? { continue; }
         if let Err(error) = github_sync::ensure_available(&state.database()) {
             result.ok = false;
             result.errors.push(error.to_string());
@@ -235,6 +236,7 @@ pub fn sync_all(state: &AppState) -> AppResult<SyncResult> {
                     result.errors.extend(repo_errors.into_iter().map(|error| format!("{}: {}", repo.name_with_owner, error)));
                 }
             }
+            Err(AppError::RepositoryUnavailable) => {},
             Err(error) => {
                 result.ok = false;
                 result.errors.push(format!("{}: {}", repo.name_with_owner, error));
@@ -324,7 +326,7 @@ pub fn sync_activity(state: &AppState) -> AppResult<SyncResult> {
     state.set_progress(SyncProgress { running: true, phase: "syncing_activity".into(), current: 0, total: repository_total, repository_current: 0, repository_total, snapshot_current: 0, snapshot_total: 0, message: if sweep_due { "Refreshing PRs, issues, and due line-count checks".into() } else { "Refreshing PRs and issues".into() }, ..SyncProgress::default() });
 
     for (index, repo) in active.into_iter().enumerate() {
-        if !state.database().repository_enabled(&repo)? { continue; }
+        if !state.database().repository_enabled(&repo)? || state.database().repository_unavailable(&repo)? { continue; }
         if let Err(error) = github_sync::ensure_available(&state.database()) {
             result.ok = false;
             result.errors.push(error.to_string());
@@ -353,6 +355,7 @@ pub fn sync_activity(state: &AppState) -> AppResult<SyncResult> {
                     result.errors.extend(repo_errors.into_iter().map(|error| format!("{}: {}", repo.name_with_owner, error)));
                 }
             }
+            Err(AppError::RepositoryUnavailable) => {},
             Err(error) => {
                 result.ok = false;
                 result.errors.push(format!("{}: {}", repo.name_with_owner, error));
@@ -457,8 +460,14 @@ fn sync_repo_data(state: &AppState, repo: &Repository, run_loc: bool, force_fetc
     let mut errors = Vec::new();
     let activity_fetched = match github_sync::sync_activity_reporting(&db, repo, &mut counts) {
         Ok((_, _, complete)) => {
+            db.set_repository_unavailable(repo, false)?;
             if !complete { errors.push("Activity import is continuing next cycle".into()); }
             true
+        }
+        Err(error @ AppError::RepositoryUnavailable) => {
+            db.set_repository_unavailable(repo, true)?;
+            db.mark_sync(repo.id, Some(&error.to_string()))?;
+            return Err(error);
         }
         Err(error) => { errors.push(error.to_string()); false }
     };
