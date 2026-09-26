@@ -505,6 +505,7 @@ td:first-child { padding-left: 18px; }
 .settings-about-me h4 { margin: 0; color: var(--control-text); font-size: 13px; font-weight: 650; }
 .settings-about-me p { margin: 0; max-width: 440px; }
 .settings-about-me-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.settings-about-me-actions .settings-about-link { min-height: 42px; }
 .settings-about-state { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 11px; line-height: 1.4; }
 .settings-about-state svg { flex: 0 0 auto; color: var(--blue); }
 .settings-about-state.error { align-items: flex-start; color: var(--red); }
