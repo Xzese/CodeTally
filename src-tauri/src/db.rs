@@ -293,12 +293,20 @@ impl Database {
         }).collect())
     }
 
-    pub fn set_repository_unavailable(&self, repo: &Repository, unavailable: bool) -> AppResult<()> {
-        self.set_metadata(&format!("github_repository_unavailable:{}", repo.github_id), if unavailable { "true" } else { "false" })
-    }
-
-    pub fn repository_unavailable(&self, repo: &Repository) -> AppResult<bool> {
-        Ok(self.metadata(&format!("github_repository_unavailable:{}", repo.github_id))?.as_deref() == Some("true"))
+    pub fn delete_repository(&self, repo: &Repository) -> AppResult<()> {
+        let mut conn = self.connect()?;
+        let transaction = conn.transaction()?;
+        transaction.execute("DELETE FROM repositories WHERE id=?1", [repo.id])?;
+        transaction.execute(
+            "DELETE FROM app_metadata WHERE key=?1 OR key LIKE ?2",
+            params![format!("github_repository_unavailable:{}", repo.github_id), format!("github_activity_v2:{}:%", repo.id)],
+        )?;
+        transaction.execute(
+            "DELETE FROM app_metadata WHERE key='github_last_attempted_repository' AND value=?1",
+            [repo.id.to_string()],
+        )?;
+        transaction.commit()?;
+        Ok(())
     }
 
     pub fn repository_enabled(&self, repo: &Repository) -> AppResult<bool> {
