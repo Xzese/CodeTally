@@ -179,7 +179,6 @@ button { color: inherit; }
 .tracked-repository-group ul { display: grid; gap: 3px; margin: 0 0 7px; padding: 0 5px 0 13px; color: var(--muted); font-size: 10px; }
 .tracked-repository-group li { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .table-scroll { overflow-x: auto; }
-.table-scroll-hint { display: none; margin: 0; padding: 0 18px 10px; color: var(--muted); font-size: 11px; }
 table { width: 100%; border-collapse: collapse; font-size: 12px; }
 thead { border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 th { text-align: left; color: var(--muted); font-size: 10px; font-weight: 600; height: 35px; padding: 0 8px; white-space: nowrap; }
@@ -197,9 +196,9 @@ td:first-child { padding-left: 18px; }
 .repo-cell > span:last-child { display: flex; flex: 1; flex-direction: column; gap: 4px; min-width: 0; }
 .repo-cell strong { color: #dfe9f7; font-size: 12px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; }
 .light .repo-cell strong { color: #20324c; }
-.repo-cell small { color: var(--muted); font-size: 10px; overflow: hidden; display: flex; align-items: center; gap: 3px; width: 100%; }
+.repo-cell small { color: var(--muted); font-size: 10px; overflow: hidden; display: flex; align-items: center; gap: 6px; width: 100%; }
 .repo-meta-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.repo-cell .repo-visibility { margin-left: auto; }
+.repo-cell .repo-visibility { margin-left: 0; }
 .repo-visibility { display: inline-flex; align-items: center; flex: 0 0 auto; border: 1px solid currentColor; border-radius: 4px; padding: 3px 6px; margin-left: 3px; font-size: 10px; font-weight: 500; font-style: normal; line-height: 1.2; letter-spacing: .02em; vertical-align: 1px; background: color-mix(in srgb, currentColor 8%, transparent); }
 .repo-visibility.public { color: var(--green); }
 .repo-visibility.private { color: var(--purple); }
@@ -652,7 +651,7 @@ body.kanban-drag-active, body.kanban-drag-active * { cursor: grabbing !important
 .refresh-timestamps { display: inline-flex; align-items: center; gap: 9px; padding-left: 14px; border-left: 1px solid var(--line); font-size: 10px; color: var(--muted); white-space: nowrap; }
 .refresh-timestamp-list { display: grid; gap: 2px; }
 .refresh-timestamp-list > span { display: flex; justify-content: space-between; gap: 8px; }
-.activity-refresh-icon { display: none; flex: 0 0 auto; }
+.refresh-label-compact { display: none; }
 .refresh-timestamps strong { font-weight: 500; color: var(--subtle); }
 .refresh-timestamps .refresh-running { display: inline-flex; align-items: center; color: var(--blue); }
 .activity-as-of { margin: -7px 0 13px; font-size: 10px; color: var(--muted); }
@@ -674,8 +673,8 @@ body.kanban-drag-active, body.kanban-drag-active * { cursor: grabbing !important
   .topbar { flex: 0 0 auto; min-height: 64px; padding: 8px 18px; flex-wrap: wrap; gap: 4px 12px; }
   .topbar-status { display: contents; }
   .topbar-navigation { order: 0; }
-  .topbar-refresh-group { order: 1; margin-left: auto; }
-  .topbar-account { order: 2; }
+  .topbar-account { order: 1; margin-left: auto; }
+  .topbar-refresh-group { order: 2; }
   .feed-toggle { order: 3; }
   .topbar-account .identity-name { max-width: 90px; }
   .topbar-account .muted { display: block; max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -693,24 +692,24 @@ body.kanban-drag-active, body.kanban-drag-active * { cursor: grabbing !important
   .topbar { padding: 8px 14px; gap: 3px 6px; }
   .topbar-refresh-group { gap: 6px; }
   .topbar-account { gap: 8px; }
+  .topbar-account .identity-name { max-width: 70px; }
   .refresh-timestamps { padding-left: 8px; gap: 4px; font-size: 9px; }
   .refresh-timestamp-list > span { gap: 5px; }
-  .activity-refresh-icon { display: block; }
-  .activity-refresh-label { display: none; }
+  .refresh-label-full { display: none; }
+  .refresh-label-compact { display: inline; }
   .main-column { padding: 18px 14px 42px; }
   .kanban-main { padding: 18px 14px; }
   .page-heading, .detail-heading, .panel-heading { flex-wrap: wrap; }
   .chart-controls { flex-wrap: wrap; gap: 7px; }
   .repos-panel .table-scroll { max-width: 100%; }
   .repos-panel table { min-width: 940px; }
-  .table-scroll-hint { display: block; }
 }
 @media (max-width: 540px) {
   .brand-mark span { display: none; }
-  .topbar-account { order: 1; margin-left: auto; }
+}
+@media (max-width: 500px) {
   .feed-toggle { order: 2; }
-  .update-status { order: 3; }
-  .topbar-refresh-group { order: 4; }
+  .topbar-refresh-group { order: 3; flex-basis: 100%; justify-content: flex-end; }
 }
 @media (max-width: 400px) {
   .topbar-navigation.with-kanban .brand-mark { display: none; }
