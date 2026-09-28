@@ -6,6 +6,7 @@ use tauri::{menu::{Menu, MenuBuilder}, tray::TrayIconBuilder, AppHandle, Emitter
 
 const TRAY_ID: &str = "codetally";
 const GITHUB_MENU_PREFIX: &str = "open-github:";
+const MENU_ACTIVITY_LIMIT: usize = 25;
 const METRIC_TRAYS: [(MenuBarMetric, &str); 5] = [
     (MenuBarMetric::TotalLines, "codetally-total-lines"),
     (MenuBarMetric::SourceLines, "codetally-source-lines"),
@@ -115,13 +116,13 @@ fn tray_menu(app: &AppHandle, state: Option<&AppState>, metric: MenuBarMetric) -
         let db = state.database();
         match metric {
             MenuBarMetric::OpenPrs => {
-                for item in db.pull_requests(None, Some("open"), 12).unwrap_or_default() {
+                for item in db.pull_requests(None, Some("open"), MENU_ACTIVITY_LIMIT).unwrap_or_default() {
                     activity_count += 1;
                     builder = builder.text(format!("{GITHUB_MENU_PREFIX}{}", item.url), menu_label(&item.repository, item.number, &item.title));
                 }
             }
             MenuBarMetric::OpenIssues => {
-                for item in db.issues(None, Some("open"), 12).unwrap_or_default() {
+                for item in db.issues(None, Some("open"), MENU_ACTIVITY_LIMIT).unwrap_or_default() {
                     activity_count += 1;
                     builder = builder.text(format!("{GITHUB_MENU_PREFIX}{}", item.url), menu_label(&item.repository, item.number, &item.title));
                 }

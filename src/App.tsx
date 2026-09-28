@@ -632,7 +632,7 @@ function App() {
           >
             <div className="refresh-timestamps" tabIndex={0} aria-label="Last refresh times">
               <span title={exactDate(dashboard.last_lines_refresh_at)}>Line counts <strong>{dashboard.last_lines_refresh_at ? relativeTime(dashboard.last_lines_refresh_at) : 'Not recorded'}</strong></span>
-              <span title={exactDate(dashboard.last_full_refresh_at)}>Everything <strong>{dashboard.last_full_refresh_at ? relativeTime(dashboard.last_full_refresh_at) : 'Not recorded'}</strong></span>
+              <span title={dashboard.last_full_refresh_at ? exactDate(dashboard.last_full_refresh_at) : 'No successful Force Refresh has completed. Partial or failed attempts do not set this time.'}>Everything <strong>{dashboard.last_full_refresh_at ? relativeTime(dashboard.last_full_refresh_at) : 'No complete refresh'}</strong></span>
               {syncActive && <span className="refresh-running"><LoaderCircle size={12} className="spin" />{importing ? 'Importing' : 'Refreshing'}</span>}
             </div>
             {syncDetailsAvailable && syncPopoverOpen && <div className="sync-popover" role="dialog" aria-label="Refresh details">

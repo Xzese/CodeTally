@@ -280,8 +280,28 @@ impl Database {
     }
 
     pub fn upsert_repository(&self, repo: &Repository) -> AppResult<i64> {
-        let conn = self.connect()?;
-        conn.execute(
+        let mut conn = self.connect()?;
+        let tx = conn.transaction()?;
+        // A deleted repository can be recreated under the same owner/name with
+        // a new GitHub ID. Keep the old row and its snapshots/activity attached
+        // to that old identity, but retire its display name before inserting the
+        // new repository. Names are reusable; GitHub IDs are the cache key.
+        let displaced_id: Option<i64> = tx.query_row(
+            "SELECT id FROM repositories WHERE name_with_owner=?1 AND github_id<>?2",
+            params![repo.name_with_owner, repo.github_id],
+            |row| row.get(0),
+        ).optional()?;
+        if let Some(id) = displaced_id {
+            tx.execute(
+                "UPDATE repositories SET name_with_owner=?1,is_archived=1,last_error=?2 WHERE id=?3",
+                params![
+                    format!("{} [replaced local #{id}]", repo.name_with_owner),
+                    "Repository name now belongs to a different GitHub repository",
+                    id
+                ],
+            )?;
+        }
+        tx.execute(
             r#"INSERT INTO repositories
                (github_id, owner, name, name_with_owner, url, ssh_url, default_branch,
                 primary_language, is_private, is_fork, is_archived, star_count, fork_count, created_at,
@@ -330,11 +350,13 @@ impl Database {
                 repo.last_fetched_pushed_at,
             ],
         )?;
-        Ok(conn.query_row(
+        let id = tx.query_row(
             "SELECT id FROM repositories WHERE github_id=?1",
             [&repo.github_id],
             |row| row.get(0),
-        )?)
+        )?;
+        tx.commit()?;
+        Ok(id)
     }
 
     pub fn repository(&self, id: i64) -> AppResult<Option<Repository>> {

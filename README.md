@@ -30,7 +30,7 @@ Keep selected metrics visible while CodeTally runs in the background. **Settings
 
 ![CodeTally's native issues, PRs, total lines, source lines, and test lines in the menu bar](docs/screenshots/menu-bar.png)
 
-Each selected metric has its own native icon. Click the PR or issue metric to see up to 12 recently updated open items from tracked repositories, then select an item to open its GitHub page. Every metric menu also offers **Show CodeTally** and **Quit CodeTally**. Reopen the app from Applications or the Dock if its menu icons are hidden.
+Each selected metric has its own native icon. Click the PR or issue metric to see up to 25 recently updated open items from tracked repositories, then select an item to open its GitHub page. Every metric menu also offers **Show CodeTally** and **Quit CodeTally**. Reopen the app from Applications or the Dock if its menu icons are hidden.
 
 | Open pull requests | Open issues |
 | --- | --- |
@@ -146,7 +146,7 @@ The **Background & refresh** section has one **Repo Refresh** interval for repos
 
 In **Settings → Appearance & menu bar**, choose **Light**, **Dark**, or **Follow system**. Follow system is the default and responds to macOS appearance changes while the app is open.
 
-On macOS, select one or more of **Total lines**, **Source lines**, **Test lines**, **Open PRs**, and **Open issues** to combine them in the menu bar. At least one metric stays selected, and the display uses that fixed order. Every selected metric has its own consistently aligned native icon. Clicking the PR or issue metric opens a list of up to 12 cached open items; selecting one opens its GitHub page. **Show in menu bar** can hide every CodeTally menu item. Hover or focus a card to preview adding its current cached value before selecting it. The preview shows only CodeTally's display, and the actual menu bar updates when settings change or synchronization completes. Existing single-metric preferences are preserved.
+On macOS, select one or more of **Total lines**, **Source lines**, **Test lines**, **Open PRs**, and **Open issues** to combine them in the menu bar. At least one metric stays selected, and the display uses that fixed order. Every selected metric has its own consistently aligned native icon. Clicking the PR or issue metric opens a list of up to 25 cached open items; selecting one opens its GitHub page. **Show in menu bar** can hide every CodeTally menu item. Hover or focus a card to preview adding its current cached value before selecting it. The preview shows only CodeTally's display, and the actual menu bar updates when settings change or synchronization completes. Existing single-metric preferences are preserved.
 
 **Include forks in line totals** is disabled by default. Enable it in Settings to count selected fork repositories in portfolio totals and line history.
 

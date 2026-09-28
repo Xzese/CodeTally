@@ -1145,6 +1145,46 @@ fn sqlite_upserts_preserve_one_repository_and_update_activity_rows() {
 }
 
 #[test]
+fn reused_repository_name_keeps_old_identity_and_history() {
+    let (database, path) = temp_database("reused-repository-name");
+    let original_id = database
+        .upsert_repository(&repository("old-github-id", "reused"))
+        .expect("original repository");
+    database
+        .upsert_snapshot(&snapshot(original_id, "old-commit", "2026-09-01T00:00:00Z", 120))
+        .expect("original snapshot");
+    database
+        .upsert_pull_request(&PullRequest {
+            repository_id: original_id,
+            repository: "owner/reused".into(),
+            number: 7,
+            title: "Original PR".into(),
+            state: "OPEN".into(),
+            created_at: "2026-09-01T00:00:00Z".into(),
+            updated_at: "2026-09-01T00:00:00Z".into(),
+            ..PullRequest::default()
+        })
+        .expect("original PR");
+
+    let replacement_id = database
+        .upsert_repository(&repository("new-github-id", "reused"))
+        .expect("replacement repository with reused name");
+    assert_ne!(replacement_id, original_id);
+    let old = database.repository(original_id).expect("old row").expect("old identity retained");
+    let new = database.repository(replacement_id).expect("new row").expect("new identity saved");
+    assert_eq!(old.github_id, "old-github-id");
+    assert!(old.is_archived);
+    assert_eq!(new.name_with_owner, "owner/reused");
+    assert!(!new.is_archived);
+    assert!(database.latest_snapshot(original_id).expect("old snapshot").is_some());
+    assert_eq!(database.pull_requests(Some(original_id), None, 10).expect("old PR").len(), 0);
+    let connection = Connection::open(&path).expect("database");
+    assert_eq!(connection.query_row("SELECT COUNT(*) FROM pull_requests WHERE repository_id=?1", [original_id], |row| row.get::<_, i64>(0)).expect("retained PR"), 1);
+    assert_eq!(database.selected_repositories().expect("selected repositories").iter().map(|repo| repo.id).collect::<Vec<_>>(), vec![replacement_id]);
+    remove_database(path);
+}
+
+#[test]
 fn sqlite_upserts_round_trip_pull_request_actor_fields() {
     let (database, path) = temp_database("pull-request-actors");
     let repository_id = database
