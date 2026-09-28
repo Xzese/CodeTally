@@ -7,7 +7,7 @@
 }
 
 * { box-sizing: border-box; }
-body { margin: 0; min-width: 480px; background: #0b111b; }
+body { margin: 0; min-width: 300px; background: #0b111b; }
 button, select { font: inherit; }
 button { color: inherit; }
 
@@ -20,6 +20,7 @@ button { color: inherit; }
 .brand-mark img { width: 26px; height: 26px; object-fit: contain; display: block; }
 .light .brand-mark { color: #17253a; }
 .topbar-status { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 12px; }
+.topbar-account { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .topbar-refresh-group { display: inline-flex; align-items: center; gap: 12px; }
 .update-status { position: relative; display: inline-flex; }
 .update-status.active::after { content: ''; position: absolute; z-index: 44; top: 100%; right: 0; width: 100%; height: 12px; }
@@ -35,7 +36,8 @@ button { color: inherit; }
 .update-actions { display: flex; align-items: stretch; flex-wrap: nowrap; gap: 7px; }
 .update-actions .button { min-height: 38px; margin: 0; white-space: nowrap; }
 .update-panel .update-error { color: var(--red); }
-.identity { color: var(--subtle); display: flex; align-items: center; gap: 7px; font-weight: 550; }
+.identity { color: var(--subtle); display: flex; align-items: center; gap: 7px; min-width: 0; font-weight: 550; }
+.identity-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .status-dot { display: inline-block; width: 7px; height: 7px; border-radius: 100%; background: var(--green); box-shadow: 0 0 0 3px rgba(82, 210, 177, .12); }
 .sync-popover-wrap { position: relative; display: inline-flex; align-items: center; }
 .sync-status { display: inline-flex; gap: 6px; align-items: center; border: 0; border-left: 1px solid var(--line); padding: 4px 0 4px 14px; color: var(--muted); background: transparent; font-size: inherit; }
@@ -584,6 +586,12 @@ td:first-child { padding-left: 18px; }
   .detail-stats { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px 0; }
   .detail-stat:nth-child(5) { border-left: 0; padding-left: 0; }
 }
+@media (max-width: 1100px) and (min-width: 621px) {
+  .summary-strip, .detail-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .summary-item:nth-child(5), .detail-stat:nth-child(5) { border-left: 1px solid var(--line); padding-left: 14px; }
+  .summary-item:nth-child(4), .summary-item:nth-child(7), .detail-stat:nth-child(4), .detail-stat:nth-child(7) { border-left: 0; padding-left: 0; }
+  .summary-item:nth-child(n+4) { padding-top: 12px; }
+}
 
 .activity-repository-menu { min-width: 0; }
 .activity-repository-trigger { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; height: 33px; padding: 0 10px; border: 1px solid color-mix(in srgb, var(--blue) 30%, transparent); border-radius: 7px; color: var(--blue); background: color-mix(in srgb, var(--blue) 8%, var(--panel)); box-shadow: var(--control-shadow); cursor: pointer; }
@@ -646,7 +654,7 @@ body.kanban-drag-active, body.kanban-drag-active * { cursor: grabbing !important
 .activity-refresh-error { color: var(--red); font-size: 12px; line-height: 1.5; }
 
 .topbar-navigation { display: flex; align-items: center; gap: 24px; }
-.topbar-nav-button { border: 0; border-radius: 6px; background: transparent; color: var(--subtle); padding: 8px 10px; font-size: 12px; cursor: pointer; }
+.topbar-nav-button { border: 0; border-radius: 6px; background: transparent; color: var(--subtle); padding: 8px 10px; font-size: 12px; white-space: nowrap; cursor: pointer; }
 .topbar-nav-button:hover, .topbar-nav-button[aria-current=page] { color: var(--blue); background: var(--panel-hover); }
 .topbar-nav-button:focus-visible, .app-shell .refresh-button:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
 .feed-toggle:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
@@ -691,19 +699,39 @@ body.kanban-drag-active, body.kanban-drag-active * { cursor: grabbing !important
   .error-banner { margin-left: 20px; margin-right: 20px; }
 }
 @media (max-width: 620px) {
-  .topbar { padding: 8px 14px; }
-  .topbar-status { flex-wrap: wrap; row-gap: 4px; }
-  .topbar-refresh-group { flex: 1 0 100%; justify-content: flex-end; }
+  .topbar { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 6px; padding: 8px 14px; }
+  .topbar-navigation { grid-column: 1; grid-row: 1; width: auto; min-width: 0; gap: 8px; }
+  .topbar-status { display: contents; }
+  .topbar-refresh-group { grid-column: 2; grid-row: 1; justify-self: end; gap: 6px; }
+  .topbar-account { grid-column: 1 / -1; grid-row: 2; justify-self: end; gap: 8px; }
+  .refresh-timestamps { padding-left: 8px; gap: 4px; font-size: 9px; }
+  .refresh-timestamp-list > span { gap: 5px; }
   .main-column { padding: 18px 14px 42px; }
   .kanban-main { padding: 18px 14px; }
   .page-heading, .detail-heading, .panel-heading { flex-wrap: wrap; }
   .chart-controls { flex-wrap: wrap; gap: 7px; }
   .summary-strip, .detail-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .summary-item:nth-child(odd), .detail-stat:nth-child(odd) { border-left: 0; padding-left: 0; }
+  .summary-item:nth-child(even), .detail-stat:nth-child(even) { border-left: 1px solid var(--line); padding-left: 14px; }
   .summary-item:nth-child(n+3), .detail-stat:nth-child(n+3) { padding-top: 12px; }
   .repos-panel .table-scroll { max-width: 100%; }
   .repos-panel table { min-width: 940px; }
   .table-scroll-hint { display: block; }
+}
+@media (max-width: 540px) {
+  .brand-mark span { display: none; }
+}
+@media (max-width: 400px) {
+  .topbar { grid-template-columns: minmax(0, 1fr); }
+  .topbar-refresh-group { grid-column: 1; grid-row: 1; }
+  .topbar-navigation { grid-column: 1; grid-row: 2; }
+  .topbar-account { grid-column: 1; grid-row: 3; }
+  .main-column, .kanban-main { padding: 14px 12px 32px; }
+  .chart-panel { padding: 14px 14px 0; }
+  .settings-drawer { padding-inline: 16px; }
+  .kanban-detail { padding: 18px; }
+  .setup-wrap { padding: 14px; }
+  .update-actions { flex-wrap: wrap; }
 }
 @media (prefers-reduced-motion: reduce) {
   .content-shell, .activity-sidebar, .activity-backdrop { transition: none !important; }

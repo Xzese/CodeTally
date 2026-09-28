@@ -691,9 +691,11 @@ function App() {
       <header className="topbar">
         <div className="topbar-navigation"><div className="brand-mark"><img src={codetallyMark} alt="" aria-hidden="true" /><span>CodeTally</span></div>{appSettings.kanban_enabled && !isSetup && <nav aria-label="Main navigation"><button className="button secondary topbar-nav-button" onClick={screen === 'kanban' ? backToDashboard : () => setScreen('kanban')}>{screen === 'kanban' ? 'Back to dashboard' : 'Kanban Board'}</button></nav>}</div>
         <div className="topbar-status">
-          {login ? <span className="identity"><span className="status-dot" />{login}</span> : <span className="muted">Local desktop dashboard</span>}
-          <button className="icon-button" title="Settings" onClick={() => setSettingsOpen(true)}><Settings size={17} /></button>
-          <UpdateStatus updateCheckInterval={settingsLoaded ? appSettings.update_check_interval : null} />
+          <div className="topbar-account">
+            {login ? <span className="identity"><span className="status-dot" /><span className="identity-name">{login}</span></span> : <span className="muted">Local desktop dashboard</span>}
+            <button className="icon-button" title="Settings" onClick={() => setSettingsOpen(true)}><Settings size={17} /></button>
+            <UpdateStatus updateCheckInterval={settingsLoaded ? appSettings.update_check_interval : null} />
+          </div>
           <div className="topbar-refresh-group">
             <div
             className={syncDetailsAvailable ? 'sync-popover-wrap active' : 'sync-popover-wrap'}
