@@ -8,7 +8,7 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke }))
 const item: KanbanItem = { item_key: 'pr:1:2', kind: 'pr', repository_id: 1, repository: 'sam/repo', number: 2, title: 'Review changes', state: 'open', is_draft: false, updated_at: '2026-09-27', url: 'https://github.com/sam/repo/pull/2', author: 'sam', assignees: [], ci_state: 'SUCCESS', closed_at: null, merged_at: null, completion_reason: null, manual_column: null, priority: 'None', notes: '', sort_rank: 0, revision: 0 }
 const preferences = { kind: 'both', repository_id: null, repository_scope: 'all', relationship: 'author', search: '', show_completed: false }
 const page = { items: [item], total: 1, active_count: 1, completed_count: 7, partial: false, errors: [] }
-const props = { repositories: [{ id: 1, name: 'repo', owner: 'sam' }], login: 'sam', relationship: 'author' as const, onRelationship: vi.fn(), onBack: vi.fn(), onActivityRefreshed: vi.fn(), revision: 0 }
+const props = { repositories: [{ id: 1, name: 'repo', owner: 'sam' }], login: 'sam', relationship: 'author' as const, onRelationship: vi.fn(), onBack: vi.fn(), onActivityRefreshed: vi.fn(), syncBusy: false, revision: 0 }
 const hitTest = vi.fn()
 class TestPointerEvent extends MouseEvent {
   readonly pointerId: number
@@ -74,6 +74,14 @@ describe('local Kanban workflow', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Show completed' }))
     expect(screen.getByRole('button', { name: 'Show completed' })).toHaveAttribute('aria-pressed', 'true')
     await screen.findByRole('region', { name: 'Done column' })
+  })
+
+  it('shows a busy ticket refresh while another sync is running', async () => {
+    const view = render(<KanbanBoard {...props} />)
+    await screen.findByText(item.title)
+    view.rerender(<KanbanBoard {...props} syncBusy />)
+    expect(screen.getByRole('button', { name: 'Refresh in progress…' })).toBeDisabled()
+    expect(invoke.mock.calls.some(([command]) => command === 'sync_work_items')).toBe(false)
   })
 
   it('shows a dashed insertion position and persists a drag within a column', async () => {

@@ -7,7 +7,7 @@ import type { ActivityRelationship, KanbanItem, KanbanKind, KanbanLinks, KanbanM
 import { relativeTime, repositoryId } from '../utils'
 import { COLUMNS, columnFor, isGitHubWorkUrl, type Column } from './model'
 
-export default function KanbanBoard({ repositories, login, relationship: defaultRelationship, revision, onActivityRefreshed }: { repositories: Repository[]; login: string; relationship: ActivityRelationship; onRelationship: (value: ActivityRelationship) => void; onBack: () => void; revision: number; onActivityRefreshed: () => void }) {
+export default function KanbanBoard({ repositories, login, relationship: defaultRelationship, revision, onActivityRefreshed, syncBusy }: { repositories: Repository[]; login: string; relationship: ActivityRelationship; onRelationship: (value: ActivityRelationship) => void; onBack: () => void; revision: number; onActivityRefreshed: () => void; syncBusy: boolean }) {
   const [kind, setKind] = useState<KanbanKind>('both')
   const [scope, setScope] = useState('all')
   const [relationship, setRelationship] = useState(defaultRelationship)
@@ -174,7 +174,7 @@ export default function KanbanBoard({ repositories, login, relationship: default
   const item = page?.items.find((row) => row.item_key === selected)
   const draggedItem = page?.items.find((row) => row.item_key === draggedKey)
   return <main className="kanban-main">
-    <div className="page-heading"><div><p className="eyebrow">Local workflow</p><h1>Kanban</h1></div><button className="button primary" title="Refresh PRs and issues from all tracked repositories, regardless of board filters, without scanning lines of code" disabled={refreshing || loading || pending.size > 0} onClick={() => void refresh()}>{refreshing ? 'Refreshing…' : 'Refresh Tickets'}</button></div>
+    <div className="page-heading"><div><p className="eyebrow">Local workflow</p><h1>Kanban</h1></div><button className="button primary" title="Refresh PRs and issues from all tracked repositories, regardless of board filters, without scanning lines of code" disabled={syncBusy || refreshing || loading || pending.size > 0} onClick={() => void refresh()}>{refreshing ? 'Refreshing…' : syncBusy ? 'Refresh in progress…' : 'Refresh Tickets'}</button></div>
     <div className="kanban-filters"><div className="kanban-kind-buttons" role="group" aria-label="Ticket types"><button className={kind === 'prs' || kind === 'both' ? 'active' : ''} aria-pressed={kind === 'prs' || kind === 'both'} onClick={() => setKind(kind === 'both' ? 'issues' : kind === 'prs' ? 'none' : kind === 'issues' ? 'both' : 'prs')}><GitPullRequest size={14} aria-hidden="true" /> PRs</button><button className={kind === 'issues' || kind === 'both' ? 'active' : ''} aria-pressed={kind === 'issues' || kind === 'both'} onClick={() => setKind(kind === 'both' ? 'prs' : kind === 'issues' ? 'none' : kind === 'prs' ? 'both' : 'issues')}><CircleDot size={14} aria-hidden="true" /> Issues</button></div>
       <ActivityRepositoryMenu repositories={repositories} login={login} value={scope} disabled={false} onChange={setScope} />
       <ActivityInvolvementFilter id="kanban-involvement-select" value={relationship} onChange={setRelationship} />
