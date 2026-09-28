@@ -95,7 +95,7 @@ function Interval({ label, value, options, minMinutes = 1, help, onChange }: { l
 }
 
 function UpdateCheckIntervalControl({ value, onChange }: { value: UpdateCheckInterval; onChange: (value: UpdateCheckInterval) => void }) {
-  return <div className="settings-row settings-update-interval-row"><div className="settings-row-label">App update checks<Help label="App update checks">Check for new app versions automatically. Choose Never to check only when you select Check for updates.</Help></div><div className="settings-update-interval-options" role="radiogroup" aria-label="App update checks">{UPDATE_CHECK_OPTIONS.map((option) => <label key={option.key} className={value === option.key ? 'selected' : ''}><input type="radio" name="app-update-check-interval" aria-label={option.label} checked={value === option.key} onChange={() => onChange(option.key)} /><span>{option.label}</span></label>)}</div></div>
+  return <div className="settings-row settings-update-interval-row settings-update-checks"><div className="settings-row-label">Check for Updates<Help label="Check for Updates">Check for new app versions automatically. Choose Never to check only when you select Check for Updates.</Help></div><div className="settings-update-interval-options" role="radiogroup" aria-label="Check for Updates">{UPDATE_CHECK_OPTIONS.map((option) => <label key={option.key} className={value === option.key ? 'selected' : ''}><input type="radio" name="app-update-check-interval" aria-label={option.label} checked={value === option.key} onChange={() => onChange(option.key)} /><span>{option.label}</span></label>)}</div></div>
 }
 
 function OpenAtLoginControl() {
@@ -108,6 +108,10 @@ function OpenAtLoginControl() {
     setLoading(true)
     setError(null)
     try {
+      if (import.meta.env.VITE_CODETALLY_SCREENSHOT_MODE === '1' && !('__TAURI_INTERNALS__' in window)) {
+        setEnabled(false)
+        return
+      }
       setEnabled(await isAutostartEnabled())
     } catch {
       setError('Couldn’t read the login setting.')
@@ -139,9 +143,9 @@ function OpenAtLoginControl() {
   </>
 }
 
-type Props = { settings: AppSettings; loaded: boolean; metrics: NormalizedMetrics; saving: boolean; error: string | null; onChange: (update: (current: AppSettings) => AppSettings) => void; onRetry: () => void; onClose: () => void }
+type Props = { settings: AppSettings; loaded: boolean; metrics: NormalizedMetrics; saving: boolean; error: string | null; onChange: (update: (current: AppSettings) => AppSettings) => void; onRetry: () => void; onClose: () => void; onForceRefresh: () => void; refreshing: boolean }
 
-export default function SettingsDrawer({ settings, loaded, metrics, saving, error, onChange, onRetry, onClose }: Props) {
+export default function SettingsDrawer({ settings, loaded, metrics, saving, error, onChange, onRetry, onClose, onForceRefresh, refreshing }: Props) {
   const [hoverMetric, setHoverMetric] = useState<MenuBarMetric | null>(null)
   const [focusMetric, setFocusMetric] = useState<MenuBarMetric | null>(null)
   const drawerRef = useRef<HTMLElement>(null)
@@ -358,12 +362,16 @@ export default function SettingsDrawer({ settings, loaded, metrics, saving, erro
       <div className="settings-metric-options" role="group" aria-label="Menu bar metrics">{METRICS.map((option) => { const selected = selectedMetrics.includes(option.key); const Icon = METRIC_ICONS[option.key]; return <label key={option.key} className={`settings-metric-option${selected ? ' selected' : ''}`} onMouseEnter={() => setHoverMetric(option.key)} onMouseLeave={() => setHoverMetric(null)}><input type="checkbox" aria-label={option.label} checked={selected} aria-disabled={selected && selectedMetrics.length === 1} onFocus={() => setFocusMetric(option.key)} onBlur={() => setFocusMetric(null)} onChange={() => toggleMetric(option.key)} /><Icon className="settings-metric-icon" size={18} aria-hidden="true" /><span className="settings-metric-copy"><strong>{option.label}</strong><small>{menuBarTitle(option.key, metrics)}</small></span><span className="settings-metric-indicator" aria-hidden="true">{selected && <Check size={12} />}</span></label> })}</div>
       <p className="settings-metric-hint">Choose the metrics you want to see. Keep at least one selected.</p>
     </section>
+    <section className="settings-section"><SectionHeading title="Kanban" help="Combine pull requests and issues from your tracked repositories on one board. Manual columns, priorities, and notes stay on this Mac and do not update GitHub." />
+      <div className="settings-row"><label htmlFor="kanban-enabled">Enable Kanban board</label><input id="kanban-enabled" className="mac-switch" role="switch" type="checkbox" checked={settings.kanban_enabled} onChange={(event) => { const checked = event.target.checked; onChange((current) => ({ ...current, kanban_enabled: checked })) }} /></div>
+      <p className="settings-metric-hint">See tracked GitHub pull requests and issues together. Columns, priorities, and notes stay on this computer.</p>
+    </section>
     <section className="settings-section" id="settings-refresh"><SectionHeading title="Background & refresh" help="Choose when CodeTally refreshes your GitHub activity and line counts." />
       <OpenAtLoginControl />
       <div className="settings-row"><div className="settings-row-label">Run in background<Help label="Run in background">Keep CodeTally running from the menu bar without a Dock icon.</Help></div><input className="mac-switch" role="switch" type="checkbox" aria-label="Keep running in the background when the window closes" checked={settings.run_in_background} onChange={(event) => { const checked = event.target.checked; onChange((current) => ({ ...current, run_in_background: checked })) }} /></div>
-      <UpdateCheckIntervalControl value={settings.update_check_interval} onChange={(value) => onChange((current) => ({ ...current, update_check_interval: value }))} />
-      <Interval label="Pull requests and issues" value={settings.activity_refresh_minutes} options={[15, 30, 60, 120]} minMinutes={15} help="Choose how often CodeTally refreshes pull requests and issues." onChange={(value) => onChange((current) => ({ ...current, activity_refresh_minutes: value }))} />
-      <Interval label="Lines of Code Refresh" value={settings.lines_refresh_minutes} options={[360, 720, 1440]} help="Choose how often CodeTally updates line counts for changed repositories." onChange={(value) => onChange((current) => ({ ...current, lines_refresh_minutes: value }))} />
+      <div className="settings-row settings-interval-row"><div className="settings-row-label">Repo Refresh<Help label="Repo Refresh">Choose how often CodeTally refreshes repositories, tickets, and line counts. Daily is the default.</Help></div><div className="settings-interval-control"><div className="settings-update-interval-options" role="radiogroup" aria-label="Repo Refresh">{[{ value: 60, label: 'Hourly' }, { value: 1440, label: 'Daily' }, { value: 10080, label: 'Weekly' }, { value: 43200, label: 'Monthly' }].map((option) => <label key={option.value} className={settings.activity_refresh_minutes === option.value ? 'selected' : ''}><input type="radio" name="repo-refresh" aria-label={option.label} checked={settings.activity_refresh_minutes === option.value} onChange={() => onChange((current) => ({ ...current, activity_refresh_minutes: option.value }))} /><span>{option.label}</span></label>)}{![60, 1440, 10080, 43200].includes(settings.activity_refresh_minutes) && <label className="selected"><input type="radio" name="repo-refresh" aria-label={`Current setting: ${settings.activity_refresh_minutes} min`} checked readOnly /><span>Current setting: {settings.activity_refresh_minutes} min</span></label>}</div>{settings.activity_refresh_minutes === 60 && <p className="settings-interval-warning" role="status">Hourly repository refreshes can use more GitHub API requests and may reach API limits. Daily is recommended for most repositories.</p>}</div></div>
+      <Interval label="Personal PR & issue refresh" value={settings.personal_refresh_minutes} options={[5, 15, 30, 60]} minMinutes={5} help="Refresh pull requests and issues involving you. The default is every 5 minutes. This does not scan lines of code." onChange={(value) => onChange((current) => ({ ...current, personal_refresh_minutes: value }))} />
+      <div className="settings-row"><div className="settings-row-label">Repo Refresh now<Help label="Force Repo Refresh">Refresh tracked repositories, pull requests, issues, and line counts now.</Help></div><button className="button primary" disabled={refreshing || !loaded} onClick={onForceRefresh}>{refreshing ? 'Refreshing…' : 'Force Refresh'}</button></div>
       <div className="settings-row"><div className="settings-row-label">Refresh on code changes<Help label="Refresh on code changes">Update line counts when a repository changes.</Help></div><input className="mac-switch" role="switch" type="checkbox" aria-label="Refresh Lines of Code when code changes" checked={settings.refresh_lines_on_change} onChange={(event) => { const checked = event.target.checked; onChange((current) => ({ ...current, refresh_lines_on_change: checked })) }} /></div>
     </section>
     <section className="settings-section repository-selection-block" id="settings-repositories"><SectionHeading title="Repositories" help="Choose which repositories to include. Repositories you leave out won’t appear in the dashboard or refresh, but their saved data stays on this Mac." />
@@ -383,9 +391,10 @@ export default function SettingsDrawer({ settings, loaded, metrics, saving, erro
         {appUpdateError && <div className="settings-about-state error" role="alert"><AlertCircle size={14} /><span>{appUpdateError}</span><button className="button secondary compact" type="button" onClick={() => void checkAppUpdate()}>Try again</button></div>}
         {releaseLinkError && <div className="settings-error settings-about-link-error" role="alert"><AlertCircle size={14} /><span>{releaseLinkError}</span></div>}
         <div className="settings-about-links">
-          <button type="button" className="button secondary compact" disabled={appUpdateInstalling || appUpdateLoading} onClick={() => void checkAppUpdate()}>Check for updates</button>
+          <button type="button" className="button secondary compact" disabled={appUpdateInstalling || appUpdateLoading} onClick={() => void checkAppUpdate()}>Check for Updates</button>
           {appInfo.repository_url && <a className="button secondary compact settings-about-link" href={appInfo.repository_url} onClick={(event) => void handleOpenAboutLink(event, appInfo.repository_url)}><Github size={14} /> View on GitHub <ExternalLink size={12} /></a>}
         </div>
+        <UpdateCheckIntervalControl value={settings.update_check_interval} onChange={(value) => onChange((current) => ({ ...current, update_check_interval: value }))} />
         {aboutLinkError && <div className="settings-error settings-about-link-error" role="alert"><AlertCircle size={14} /><span>{aboutLinkError}</span></div>}
         <div className="settings-about-me">
           <h4>About me</h4>

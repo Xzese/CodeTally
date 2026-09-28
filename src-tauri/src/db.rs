@@ -28,7 +28,7 @@ impl Database {
     }
 
     pub fn init(&self) -> AppResult<()> {
-        let conn = self.connect()?;
+        let mut conn = self.connect()?;
         conn.execute_batch(
             r#"
             PRAGMA foreign_keys = ON;
@@ -145,6 +145,77 @@ impl Database {
         let _ = conn.execute("ALTER TABLE repositories ADD COLUMN fork_count INTEGER NOT NULL DEFAULT 0", []);
         let _ = conn.execute("ALTER TABLE pull_requests ADD COLUMN author TEXT", []);
         let _ = conn.execute("ALTER TABLE pull_requests ADD COLUMN assignees_json TEXT NOT NULL DEFAULT '[]'", []);
+        // Kanban data has its own additive schema version. Keep it independent
+        // from LOC analysis migrations and from the disposable GitHub cache.
+        let kanban_version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if kanban_version < 1 {
+            let tx = conn.transaction()?;
+            tx.execute_batch(r#"
+                ALTER TABLE pull_requests ADD COLUMN node_id TEXT;
+                ALTER TABLE issues ADD COLUMN node_id TEXT;
+                ALTER TABLE issues ADD COLUMN completion_reason TEXT;
+                CREATE TABLE kanban_item_metadata (
+                    account_scope TEXT NOT NULL,
+                    item_key TEXT NOT NULL,
+                    manual_column TEXT,
+                    priority TEXT NOT NULL DEFAULT 'None',
+                    notes TEXT NOT NULL DEFAULT '',
+                    sort_rank INTEGER NOT NULL DEFAULT 0,
+                    revision INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(account_scope, item_key)
+                );
+                CREATE TABLE kanban_account_repositories (
+                    account_scope TEXT NOT NULL,
+                    github_repository_id TEXT NOT NULL,
+                    PRIMARY KEY(account_scope, github_repository_id)
+                );
+                CREATE TABLE kanban_activity_status (
+                    account_scope TEXT NOT NULL,
+                    github_repository_id TEXT NOT NULL,
+                    last_successful_at TEXT,
+                    partial INTEGER NOT NULL DEFAULT 1,
+                    error TEXT,
+                    PRIMARY KEY(account_scope, github_repository_id)
+                );
+                CREATE TABLE kanban_links_cache (
+                    account_scope TEXT NOT NULL,
+                    item_key TEXT NOT NULL,
+                    links_json TEXT NOT NULL,
+                    partial INTEGER NOT NULL,
+                    message TEXT,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(account_scope, item_key)
+                );
+                INSERT OR IGNORE INTO kanban_account_repositories(account_scope, github_repository_id)
+                    SELECT 'github.com:' || lower(value), github_id FROM repositories
+                    CROSS JOIN app_metadata WHERE key='github_login' AND value<>'';
+                PRAGMA user_version = 1;
+            "#)?;
+            tx.commit()?;
+        }
+        if kanban_version < 2 {
+            let tx = conn.transaction()?;
+            tx.execute_batch(r#"
+                CREATE TABLE IF NOT EXISTS kanban_preferences (
+                    account_scope TEXT PRIMARY KEY,
+                    kind TEXT NOT NULL DEFAULT 'prs',
+                    repository_scope TEXT NOT NULL DEFAULT 'all',
+                    relationship TEXT NOT NULL DEFAULT 'author',
+                    search TEXT NOT NULL DEFAULT '',
+                    show_completed INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL
+                );
+                PRAGMA user_version = 2;
+            "#)?;
+            tx.commit()?;
+        }
+        if kanban_version < 3 {
+            let tx = conn.transaction()?;
+            tx.execute_batch("ALTER TABLE kanban_links_cache ADD COLUMN next_cursor TEXT; PRAGMA user_version = 3;")?;
+            tx.commit()?;
+        }
         let stored_activity_actor_version: Option<String> = conn.query_row("SELECT value FROM app_metadata WHERE key='activity_actor_fields_version'", [], |row| row.get(0)).optional()?;
         if stored_activity_actor_version.as_deref() != Some(ACTIVITY_ACTOR_FIELDS_VERSION) {
             // Actor fields were added after activity was already cached. Reset
@@ -190,7 +261,7 @@ impl Database {
         Ok(())
     }
 
-    fn connect(&self) -> AppResult<Connection> {
+    pub(crate) fn connect(&self) -> AppResult<Connection> {
         let conn = Connection::open(&self.path)?;
         conn.busy_timeout(std::time::Duration::from_secs(10))?;
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;

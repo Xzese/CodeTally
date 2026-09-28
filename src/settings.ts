@@ -3,7 +3,9 @@ import type { ActivityRelationship, AppSettings, MenuBarMetric, UpdateCheckInter
 const METRIC_ORDER: MenuBarMetric[] = ['total_lines', 'source_lines', 'test_lines', 'open_prs', 'open_issues']
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
-  activity_refresh_minutes: 30,
+  kanban_enabled: false,
+  activity_refresh_minutes: 1440,
+  personal_refresh_minutes: 5,
   activity_relationship: 'author',
   update_check_interval: 'daily',
   lines_refresh_minutes: 1440,

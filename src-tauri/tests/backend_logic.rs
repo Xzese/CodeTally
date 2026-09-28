@@ -342,7 +342,8 @@ fn automatic_loc_cadence_runs_at_the_1440_minute_boundary_and_manual_sync_forces
 fn cadence_settings_have_expected_defaults_and_validate_supported_intervals() {
     let defaults = AppSettings::default();
     assert_eq!(defaults.theme_mode, ThemeMode::System);
-    assert_eq!(defaults.activity_refresh_minutes, 30);
+    assert_eq!(defaults.activity_refresh_minutes, 1_440);
+    assert_eq!(defaults.personal_refresh_minutes, 5);
     assert_eq!(defaults.update_check_interval, UpdateCheckInterval::Daily);
     assert_eq!(defaults.lines_refresh_minutes, 1_440);
     assert!(defaults.refresh_lines_on_change);
@@ -366,10 +367,11 @@ fn cadence_settings_have_expected_defaults_and_validate_supported_intervals() {
     };
     assert!(sync::validate_app_settings(&custom_activity).is_ok());
     let custom_lines = AppSettings {
-        lines_refresh_minutes: 15,
+        lines_refresh_minutes: 10_080,
         ..defaults.clone()
     };
     assert!(sync::validate_app_settings(&custom_lines).is_ok());
+    assert!(sync::validate_app_settings(&AppSettings { lines_refresh_minutes: 43_200, ..defaults.clone() }).is_ok());
 
     for (interval, encoded) in [
         (UpdateCheckInterval::Daily, "daily"),
@@ -381,7 +383,7 @@ fn cadence_settings_have_expected_defaults_and_validate_supported_intervals() {
         assert_eq!(serde_json::from_value::<UpdateCheckInterval>(json!(encoded)).unwrap(), interval);
     }
 
-    for invalid_activity in [0, -1, 14, 1_441] {
+    for invalid_activity in [0, -1, 14, 43_201] {
         let settings = AppSettings {
             activity_refresh_minutes: invalid_activity,
             ..defaults.clone()
@@ -391,7 +393,7 @@ fn cadence_settings_have_expected_defaults_and_validate_supported_intervals() {
             "activity interval {invalid_activity} must be rejected"
         );
     }
-    for invalid_lines in [0, -1, 1_441] {
+    for invalid_lines in [0, -1, 43_201] {
         let settings = AppSettings {
             lines_refresh_minutes: invalid_lines,
             ..defaults.clone()
@@ -400,6 +402,9 @@ fn cadence_settings_have_expected_defaults_and_validate_supported_intervals() {
             sync::validate_app_settings(&settings).is_err(),
             "lines interval {invalid_lines} must be rejected"
         );
+    }
+    for invalid_personal in [0, -1, 1_441] {
+        assert!(sync::validate_app_settings(&AppSettings { personal_refresh_minutes: invalid_personal, ..defaults.clone() }).is_err());
     }
 
     for (mode, encoded) in [
@@ -418,6 +423,7 @@ fn cadence_settings_round_trip_through_persisted_app_metadata() {
     let configured = AppSettings {
         theme_mode: ThemeMode::System,
         activity_refresh_minutes: 15,
+        personal_refresh_minutes: 5,
         activity_relationship: codetally_lib::models::ActivityRelationship::Author,
         update_check_interval: UpdateCheckInterval::Weekly,
         lines_refresh_minutes: 60,
@@ -430,6 +436,7 @@ fn cadence_settings_round_trip_through_persisted_app_metadata() {
         include_personal_repositories: false,
         include_company_repositories: true,
         excluded_repository_ids: vec!["repo-excluded".into()],
+        kanban_enabled: false,
     };
     sync::save_app_settings(&database, &configured).expect("save cadence settings");
     database
@@ -439,6 +446,7 @@ fn cadence_settings_round_trip_through_persisted_app_metadata() {
     let reopened = Database::new(&path);
     let loaded = sync::app_settings(&reopened).expect("load cadence settings");
     assert_eq!(loaded.activity_refresh_minutes, 15);
+    assert_eq!(loaded.personal_refresh_minutes, 5);
     assert_eq!(loaded.update_check_interval, UpdateCheckInterval::Weekly);
     assert_eq!(loaded.lines_refresh_minutes, 60);
     assert!(!loaded.refresh_lines_on_change);
@@ -474,15 +482,15 @@ fn custom_cadence_minute_boundaries_persist_and_invalid_values_are_rejected() {
 
     let upper = AppSettings {
         activity_refresh_minutes: 1_440,
-        lines_refresh_minutes: 1_440,
+        lines_refresh_minutes: 43_200,
         ..AppSettings::default()
     };
     sync::save_app_settings(&database, &upper).expect("maximum intervals should persist");
     let loaded_upper = sync::app_settings(&database).expect("load maximum intervals");
     assert_eq!(loaded_upper.activity_refresh_minutes, 1_440);
-    assert_eq!(loaded_upper.lines_refresh_minutes, 1_440);
+    assert_eq!(loaded_upper.lines_refresh_minutes, 43_200);
 
-    for invalid_activity in [0, -1, 14, 1_441] {
+    for invalid_activity in [0, -1, 14, 43_201] {
         let settings = AppSettings {
             activity_refresh_minutes: invalid_activity,
             ..AppSettings::default()
@@ -492,7 +500,7 @@ fn custom_cadence_minute_boundaries_persist_and_invalid_values_are_rejected() {
             "activity interval {invalid_activity} must not persist"
         );
     }
-    for invalid_lines in [0, -1, 1_441] {
+    for invalid_lines in [0, -1, 43_201] {
         let settings = AppSettings {
             lines_refresh_minutes: invalid_lines,
             ..AppSettings::default()
@@ -504,7 +512,7 @@ fn custom_cadence_minute_boundaries_persist_and_invalid_values_are_rejected() {
     }
     let after_rejected_values = sync::app_settings(&database).expect("load settings after rejected values");
     assert_eq!(after_rejected_values.activity_refresh_minutes, 1_440);
-    assert_eq!(after_rejected_values.lines_refresh_minutes, 1_440);
+    assert_eq!(after_rejected_values.lines_refresh_minutes, 43_200);
     remove_database(path);
 }
 
@@ -533,6 +541,11 @@ fn legacy_saved_app_settings_keep_cadence_and_receive_new_defaults() {
     assert!(loaded.include_personal_repositories);
     assert!(loaded.include_company_repositories);
     assert!(loaded.excluded_repository_ids.is_empty());
+    let changed_personal = AppSettings { personal_refresh_minutes: 15, ..loaded };
+    sync::save_app_settings(&database, &changed_personal).expect("save independent personal cadence");
+    let persisted = sync::app_settings(&database).expect("reload independent cadence");
+    assert_eq!(persisted.activity_refresh_minutes, 15);
+    assert_eq!(persisted.personal_refresh_minutes, 15);
     remove_database(path);
 }
 
@@ -585,6 +598,26 @@ fn v3_line_count_default_migration_preserves_an_existing_custom_interval() {
     assert_eq!(loaded.lines_refresh_minutes, 45);
     let reloaded = sync::app_settings(&database).expect("reload custom line-count setting");
     assert_eq!(reloaded.lines_refresh_minutes, 45);
+    remove_database(path);
+}
+
+#[test]
+fn repo_refresh_migration_moves_the_old_default_to_daily_and_preserves_custom_cadences() {
+    let (database, path) = temp_database("repo-refresh-default-migration");
+    database.set_metadata(sync::REFRESH_CADENCE_V2_METADATA_KEY, "1").unwrap();
+    database.set_metadata(sync::REFRESH_CADENCE_V3_METADATA_KEY, "1").unwrap();
+    database.set_metadata(sync::APP_SETTINGS_METADATA_KEY,
+        r#"{"activity_refresh_minutes":30,"lines_refresh_minutes":1440,"refresh_lines_on_change":false,"personal_refresh_minutes":17}"#).unwrap();
+
+    let migrated = sync::app_settings(&database).expect("migrate old Repo Refresh default");
+    assert_eq!(migrated.activity_refresh_minutes, 1440);
+    assert_eq!(migrated.personal_refresh_minutes, 17);
+    assert!(!migrated.refresh_lines_on_change);
+    assert_eq!(sync::app_settings(&database).unwrap().activity_refresh_minutes, 1440);
+
+    let custom = AppSettings { activity_refresh_minutes: 73, ..migrated };
+    sync::save_app_settings(&database, &custom).unwrap();
+    assert_eq!(sync::app_settings(&database).unwrap().activity_refresh_minutes, 73);
     remove_database(path);
 }
 
@@ -721,7 +754,7 @@ fn cadence_settings_control_the_periodic_sweep_boundary() {
     let now: DateTime<Utc> = "2026-09-08T12:00:00Z".parse().expect("cadence instant");
     let repository = completed_repository("cadence-setting-boundary", "setting-boundary", "2026-09-08T10:00:00Z", "2026-09-08T10:00:00Z");
     let settings = AppSettings {
-        lines_refresh_minutes: 60,
+        activity_refresh_minutes: 60,
         ..AppSettings::default()
     };
     let before = sync::decide_loc_sync_with_settings(&repository, now, Some("2026-09-08T11:01:00Z"), false, &settings);

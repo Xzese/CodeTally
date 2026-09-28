@@ -5,6 +5,7 @@ pub mod error;
 pub mod gitops;
 pub mod github;
 pub mod github_sync;
+pub mod kanban;
 pub mod models;
 pub mod native;
 pub mod sync;
@@ -20,6 +21,10 @@ use tauri::Manager;
 const APP_DATABASE_FILE: &str = "codetally.sqlite3";
 const LEGACY_APP_DATA_DIRECTORY: &str = "com.samfaid.github-portfolio";
 const LEGACY_DATABASE_FILE: &str = "github-portfolio.sqlite3";
+
+pub fn screenshot_mode() -> bool {
+    cfg!(debug_assertions) && std::env::var("CODETALLY_SCREENSHOT_MODE").ok().as_deref() == Some("1")
+}
 
 /// Copy data from the pre-CodeTally application directory without replacing
 /// files that already exist in the new location. Keeping this operation
@@ -89,15 +94,21 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let app_data_dir = app.path().app_data_dir().map_err(|error| error.to_string())?;
-            migrate_legacy_app_data(&app_data_dir).map_err(|error| error.to_string())?;
-            std::fs::create_dir_all(&app_data_dir).map_err(|error| error.to_string())?;
-            let cache_dir = app_data_dir.join("repositories");
+            if !screenshot_mode() {
+                migrate_legacy_app_data(&app_data_dir).map_err(|error| error.to_string())?;
+                std::fs::create_dir_all(&app_data_dir).map_err(|error| error.to_string())?;
+            }
+            let db_path = if screenshot_mode() {
+                std::env::var_os("CODETALLY_SCREENSHOT_DATABASE").map(std::path::PathBuf::from).ok_or("Set CODETALLY_SCREENSHOT_DATABASE to an isolated fixture database")?
+            } else {
+                app_data_dir.join(APP_DATABASE_FILE)
+            };
+            let cache_dir = if screenshot_mode() { db_path.parent().ok_or("Fixture database needs a parent directory")?.join("repositories") } else { app_data_dir.join("repositories") };
             std::fs::create_dir_all(&cache_dir).map_err(|error| error.to_string())?;
-            let db_path = app_data_dir.join(APP_DATABASE_FILE);
             let database = db::Database::new(&db_path);
             database.init().map_err(|error| error.to_string())?;
             let settings = sync::app_settings(&database).map_err(|error| error.to_string())?;
-            if let Some(parent) = app_data_dir.parent() {
+            if let Some(parent) = app_data_dir.parent().filter(|_| !screenshot_mode()) {
                 let legacy_cache_dir = parent.join(LEGACY_APP_DATA_DIRECTORY).join("repositories");
                 database
                     .rebase_local_paths(&legacy_cache_dir, &cache_dir)
@@ -126,6 +137,7 @@ pub fn run() {
             commands::discover_repositories,
             commands::sync_github_data,
             commands::sync_activity,
+            commands::sync_work_items,
             commands::get_app_settings,
             commands::get_app_info,
             commands::get_repository_selection,
@@ -140,6 +152,11 @@ pub fn run() {
             commands::get_dashboard,
             commands::get_loc_history,
             commands::get_activity_feed,
+            commands::get_kanban_page,
+            commands::set_kanban_metadata,
+            commands::get_kanban_links,
+            commands::get_kanban_preferences,
+            commands::set_kanban_preferences,
             commands::open_external_url
         ])
         .build(tauri::generate_context!())

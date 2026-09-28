@@ -7,8 +7,10 @@ import type { AppSettings, DashboardData, DependencyStatus, FeedKind, Issue, Loc
 
 const invokeMock = vi.hoisted(() => vi.fn())
 const backgroundSyncListener = vi.hoisted(() => vi.fn())
-const listenMock = vi.hoisted(() => vi.fn(async (_event: string, callback: () => void) => {
-  backgroundSyncListener.mockImplementation(callback)
+const personalSyncListener = vi.hoisted(() => vi.fn())
+const listenMock = vi.hoisted(() => vi.fn(async (event: string, callback: (...args: any[]) => void) => {
+  if (event === 'background-sync-completed') backgroundSyncListener.mockImplementation(callback)
+  if (event === 'background-personal-sync-completed') personalSyncListener.mockImplementation(callback)
   return vi.fn()
 }))
 
@@ -175,6 +177,8 @@ const mixedDashboard: DashboardData = {
 const readyDependencies: DependencyStatus = { gh: true, git: true, tokei: true, gh_authenticated: true, authenticated: true, login: 'sam' }
 const syncOk: SyncResult = { ok: true, message: 'Sync complete', repositories_synced: 2, pull_requests_synced: 2, issues_synced: 2, snapshots_created: 0, errors: [] }
 const defaultAppSettings: AppSettings = {
+  personal_refresh_minutes: 5,
+  kanban_enabled: false,
   activity_refresh_minutes: 30,
   activity_relationship: 'author',
   update_check_interval: 'daily',
@@ -380,6 +384,7 @@ async function expandSettingsSection(user: ReturnType<typeof userEvent.setup>, c
 beforeEach(() => {
   invokeMock.mockReset()
   backgroundSyncListener.mockReset()
+  personalSyncListener.mockReset()
   configureBackend()
 })
 
@@ -392,9 +397,55 @@ afterEach(() => {
 })
 
 describe('dashboard UI', () => {
+  it('refreshes PRs and issues from the sidebar while Kanban is disabled without loading history', async () => {
+    const backend = invokeMock.getMockImplementation()!
+    invokeMock.mockImplementation((command, args) => command === 'sync_work_items' ? Promise.resolve({ ...syncOk, message: 'Activity refresh finished' }) : backend(command, args))
+    const user = await renderDashboard()
+    const refresh = screen.getByRole('button', { name: 'Refresh Tickets' })
+    await waitFor(() => expect(refresh).toBeEnabled())
+    const histories = invokeMock.mock.calls.filter(([command]) => command === 'get_loc_history').length
+    await user.click(refresh)
+    await screen.findByText('Activity refresh finished')
+    expect(invokeMock).toHaveBeenCalledWith('sync_work_items', undefined)
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'get_loc_history')).toHaveLength(histories)
+    expect(screen.queryByRole('button', { name: /Kanban Board/ })).not.toBeInTheDocument()
+  })
+
+  it('opens an opted-in board and removes it immediately when disabled', async () => {
+    configureBackend({ settings: { ...defaultAppSettings, kanban_enabled: true } })
+    const backend = invokeMock.getMockImplementation()!
+    invokeMock.mockImplementation((command, args) => {
+      if (command === 'get_kanban_preferences') return Promise.resolve({ kind: 'prs', repository_scope: 'all', relationship: 'author', search: '', show_completed: false })
+      if (command === 'get_kanban_page') return Promise.resolve({ items: [], total: 0, active_count: 0, completed_count: 0, partial: false, errors: [] })
+      if (command === 'set_kanban_preferences') return Promise.resolve(args.preferences)
+      return backend(command, args)
+    })
+    const user = await renderDashboard()
+    const navigation = screen.getByRole('navigation', { name: 'Main navigation' })
+    await user.click(within(navigation).getByRole('button', { name: /Kanban Board/ }))
+    await screen.findByRole('heading', { name: 'Kanban' })
+    expect(screen.getAllByRole('button', { name: 'Back to dashboard' })).toHaveLength(1)
+    expect(within(navigation).getByRole('button', { name: 'Back to dashboard' })).toBeInTheDocument()
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('get_kanban_page', expect.objectContaining({ kind: 'prs' })))
+    await user.click(screen.getByTitle('Settings'))
+    await user.click(screen.getByRole('switch', { name: 'Enable Kanban board' }))
+    await user.click(screen.getByRole('button', { name: 'Close settings' }))
+    await screen.findByRole('heading', { name: 'Code at a glance' })
+    expect(screen.queryByRole('button', { name: /Kanban Board/ })).not.toBeInTheDocument()
+  })
+
+  it('shows one partial-data notice for all incomplete line metrics', async () => {
+    configureBackend({ cachedDashboard: { ...dashboard, repositories: [{ ...repoAlpha, loc_available: false }, repoBeta] } })
+    await renderDashboard()
+    expect(screen.getAllByText(/Partial data:/)).toHaveLength(1)
+    expect(screen.getByText(/Partial data:/)).toHaveTextContent('line totals and change')
+  })
+
   it('renders summary, LOC chart, repository table, and the permanent activity sidebar', async () => {
     await renderDashboard()
 
+    expect(screen.queryByRole('button', { name: /Kanban Board/ })).not.toBeInTheDocument()
+    expect(invokeMock.mock.calls.some(([command]) => String(command).includes('kanban'))).toBe(false)
     expect(screen.getByText('CodeTally')).toBeInTheDocument()
     expect(screen.getByText('16,000')).toBeInTheDocument()
     expect(screen.getAllByText('Your repositories')).toHaveLength(2)
@@ -442,9 +493,9 @@ describe('dashboard UI', () => {
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('get_dashboard', undefined))
     await user.click(screen.getByRole('button', { name: 'Settings' }))
     const drawer = await screen.findByRole('dialog', { name: 'Settings' })
-    const activityRefresh = within(drawer).getByRole('radiogroup', { name: 'Pull requests and issues' })
-    await user.click(within(activityRefresh).getByRole('radio', { name: '15 minutes' }))
-    await waitFor(() => expect(savedSettings()[savedSettings().length - 1]).toEqual(expect.objectContaining({ activity_refresh_minutes: 15 })))
+    const activityRefresh = within(drawer).getByRole('radiogroup', { name: 'Repo Refresh' })
+    await user.click(within(activityRefresh).getByRole('radio', { name: 'Daily' }))
+    await waitFor(() => expect(savedSettings()[savedSettings().length - 1]).toEqual(expect.objectContaining({ activity_refresh_minutes: 1440 })))
 
     startupHistory.resolve(history)
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Code at a glance' })).toBeInTheDocument())
@@ -884,7 +935,7 @@ describe('dashboard UI', () => {
     }
   })
 
-  it('opens compact sync details by click or hover and closes them with Escape', async () => {
+  it('opens compact sync details by focus or hover and closes them with Escape', async () => {
     const sync = deferred<SyncResult>()
     const inProgress: SyncProgress = {
       running: true,
@@ -904,9 +955,9 @@ describe('dashboard UI', () => {
 
     try {
       await screen.findByRole('heading', { name: 'Code at a glance' })
-      const trigger = await screen.findByRole('button', { name: /Refresh details|Updating|Importing/i })
+      const trigger = await screen.findByLabelText('Last refresh times')
 
-      await user.click(trigger)
+      fireEvent.focus(trigger)
       expect(await screen.findByText(/Repositories 1 \/ 2/)).toBeInTheDocument()
       expect(screen.getByRole('progressbar', { name: 'Repository progress' })).toBeInTheDocument()
 
@@ -922,42 +973,24 @@ describe('dashboard UI', () => {
     }
   })
 
-  it('uses one combined refresh control and reopens sync details after hover re-entry', async () => {
+  it('shows refresh timestamps in the titlebar and keeps Repo Refresh in Settings', async () => {
     const sync = deferred<SyncResult>()
-    configureBackend({ fullSyncPromise: sync.promise })
-    const user = userEvent.setup()
-    render(<App />)
-
+    configureBackend({ fullSyncPromise: sync.promise, cachedDashboard: { ...dashboard, last_lines_refresh_at: null, last_full_refresh_at: null } })
+    const user = await renderDashboard()
     try {
-      await screen.findByRole('heading', { name: 'Code at a glance' })
-      const syncControls = () => screen.getAllByRole('button', { name: /Refresh|Updating|Importing/i })
-
-      await waitFor(() => {
-        expect(invokeMock.mock.calls.some(([command]) => command === 'sync_activity')).toBe(true)
-        expect(syncControls()).toHaveLength(1)
-        expect(syncControls()[0]).toBeEnabled()
-      })
-      expect(syncControls()[0]).toHaveAccessibleName(/Refresh/i)
-
-      await user.click(syncControls()[0])
+      const titlebar = screen.getByRole('banner')
+      expect(within(titlebar).queryByRole('button', { name: /Refresh/ })).not.toBeInTheDocument()
+      expect(within(titlebar).getByText('Line counts')).toBeInTheDocument()
+      expect(within(titlebar).getByText('Everything')).toBeInTheDocument()
+      expect(within(titlebar).getAllByText('Not recorded')).toHaveLength(2)
+      expect(screen.getByText('Personal activity · As of Not recorded')).toBeInTheDocument()
+      await user.click(screen.getByRole('button', { name: 'Settings' }))
+      const force = screen.getByRole('button', { name: 'Force Refresh' })
+      await waitFor(() => expect(force).toBeEnabled())
+      await user.click(force)
       await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('sync_github_data', undefined))
-      await waitFor(() => {
-        expect(syncControls()).toHaveLength(1)
-        expect(syncControls()[0]).toHaveAccessibleName(/Refreshing|Importing/i)
-      })
-
-      const activeControl = syncControls()[0]
-      await user.click(activeControl)
-      expect(await screen.findByRole('dialog', { name: 'Refresh details' })).toBeInTheDocument()
-      await user.keyboard('{Escape}')
-      await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Refresh details' })).not.toBeInTheDocument())
-
-      await user.unhover(activeControl)
-      await user.hover(activeControl)
-      expect(await screen.findByRole('dialog', { name: 'Refresh details' })).toBeInTheDocument()
-    } finally {
-      sync.resolve(syncOk)
-    }
+      expect(screen.getByRole('button', { name: 'Refreshing…' })).toBeDisabled()
+    } finally { sync.resolve(syncOk) }
   })
 
   it('returns to an idle Refresh control after completed automatic sync progress', async () => {
@@ -997,7 +1030,8 @@ describe('dashboard UI', () => {
       await waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === 'get_sync_progress').length).toBeGreaterThanOrEqual(1))
 
       activitySync.resolve(syncOk)
-      const refresh = await screen.findByRole('button', { name: /Refresh dashboard/i })
+      await user.click(screen.getByRole('button', { name: 'Settings' }))
+      const refresh = await screen.findByRole('button', { name: 'Force Refresh' })
       expect(refresh).toBeEnabled()
       expect(invokeMock.mock.calls.filter(([command]) => command === 'get_sync_progress').length).toBeGreaterThanOrEqual(2)
 
@@ -1020,11 +1054,33 @@ describe('dashboard UI', () => {
     expect(invokeMock.mock.calls.some(([command]) => command === 'sync_activity')).toBe(true)
     expect(invokeMock.mock.calls.some(([command]) => command === 'sync_github_data')).toBe(false)
 
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }))
+    await screen.findByRole('button', { name: 'Force Refresh' })
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: /Refresh/i }))
+      fireEvent.click(screen.getByRole('button', { name: 'Force Refresh' }))
       for (let index = 0; index < 8; index += 1) await Promise.resolve()
     })
     expect(invokeMock.mock.calls.some(([command]) => command === 'sync_github_data')).toBe(true)
+  })
+
+  it('reloads personal activity from its native event without dashboard or LOC queries and scopes freshness', async () => {
+    configureBackend({ cachedDashboard: { ...dashboard, last_activity_refresh_at: '2026-09-08T12:00:00Z', last_personal_refresh_at: null } })
+    const user = await renderDashboard()
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh Tickets' })).toBeEnabled())
+    expect(screen.getByText('Personal activity · As of Not recorded')).toBeInTheDocument()
+    const historyReads = invokeMock.mock.calls.filter(([command]) => command === 'get_loc_history').length
+    const dashboardReads = invokeMock.mock.calls.filter(([command]) => command === 'get_dashboard').length
+    const feedReads = invokeMock.mock.calls.filter(([command]) => command === 'get_activity_feed').length
+    await act(async () => { personalSyncListener({ payload: { refreshed_at: '2026-09-28T12:00:00Z', complete: true } }) })
+    await waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === 'get_activity_feed').length).toBeGreaterThan(feedReads))
+    expect(screen.getByText(/Personal activity · As of/)).not.toHaveTextContent('Not recorded')
+    const personalTitle = screen.getByText(/Personal activity · As of/).getAttribute('title')
+    await act(async () => { personalSyncListener({ payload: { refreshed_at: '2026-09-29T12:00:00Z', complete: false } }) })
+    expect(screen.getByText(/Personal activity · As of/)).toHaveAttribute('title', personalTitle)
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'get_loc_history')).toHaveLength(historyReads)
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'get_dashboard')).toHaveLength(dashboardReads)
+    await user.selectOptions(screen.getByRole('combobox', { name: 'My involvement' }), 'everyone')
+    expect(screen.getByText(/All tracked activity · As of/)).not.toHaveAttribute('title', personalTitle)
   })
 
   it('reloads cached dashboard data and activity feeds after native background sync completion', async () => {
@@ -1065,32 +1121,35 @@ describe('dashboard UI', () => {
     await user.click(screen.getByRole('button', { name: 'Settings' }))
     expect(await screen.findByRole('heading', { name: 'Settings' })).toBeInTheDocument()
 
-    const activityRefresh = screen.getByRole('radiogroup', { name: 'Pull requests and issues' })
-    const lineRefresh = screen.getByRole('radiogroup', { name: 'Lines of Code Refresh' })
-    const updateChecks = screen.getByRole('radiogroup', { name: 'App update checks' })
+    const activityRefresh = screen.getByRole('radiogroup', { name: 'Repo Refresh' })
+    expect(screen.queryByRole('radiogroup', { name: 'Lines of Code Refresh' })).not.toBeInTheDocument()
+    const personalRefresh = screen.getByRole('radiogroup', { name: 'Personal PR & issue refresh' })
+    expect(within(personalRefresh).getByRole('radio', { name: '5 minutes' })).toBeChecked()
+    await user.click(within(personalRefresh).getByRole('radio', { name: '15 minutes' }))
+    await waitFor(() => expect(savedSettings().at(-1)).toEqual(expect.objectContaining({ personal_refresh_minutes: 15, activity_refresh_minutes: 30 })))
+    const updateChecks = within(await screen.findByRole('region', { name: 'About CodeTally' })).getByRole('radiogroup', { name: 'Check for Updates' })
     const codeChangeRefresh = screen.getByRole('switch', { name: /Refresh Lines of Code when code changes/i })
     await waitFor(() => {
-      expect(within(activityRefresh).getByRole('radio', { name: '30 minutes' })).toBeChecked()
-      expect(within(lineRefresh).getByRole('radio', { name: '720 minutes' })).toBeChecked()
+      expect(within(activityRefresh).getByRole('radio', { name: 'Current setting: 30 min' })).toBeChecked()
       expect(within(updateChecks).getByRole('radio', { name: 'Daily' })).toBeChecked()
       expect(codeChangeRefresh).not.toBeChecked()
     })
     for (const label of ['Daily', 'Weekly', 'Monthly', 'Never']) {
       expect(within(updateChecks).getByRole('radio', { name: label })).toBeInTheDocument()
     }
-    for (const minutes of [15, 30, 60, 120]) {
-      expect(within(activityRefresh).getByRole('radio', { name: `${minutes} minutes` })).toBeInTheDocument()
+    expect(within(activityRefresh).queryByRole('radio', { name: 'Custom' })).not.toBeInTheDocument()
+    for (const label of ['Hourly', 'Daily', 'Weekly', 'Monthly']) {
+      expect(within(activityRefresh).getByRole('radio', { name: label })).toBeInTheDocument()
     }
-    for (const minutes of [360, 720, 1440]) {
-      expect(within(lineRefresh).getByRole('radio', { name: `${minutes} minutes` })).toBeInTheDocument()
-    }
-    await user.click(screen.getByRole('button', { name: 'About Lines of Code Refresh' }))
+    await user.click(screen.getByRole('button', { name: 'About Repo Refresh' }))
     const linesRefreshHelp = await screen.findByRole('tooltip')
     expect(linesRefreshHelp).toHaveTextContent(/line counts|lines of code/i)
     expect(linesRefreshHelp).not.toHaveTextContent(/pushedAt|commit SHA/i)
 
-    await user.click(within(activityRefresh).getByRole('radio', { name: '15 minutes' }))
-    await user.click(within(lineRefresh).getByRole('radio', { name: '1440 minutes' }))
+    await user.click(within(activityRefresh).getByRole('radio', { name: 'Daily' }))
+    await user.click(within(activityRefresh).getByRole('radio', { name: 'Hourly' }))
+    expect(screen.getByText(/Hourly repository refreshes/)).toHaveTextContent('API limits')
+    await user.click(within(activityRefresh).getByRole('radio', { name: 'Daily' }))
     await user.click(codeChangeRefresh)
     for (const interval of ['daily', 'weekly', 'monthly', 'never'] as const) {
       await user.click(within(updateChecks).getByRole('radio', { name: interval[0].toUpperCase() + interval.slice(1) }))
@@ -1100,8 +1159,8 @@ describe('dashboard UI', () => {
     await waitFor(() => {
       const writes = savedSettings()
       expect(writes[writes.length - 1]).toEqual(expect.objectContaining({
-        activity_refresh_minutes: 15,
-        lines_refresh_minutes: 1440,
+        activity_refresh_minutes: 1440,
+        lines_refresh_minutes: 720,
         refresh_lines_on_change: true,
         update_check_interval: 'never'
       }))
@@ -1115,59 +1174,50 @@ describe('dashboard UI', () => {
 
     await user.click(screen.getByRole('button', { name: 'Settings' }))
     const drawer = await screen.findByRole('dialog', { name: 'Settings' })
-    const activityRefresh = within(drawer).getByRole('radiogroup', { name: 'Pull requests and issues' })
-    const lineRefresh = within(drawer).getByRole('radiogroup', { name: 'Lines of Code Refresh' })
+    const activityRefresh = within(drawer).getByRole('radiogroup', { name: 'Personal PR & issue refresh' })
 
     await user.click(within(activityRefresh).getByRole('radio', { name: 'Custom' }))
-    const activityInput = within(drawer).getByRole('textbox', { name: 'Custom minutes for pull requests and issues' }) as HTMLInputElement
+    const activityInput = within(drawer).getByRole('textbox', { name: 'Custom minutes for personal pr & issue refresh' }) as HTMLInputElement
     expect(activityInput).toHaveAttribute('inputmode', 'numeric')
-    expect(activityInput).toHaveValue('30')
+    expect(activityInput).toHaveValue('5')
 
     await user.clear(activityInput)
     fireEvent.blur(activityInput)
-    expect(await within(drawer).findByRole('alert')).toHaveTextContent('Enter a whole number between 15 and 1440 minutes.')
+    expect(await within(drawer).findByRole('alert')).toHaveTextContent('Enter a whole number between 5 and 1440 minutes.')
     const writesAfterEmpty = savedSettings().length
 
     await user.click(activityInput)
     await user.clear(activityInput)
-    await user.type(activityInput, '14')
+    await user.type(activityInput, '4')
     fireEvent.blur(activityInput)
-    expect(await within(drawer).findByRole('alert')).toHaveTextContent('Enter a whole number between 15 and 1440 minutes.')
+    expect(await within(drawer).findByRole('alert')).toHaveTextContent('Enter a whole number between 5 and 1440 minutes.')
     expect(savedSettings()).toHaveLength(writesAfterEmpty)
 
     await user.click(activityInput)
     await user.clear(activityInput)
     await user.type(activityInput, '1441')
     fireEvent.blur(activityInput)
-    expect(await within(drawer).findByRole('alert')).toHaveTextContent('Enter a whole number between 15 and 1440 minutes.')
+    expect(await within(drawer).findByRole('alert')).toHaveTextContent('Enter a whole number between 5 and 1440 minutes.')
     expect(savedSettings()).toHaveLength(writesAfterEmpty)
 
     await user.click(activityInput)
     await user.clear(activityInput)
     await user.type(activityInput, '15')
     fireEvent.blur(activityInput)
-    await waitFor(() => expect(savedSettings()[savedSettings().length - 1]).toEqual(expect.objectContaining({ activity_refresh_minutes: 15 })))
+    await waitFor(() => expect(savedSettings()[savedSettings().length - 1]).toEqual(expect.objectContaining({ personal_refresh_minutes: 15 })))
 
     await user.click(within(activityRefresh).getByRole('radio', { name: 'Custom' }))
-    const customActivityInput = within(drawer).getByRole('textbox', { name: 'Custom minutes for pull requests and issues' }) as HTMLInputElement
+    const customActivityInput = within(drawer).getByRole('textbox', { name: 'Custom minutes for personal pr & issue refresh' }) as HTMLInputElement
     await user.clear(customActivityInput)
     await user.type(customActivityInput, '17')
     fireEvent.blur(customActivityInput)
-    await waitFor(() => expect(savedSettings()[savedSettings().length - 1]).toEqual(expect.objectContaining({ activity_refresh_minutes: 17 })))
-
-    await user.click(within(lineRefresh).getByRole('radio', { name: 'Custom' }))
-    const lineInput = within(drawer).getByRole('textbox', { name: 'Custom minutes for lines of code refresh' }) as HTMLInputElement
-    await user.clear(lineInput)
-    await user.type(lineInput, '90')
-    await user.keyboard('{Enter}')
-    await waitFor(() => expect(savedSettings()[savedSettings().length - 1]).toEqual(expect.objectContaining({ lines_refresh_minutes: 90 })))
+    await waitFor(() => expect(savedSettings()[savedSettings().length - 1]).toEqual(expect.objectContaining({ personal_refresh_minutes: 17 })))
 
     await user.click(within(drawer).getByRole('button', { name: 'Close settings' }))
     await user.click(screen.getByRole('button', { name: 'Settings' }))
     const reopened = await screen.findByRole('dialog', { name: 'Settings' })
-    expect(within(within(reopened).getByRole('radiogroup', { name: 'Pull requests and issues' })).getByRole('radio', { name: 'Custom' })).toBeChecked()
-    expect(within(reopened).getByRole('textbox', { name: 'Custom minutes for pull requests and issues' })).toHaveValue('17')
-    expect(within(reopened).getByRole('textbox', { name: 'Custom minutes for lines of code refresh' })).toHaveValue('90')
+    expect(within(within(reopened).getByRole('radiogroup', { name: 'Personal PR & issue refresh' })).getByRole('radio', { name: 'Custom' })).toBeChecked()
+    expect(within(reopened).getByRole('textbox', { name: 'Custom minutes for personal pr & issue refresh' })).toHaveValue('17')
   })
 
   it('serializes rapid setting changes and persists the latest intended value', async () => {
@@ -1189,12 +1239,12 @@ describe('dashboard UI', () => {
     const user = await renderDashboard()
 
     await user.click(screen.getByRole('button', { name: 'Settings' }))
-    const activityRefresh = screen.getByRole('radiogroup', { name: 'Pull requests and issues' })
-    await user.click(within(activityRefresh).getByRole('radio', { name: '15 minutes' }))
+    const activityRefresh = screen.getByRole('radiogroup', { name: 'Repo Refresh' })
+    await user.click(within(activityRefresh).getByRole('radio', { name: 'Daily' }))
     await waitFor(() => expect(writes).toHaveLength(1))
 
-    await user.click(within(activityRefresh).getByRole('radio', { name: '60 minutes' }))
-    expect(within(activityRefresh).getByRole('radio', { name: '60 minutes' })).toBeChecked()
+    await user.click(within(activityRefresh).getByRole('radio', { name: 'Hourly' }))
+    expect(within(activityRefresh).getByRole('radio', { name: 'Hourly' })).toBeChecked()
     expect(writes).toHaveLength(1)
 
     firstWrite.resolve(writes[0].settings)
@@ -1619,7 +1669,7 @@ describe('dashboard UI', () => {
         for (let index = 0; index < 12; index += 1) await Promise.resolve()
       })
       expect(screen.getByRole('heading', { name: 'Code at a glance' })).toBeInTheDocument()
-      fireEvent.click(screen.getByRole('button', { name: /Refresh details|Updating|Importing/i }))
+      fireEvent.focus(screen.getByLabelText('Last refresh times'))
       const firstProgress = screen.getByText(/Repositories 1 \/ 7/)
       const firstPanel = firstProgress.closest('.sync-progress-panel')
       expect(firstPanel).not.toBeNull()
@@ -1702,7 +1752,7 @@ describe('dashboard UI', () => {
       expect(await screen.findByRole('heading', { name: 'Code at a glance' })).toBeInTheDocument()
       expect(screen.getByRole('heading', { name: 'Total Lines' })).toBeInTheDocument()
       expect(screen.queryByText('No LOC history for this range')).not.toBeInTheDocument()
-      await user.click(screen.getByRole('button', { name: /Refresh details|Updating|Importing/i }))
+      fireEvent.focus(screen.getByLabelText('Last refresh times'))
       expect(screen.getByText(/Repositories 1 \/ 2/)).toBeInTheDocument()
 
       const dashboardCalls = invokeMock.mock.calls.filter(([command]) => command === 'get_dashboard')

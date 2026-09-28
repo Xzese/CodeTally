@@ -94,13 +94,17 @@ export const normalizeMetrics = (data: DashboardData): NormalizedMetrics => {
   }
 }
 
-export const normalizeDashboard = (data: DashboardData): Required<Pick<DashboardData, 'repositories' | 'loc_history' | 'pull_requests' | 'issues'>> & { metrics: NormalizedMetrics; last_sync_at?: string | null; errors: string[]; user?: DashboardData['user'] } => ({
+export const normalizeDashboard = (data: DashboardData): Required<Pick<DashboardData, 'repositories' | 'loc_history' | 'pull_requests' | 'issues'>> & { metrics: NormalizedMetrics; last_sync_at?: string | null; last_lines_refresh_at?: string | null; last_full_refresh_at?: string | null; last_activity_refresh_at?: string | null; last_personal_refresh_at?: string | null; errors: string[]; user?: DashboardData['user'] } => ({
   repositories: data.repositories ?? data.repos ?? [],
   loc_history: data.loc_history ?? data.locHistory ?? data.history ?? [],
   pull_requests: data.pull_requests ?? data.pullRequests ?? [],
   issues: data.issues ?? [],
   metrics: normalizeMetrics(data),
   last_sync_at: data.last_sync_at ?? data.lastSyncAt,
+  last_lines_refresh_at: data.last_lines_refresh_at,
+  last_full_refresh_at: data.last_full_refresh_at,
+  last_activity_refresh_at: data.last_activity_refresh_at,
+  last_personal_refresh_at: data.last_personal_refresh_at,
   errors: data.errors ?? [],
   user: data.user
 })

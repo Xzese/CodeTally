@@ -214,45 +214,70 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         .build(app)?;
     let app = app.clone();
     let state = app.state::<AppState>().inner().clone();
+    if crate::screenshot_mode() {
+        refresh_menu(&app, &state);
+        return Ok(());
+    }
     std::thread::spawn(move || {
         refresh_menu(&app, &state);
-        let mut last_full_attempt = Instant::now();
+        let mut last_repo_attempt = Instant::now();
+        let mut last_personal_attempt = Instant::now();
         loop {
             std::thread::sleep(Duration::from_secs(5));
             let db = state.database();
             let Ok(settings) = sync::app_settings(&db) else { continue; };
-            let full_due = last_full_attempt.elapsed() >= Duration::from_secs(settings.activity_refresh_minutes.max(1) as u64 * 60);
-            if !full_due { continue; }
+            let repo_due = refresh_due(last_repo_attempt.elapsed(), settings.activity_refresh_minutes);
+            let personal_due = refresh_due(last_personal_attempt.elapsed(), settings.personal_refresh_minutes);
+            if !repo_due && !personal_due { continue; }
             // Never queue an automatic refresh behind an active manual job.
             let Ok(_job) = state.job_lock.try_lock() else {
-                last_full_attempt = Instant::now();
                 continue;
             };
             // First import remains an explicit user action.
             if !db.repositories().is_ok_and(|repos| !repos.is_empty()) {
-                last_full_attempt = Instant::now();
+                last_repo_attempt = Instant::now();
+                last_personal_attempt = Instant::now();
                 continue;
             }
-            // Existing activity sync owns discovery cadence, LOC sweeps and persisted rate-limit pauses.
-            if let Err(error) = sync::sync_activity(&state) {
+            // One scheduler coordinates the broad repository pass and the fast
+            // personal search; neither runs behind a manual job.
+            let outcome = if repo_due { sync::sync_activity(&state) } else { sync::sync_personal_work_items(&state) };
+            if let Err(error) = &outcome {
                 let mut progress = state.progress();
                 progress.running = false;
                 progress.error = Some(error.to_string());
                 state.set_progress(progress);
             }
-            last_full_attempt = Instant::now();
+            if repo_due {
+                last_repo_attempt = Instant::now();
+                if outcome.as_ref().is_ok_and(|result| result.ok) { last_personal_attempt = Instant::now(); }
+            } else {
+                last_personal_attempt = Instant::now();
+            }
             drop(_job);
             refresh_menu(&app, &state);
-            let _ = app.emit("background-sync-completed", ());
+            if repo_due {
+                let _ = app.emit("background-sync-completed", ());
+            } else {
+                let _ = app.emit("background-personal-sync-completed", serde_json::json!({
+                    "refreshed_at": db.metadata(sync::LAST_PERSONAL_REFRESH_METADATA_KEY).ok().flatten(),
+                    "complete": outcome.as_ref().is_ok_and(|result| result.ok),
+                }));
+            }
         }
     });
     Ok(())
 }
 
+fn refresh_due(elapsed: Duration, interval_minutes: i64) -> bool {
+    elapsed >= Duration::from_secs(interval_minutes.max(1) as u64 * 60)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::hides_dock_icon;
+    use super::{hides_dock_icon, refresh_due};
     use crate::models::AppSettings;
+    use std::time::Duration;
 
     #[test]
     fn dock_icon_is_hidden_only_when_background_and_menu_bar_are_enabled() {
@@ -265,5 +290,14 @@ mod tests {
         settings.run_in_background = true;
         settings.show_menu_bar = false;
         assert!(!hides_dock_icon(&settings));
+    }
+
+    #[test]
+    fn personal_search_and_repo_refresh_have_independent_due_times() {
+        let settings = AppSettings::default();
+        assert!(!refresh_due(Duration::from_secs(4 * 60), settings.personal_refresh_minutes));
+        assert!(refresh_due(Duration::from_secs(5 * 60), settings.personal_refresh_minutes));
+        assert!(!refresh_due(Duration::from_secs(5 * 60), settings.activity_refresh_minutes));
+        assert!(refresh_due(Duration::from_secs(24 * 60 * 60), settings.activity_refresh_minutes));
     }
 }

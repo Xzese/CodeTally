@@ -149,6 +149,7 @@ pub fn sync_activity(db: &Database, repo: &Repository) -> AppResult<(i64, i64, b
 pub(crate) fn sync_activity_reporting(db: &Database, repo: &Repository, counts: &mut [i64; 2]) -> AppResult<(i64, i64, bool)> {
     let mut complete = true;
     let cycle_started = Utc::now().to_rfc3339();
+    let board_enabled = crate::sync::app_settings(db)?.kanban_enabled;
     for open in [true, false] {
         let mut sibling_page = None;
         for (index, feed) in ["pullRequests", "issues"].iter().enumerate() {
@@ -156,12 +157,12 @@ pub(crate) fn sync_activity_reporting(db: &Database, repo: &Repository, counts: 
             let mut cursor: Cursor = db.metadata(&key)?.map(|s| serde_json::from_str(&s)).transpose()?.unwrap_or_default();
             let started = cursor.started_at.clone().unwrap_or_else(|| cycle_started.clone());
             let cutoff = cursor.completed_at.as_deref().and_then(|s| s.parse::<DateTime<Utc>>().ok()).map(|t| t - Duration::minutes(5)).unwrap_or_else(|| started.parse::<DateTime<Utc>>().unwrap_or_else(|_| Utc::now()) - Duration::days(30));
-            let fields = if index == 0 { "number title state isDraft createdAt updatedAt mergedAt closedAt url author{login} assignees(first:100){nodes{login}} additions deletions changedFiles commits(last:1){nodes{commit{statusCheckRollup{state}}}}" } else { "number title state createdAt updatedAt closedAt url author{login} labels(first:100){nodes{name}} assignees(first:100){nodes{login}}" };
+            let fields = if index == 0 { format!("{}number title state isDraft createdAt updatedAt mergedAt closedAt url author{{login}} assignees(first:100){{nodes{{login}}}} additions deletions changedFiles commits(last:1){{nodes{{commit{{statusCheckRollup{{state}}}}}}}}", if board_enabled { "id " } else { "" }) } else { format!("{}number title state createdAt updatedAt closedAt url author{{login}} labels(first:100){{nodes{{name}}}} assignees(first:100){{nodes{{login}}}}", if board_enabled { "id stateReason " } else { "" }) };
             let states = if open { "[OPEN]" } else if index == 0 { "[CLOSED,MERGED]" } else { "[CLOSED]" };
             for page in 0..5 {
                 let sibling = if index == 0 && page == 0 {
                     let states = if open { "[OPEN]" } else { "[CLOSED]" };
-                    format!("sibling:issues(first:100,states:{states},orderBy:{{field:UPDATED_AT,direction:DESC}}){{nodes{{number title state createdAt updatedAt closedAt url author{{login}} labels(first:100){{nodes{{name}}}} assignees(first:100){{nodes{{login}}}}}} pageInfo{{hasNextPage endCursor}}}}")
+                    format!("sibling:issues(first:100,states:{states},orderBy:{{field:UPDATED_AT,direction:DESC}}){{nodes{{{}{}}} pageInfo{{hasNextPage endCursor}}}}", if board_enabled { "id stateReason " } else { "" }, "number title state createdAt updatedAt closedAt url author{login} labels(first:100){nodes{name}} assignees(first:100){nodes{login}}")
                 } else { String::new() };
                 let query = format!("query($owner:String!,$name:String!,$after:String){{rateLimit{{cost remaining resetAt}} repository(owner:$owner,name:$name){{openPRs:pullRequests(states:OPEN){{totalCount}} openIssues:issues(states:OPEN){{totalCount}} {sibling} items:{feed}(first:100,after:$after,states:{states},orderBy:{{field:UPDATED_AT,direction:DESC}}){{nodes{{{fields}}} pageInfo{{hasNextPage endCursor}}}}}}}}");
                 let response = if index == 1 && page == 0 && cursor.after.is_none() && sibling_page.is_some() {
@@ -192,6 +193,8 @@ pub(crate) fn sync_activity_reporting(db: &Database, repo: &Repository, counts: 
                     let updated = node["updatedAt"].as_str().and_then(|s| s.parse::<DateTime<Utc>>().ok()).ok_or_else(|| AppError::InvalidArgument("GitHub activity missing updatedAt".into()))?;
                     if !open && updated < cutoff { reached_cutoff = true; continue; }
                     let mut node = node.clone();
+                    let node_id = node["id"].as_str().map(str::to_owned);
+                    let completion_reason = node["stateReason"].as_str().map(str::to_owned);
                     if index == 0 {
                         let ci = node.pointer("/commits/nodes/0/commit/statusCheckRollup/state").and_then(Value::as_str).map(|s| match s { "ERROR" | "FAILURE" => "failure".into(), "EXPECTED" | "PENDING" => "pending".into(), _ => s.to_ascii_lowercase() });
                         if node.get("assignees").and_then(|value| value.get("nodes")).is_none_or(Value::is_null) {
@@ -201,11 +204,13 @@ pub(crate) fn sync_activity_reporting(db: &Database, repo: &Repository, counts: 
                         }
                         let v: crate::models::GithubPullRequestJson = serde_json::from_value(node)?;
                         db.upsert_pull_request(&PullRequest { repository_id:repo.id, repository:repo.name_with_owner.clone(), number:v.number,title:v.title,state:v.state,is_draft:v.is_draft,created_at:v.created_at,updated_at:v.updated_at,merged_at:v.merged_at,closed_at:v.closed_at,url:v.url,author:v.author.map(|a| a.login),assignees:v.assignees.into_iter().map(|a| a.login).collect(),additions:v.additions.unwrap_or(0),deletions:v.deletions.unwrap_or(0),changed_files:v.changed_files.unwrap_or(0),ci_state:ci })?;
+                        if board_enabled && node_id.is_some() { crate::kanban::store_identity(db,repo.id,&repo.github_id,"pr",v.number,node_id.as_deref(),None)?; }
                     } else {
                         node["labels"] = node["labels"]["nodes"].clone();
                         node["assignees"] = node["assignees"]["nodes"].clone();
                         let v: crate::models::GithubIssueJson = serde_json::from_value(node)?;
                         db.upsert_issue(&Issue {repository_id:repo.id,repository:repo.name_with_owner.clone(),number:v.number,title:v.title,state:v.state,created_at:v.created_at,updated_at:v.updated_at,closed_at:v.closed_at,url:v.url,author:v.author.map(|a|a.login),labels:v.labels.into_iter().map(|a|a.name).collect(),assignees:v.assignees.into_iter().map(|a|a.login).collect()})?;
+                        if board_enabled && node_id.is_some() { crate::kanban::store_identity(db,repo.id,&repo.github_id,"issue",v.number,node_id.as_deref(),completion_reason.as_deref())?; }
                     }
                     counts[index] += 1;
                 }
@@ -226,4 +231,267 @@ pub(crate) fn sync_activity_reporting(db: &Database, repo: &Repository, counts: 
         }
     }
     Ok((counts[0], counts[1], complete))
+}
+
+#[derive(Debug, Default)]
+pub struct PersonalSyncReport {
+    pub pull_requests: i64,
+    pub issues: i64,
+    pub complete: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PersonalSearchWindow {
+    // Inclusive, whole-second bounds match GitHub's documented search precision.
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct PersonalCursor {
+    #[serde(flatten)]
+    progress: Cursor,
+    // A stack: the oldest remaining window is last and owns progress.after.
+    #[serde(default)]
+    windows: Vec<PersonalSearchWindow>,
+    #[serde(default)]
+    saturated: bool,
+}
+
+/// Search is an additive discovery pass: repository feeds remain authoritative
+/// for open totals. Each stream checkpoints only after its page is durable.
+pub fn sync_personal_activity(db: &Database, login: &str, selected: &[Repository]) -> AppResult<PersonalSyncReport> {
+    use std::collections::{HashMap, HashSet};
+    let login = login.trim().to_ascii_lowercase();
+    if login.is_empty() || !login.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-') {
+        return Err(AppError::InvalidArgument("Invalid GitHub login for personal search".into()));
+    }
+    let repositories: HashMap<_, _> = selected.iter().filter(|r| !r.github_id.is_empty()).map(|r| (r.github_id.as_str(), r)).collect();
+    let mut report = PersonalSyncReport { complete: true, ..PersonalSyncReport::default() };
+    if repositories.is_empty() { return Ok(report); }
+    // Selection changes restart the window; otherwise newly selected repositories
+    // could lose matches behind the previous selection's checkpoint.
+    let mut scope: Vec<_> = repositories.keys().copied().collect();
+    scope.sort_unstable();
+    let scope = serde_json::to_string(&scope)?;
+    let board_enabled = crate::sync::app_settings(db)?.kanban_enabled;
+    let cycle_started = Utc::now().to_rfc3339();
+    let mut seen = HashSet::new();
+    reconcile_personal_assignments(db, &login, selected, &scope, board_enabled, &mut report, &mut seen)?;
+    let mut saturated_streams = Vec::new();
+    for role in ["author", "assignee"] {
+        for kind in ["pr", "issue"] {
+            let key = format!("github_personal_v1:github.com:{login}:{scope}:{role}:{kind}");
+            let mut cursor: PersonalCursor = db.metadata(&key)?.map(|s| serde_json::from_str(&s)).transpose()?.unwrap_or_default();
+            if cursor.saturated {
+                saturated_streams.push(format!("{role}:{login} is:{kind}"));
+                report.complete = false;
+                continue;
+            }
+            let started = cursor.progress.started_at.clone().unwrap_or_else(|| cycle_started.clone());
+            if cursor.windows.is_empty() {
+                let end = started.parse::<DateTime<Utc>>().map_err(|_| AppError::InvalidArgument("Invalid personal search start time".into()))?;
+                let cutoff = cursor.progress.completed_at.as_deref().and_then(|s| s.parse::<DateTime<Utc>>().ok())
+                    .map(|t| t - Duration::minutes(5)).unwrap_or_else(|| end - Duration::days(30));
+                // Old cursors had no upper bound. Replay their window rather than
+                // reuse an opaque cursor against a changed search expression.
+                cursor.progress.after = None;
+                cursor.progress.started_at = Some(started.clone());
+                cursor.windows.push(PersonalSearchWindow {
+                    start: DateTime::from_timestamp(cutoff.timestamp(), 0).expect("valid cutoff"),
+                    end: DateTime::from_timestamp(end.timestamp(), 0).expect("valid start time"),
+                });
+                db.set_metadata(&key, &serde_json::to_string(&cursor)?)?;
+            }
+            let fields = personal_item_fields(kind);
+            let query = format!("query($search:String!,$after:String){{rateLimit{{cost remaining resetAt}} search(type:ISSUE,query:$search,first:100,after:$after){{issueCount nodes{{{fields}}} pageInfo{{hasNextPage endCursor}}}}}}");
+            // Split probes consume this budget too, so an oversized result set
+            // cannot turn one sync into an unbounded number of API requests.
+            for _ in 0..5 {
+                let window = cursor.windows.last().expect("pending search window");
+                let search = format!("is:{kind} {role}:{login} updated:{}..{} sort:updated-asc", window.start.format("%Y-%m-%dT%H:%M:%SZ"), window.end.format("%Y-%m-%dT%H:%M:%SZ"));
+                let response = match graphql(db, &query, json!({"search":search,"after":cursor.progress.after})) {
+                    Ok(response) => response,
+                    Err(error) => {
+                        if cursor.progress.after.is_some() && !matches!(error, AppError::RateLimited { .. }) && error.to_string().to_ascii_lowercase().contains("cursor") {
+                            cursor.progress.after = None;
+                            db.set_metadata(&key, &serde_json::to_string(&cursor)?)?;
+                        }
+                        return Err(error);
+                    }
+                };
+                let result = &response["data"]["search"];
+                let total = result["issueCount"].as_u64().ok_or_else(|| AppError::InvalidArgument("GitHub response missing personal search count".into()))?;
+                if total > 1000 {
+                    let window = cursor.windows.pop().expect("pending search window");
+                    cursor.progress.after = None;
+                    let span = (window.end - window.start).num_seconds();
+                    if span <= 0 {
+                        cursor.windows.push(window);
+                        cursor.saturated = true;
+                        db.set_metadata(&key, &serde_json::to_string(&cursor)?)?;
+                        saturated_streams.push(format!("{role}:{login} is:{kind}"));
+                        report.complete = false;
+                        break;
+                    }
+                    let middle = window.start + Duration::seconds(span / 2);
+                    cursor.windows.push(PersonalSearchWindow { start: middle + Duration::seconds(1), end: window.end });
+                    cursor.windows.push(PersonalSearchWindow { start: window.start, end: middle });
+                    db.set_metadata(&key, &serde_json::to_string(&cursor)?)?;
+                    continue;
+                }
+                let nodes = result["nodes"].as_array().ok_or_else(|| AppError::InvalidArgument("GitHub response missing personal search nodes".into()))?;
+                let more = result["pageInfo"]["hasNextPage"].as_bool().ok_or_else(|| AppError::InvalidArgument("GitHub response missing personal search pageInfo".into()))?;
+                for node in nodes {
+                    let Some(repo) = node["repository"]["id"].as_str().and_then(|id| repositories.get(id)) else { continue; };
+                    let number = node["number"].as_i64().ok_or_else(|| AppError::InvalidArgument("GitHub search item missing number".into()))?;
+                    let identity = node["id"].as_str().map(str::to_owned).unwrap_or_else(|| format!("{}:{kind}:{number}", repo.github_id));
+                    store_personal_item(db, repo, kind, node.clone(), board_enabled)?;
+                    if seen.insert(identity) {
+                        if kind == "pr" { report.pull_requests += 1; } else { report.issues += 1; }
+                    }
+                }
+                if !more {
+                    cursor.windows.pop();
+                    cursor.progress.after = None;
+                    if cursor.windows.is_empty() {
+                        cursor.progress = Cursor { completed_at: Some(started.clone()), ..Cursor::default() };
+                    }
+                    db.set_metadata(&key, &serde_json::to_string(&cursor)?)?;
+                    if cursor.windows.is_empty() { break; }
+                    continue;
+                }
+                let after = result["pageInfo"]["endCursor"].as_str().filter(|s| !s.is_empty()).ok_or_else(|| AppError::InvalidArgument("GitHub search missing endCursor".into()))?;
+                if cursor.progress.after.as_deref() == Some(after) { return Err(AppError::InvalidArgument("GitHub search cursor did not advance".into())); }
+                cursor.progress.after = Some(after.into());
+                db.set_metadata(&key, &serde_json::to_string(&cursor)?)?;
+            }
+            if !cursor.windows.is_empty() { report.complete = false; }
+        }
+    }
+    if !saturated_streams.is_empty() {
+        return Err(AppError::InvalidArgument(format!("Personal GitHub search exceeds 1,000 results in a single second for {}; blocked checkpoints are retained and automatic retries are stopped for those streams; other streams were refreshed", saturated_streams.join(", "))));
+    }
+    Ok(report)
+}
+
+fn personal_item_fields(kind: &str) -> &'static str {
+    if kind == "pr" {
+        "... on PullRequest { id repository{id} number title state isDraft createdAt updatedAt mergedAt closedAt url author{login} assignees(first:100){nodes{login}} additions deletions changedFiles commits(last:1){nodes{commit{statusCheckRollup{state}}}} }"
+    } else {
+        "... on Issue { id repository{id} number title state stateReason createdAt updatedAt closedAt url author{login} labels(first:100){nodes{name}} assignees(first:100){nodes{login}} }"
+    }
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct AssignmentCursor {
+    after: Option<(i64, String, i64)>,
+    // Sticky for the entire sweep, including later batches that all succeed.
+    #[serde(default)]
+    unresolved: bool,
+}
+
+/// Search stops returning assigned-only work after unassignment. Read a bounded
+/// slice of the existing cache directly so those old relationships can be removed.
+/// The stable key cursor makes every candidate reachable over successive cycles,
+/// even when newer assignments keep arriving. No missing/null node erases cache.
+fn reconcile_personal_assignments(
+    db: &Database,
+    login: &str,
+    selected: &[Repository],
+    scope: &str,
+    board_enabled: bool,
+    report: &mut PersonalSyncReport,
+    seen: &mut std::collections::HashSet<String>,
+) -> AppResult<()> {
+    const BATCH_SIZE: usize = 50;
+    let key = format!("github_personal_assignments_v1:github.com:{login}:{scope}");
+    let saved: Value = db.metadata(&key)?.map(|s| serde_json::from_str(&s)).transpose()?.unwrap_or(Value::Null);
+    let mut cursor: AssignmentCursor = if saved.is_object() {
+        serde_json::from_value(saved)?
+    } else {
+        // Older versions stored only the key tuple (or null between sweeps).
+        AssignmentCursor { after: serde_json::from_value(saved)?, ..AssignmentCursor::default() }
+    };
+    // A fresh sweep retries previously unresolved rows. Clear the flag locally;
+    // durable state changes only after this batch has been processed successfully.
+    if cursor.after.is_none() { cursor.unresolved = false; }
+    let after = &cursor.after;
+    let repository_ids: Vec<_> = selected.iter().map(|r| r.id).collect();
+    let candidates: Vec<(i64, String, i64)> = {
+        let conn = db.connect()?;
+        let mut stmt = conn.prepare(
+            "SELECT repository_id,kind,number FROM (
+                SELECT repository_id,'pr' kind,number,author,assignees_json FROM pull_requests
+                UNION ALL SELECT repository_id,'issue' kind,number,author,assignees_json FROM issues
+             ) WHERE repository_id IN (SELECT value FROM json_each(?1))
+               AND lower(coalesce(author,''))<>?2
+               AND EXISTS (SELECT 1 FROM json_each(assignees_json) WHERE lower(value)=?2)
+               AND (?3 IS NULL OR (repository_id,kind,number)>(?3,?4,?5))
+             ORDER BY repository_id,kind,number LIMIT ?6"
+        )?;
+        let rows = stmt.query_map(rusqlite::params![serde_json::to_string(&repository_ids)?, login,
+            after.as_ref().map(|a| a.0), after.as_ref().map(|a| a.1.as_str()), after.as_ref().map(|a| a.2), BATCH_SIZE as i64 + 1],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        rows.collect::<Result<_, _>>()?
+    };
+    let more = candidates.len() > BATCH_SIZE;
+    let candidates = &candidates[..candidates.len().min(BATCH_SIZE)];
+    if candidates.is_empty() {
+        cursor.after = None;
+        if cursor.unresolved { report.complete = false; }
+        db.set_metadata(&key, &serde_json::to_string(&cursor)?)?;
+        return Ok(());
+    }
+    let mut definitions = Vec::new();
+    let mut selections = Vec::new();
+    let mut variables = serde_json::Map::new();
+    for (index, (repository_id, kind, number)) in candidates.iter().enumerate() {
+        let repo = selected.iter().find(|repo| repo.id == *repository_id).expect("selected repository");
+        definitions.push(format!("$repo{index}:ID!,$number{index}:Int!"));
+        let field = if kind == "pr" { "pullRequest" } else { "issue" };
+        let fields = personal_item_fields(kind);
+        selections.push(format!("r{index}:node(id:$repo{index}){{... on Repository{{item:{field}(number:$number{index}){{{fields}}}}}}}"));
+        variables.insert(format!("repo{index}"), json!(repo.github_id));
+        variables.insert(format!("number{index}"), json!(number));
+    }
+    let query = format!("query({}){{rateLimit{{cost remaining resetAt}} {}}}", definitions.join(","), selections.join(" "));
+    let response = graphql(db, &query, Value::Object(variables))?;
+    for (index, (repository_id, kind, number)) in candidates.iter().enumerate() {
+        let repo = selected.iter().find(|repo| repo.id == *repository_id).expect("selected repository");
+        let node = &response["data"][format!("r{index}")]["item"];
+        if node["repository"]["id"].as_str() != Some(repo.github_id.as_str()) || node["number"].as_i64() != Some(*number) {
+            cursor.unresolved = true;
+            continue;
+        }
+        store_personal_item(db, repo, kind, node.clone(), board_enabled)?;
+        let identity = node["id"].as_str().map(str::to_owned).unwrap_or_else(|| format!("{}:{kind}:{number}", repo.github_id));
+        if seen.insert(identity) {
+            if kind == "pr" { report.pull_requests += 1; } else { report.issues += 1; }
+        }
+    }
+    cursor.after = if more { candidates.last().cloned() } else { None };
+    db.set_metadata(&key, &serde_json::to_string(&cursor)?)?;
+    if more || cursor.unresolved { report.complete = false; }
+    Ok(())
+}
+
+fn store_personal_item(db: &Database, repo: &Repository, kind: &str, mut node: Value, board_enabled: bool) -> AppResult<()> {
+    let node_id = node["id"].as_str().map(str::to_owned);
+    let completion_reason = node["stateReason"].as_str().map(str::to_owned);
+    node["assignees"] = node["assignees"]["nodes"].as_array().cloned().map(Value::Array).unwrap_or_else(|| json!([]));
+    let number;
+    if kind == "pr" {
+        let ci = node.pointer("/commits/nodes/0/commit/statusCheckRollup/state").and_then(Value::as_str).map(|s| match s { "ERROR" | "FAILURE" => "failure".into(), "EXPECTED" | "PENDING" => "pending".into(), _ => s.to_ascii_lowercase() });
+        let v: crate::models::GithubPullRequestJson = serde_json::from_value(node)?;
+        number = v.number;
+        db.upsert_pull_request(&PullRequest { repository_id:repo.id, repository:repo.name_with_owner.clone(), number:v.number,title:v.title,state:v.state,is_draft:v.is_draft,created_at:v.created_at,updated_at:v.updated_at,merged_at:v.merged_at,closed_at:v.closed_at,url:v.url,author:v.author.map(|a| a.login),assignees:v.assignees.into_iter().map(|a| a.login).collect(),additions:v.additions.unwrap_or(0),deletions:v.deletions.unwrap_or(0),changed_files:v.changed_files.unwrap_or(0),ci_state:ci })?;
+    } else {
+        node["labels"] = node["labels"]["nodes"].as_array().cloned().map(Value::Array).unwrap_or_else(|| json!([]));
+        let v: crate::models::GithubIssueJson = serde_json::from_value(node)?;
+        number = v.number;
+        db.upsert_issue(&Issue {repository_id:repo.id,repository:repo.name_with_owner.clone(),number:v.number,title:v.title,state:v.state,created_at:v.created_at,updated_at:v.updated_at,closed_at:v.closed_at,url:v.url,author:v.author.map(|a|a.login),labels:v.labels.into_iter().map(|a|a.name).collect(),assignees:v.assignees.into_iter().map(|a|a.login).collect()})?;
+    }
+    if board_enabled && node_id.is_some() { crate::kanban::store_identity(db,repo.id,&repo.github_id,kind,number,node_id.as_deref(),completion_reason.as_deref())?; }
+    Ok(())
 }

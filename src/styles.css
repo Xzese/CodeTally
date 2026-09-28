@@ -113,7 +113,7 @@ button { color: inherit; }
 .summary-item:first-child { padding-left: 0; border-left: 0; }
 .summary-label { color: var(--muted); font-size: 10px; display: flex; align-items: center; gap: 5px; white-space: nowrap; margin-bottom: 8px; }
 .summary-label svg { color: var(--subtle); }
-.summary-partial { color: var(--yellow); font-size: 9px; font-style: normal; font-weight: 650; margin-left: 3px; }
+.summary-partial-notice { display: flex; align-items: center; gap: 7px; color: var(--yellow); font-size: 11px; line-height: 1.5; margin: -8px 0 18px; }
 .summary-item strong { display: block; color: #edf4ff; font-size: 18px; letter-spacing: -.035em; font-variant-numeric: tabular-nums; }
 .light .summary-item strong { color: #17253a; }
 .summary-item strong.positive, .positive { color: var(--green) !important; }
@@ -448,9 +448,9 @@ td:first-child { padding-left: 18px; }
 .settings-preview-value > img, .settings-preview-value > svg { width: 17px; height: 17px; flex: 0 0 17px; object-fit: contain; }
 .settings-preview-caption { display: block; }
 .settings-drawer .drawer-heading .settings-status { margin-top: 8px; }
-.settings-metric-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.settings-metric-options { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; }
 .settings-metric-option { display: flex; position: relative; align-items: center; gap: 10px; min-width: 0; min-height: 62px; padding: 11px 12px; border: 1px solid var(--control-border); border-radius: 9px; color: var(--subtle); background: var(--control-fill); cursor: pointer; transition: border-color .12s, background .12s; }
-.settings-metric-option:first-child { grid-column: 1 / -1; }
+
 .settings-metric-option:hover { border-color: color-mix(in srgb, var(--blue) 55%, var(--control-border)); background: color-mix(in srgb, var(--blue) 8%, var(--panel)); }
 .settings-metric-option.selected, .settings-metric-option:has(input:checked) { border-color: var(--blue); background: color-mix(in srgb, var(--blue) 13%, var(--panel)); color: var(--control-text); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--blue) 12%, transparent); }
 .settings-metric-copy { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 5px; }
@@ -588,3 +588,69 @@ td:first-child { padding-left: 18px; }
 .activity-scope-group svg { transform: rotate(-90deg); flex-shrink: 0; }
 .tracked-repository-group.open .activity-scope-group svg { transform: rotate(0deg); }
 .activity-scope-repos { padding: 0 0 5px 16px; }
+
+/* Local work board */
+.kanban-shell { display: block; overflow: auto; }
+.kanban-main { padding: 26px; min-width: 0; width: 100%; }
+.kanban-launch { width: 100%; margin-bottom: 20px; }
+.kanban-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin: 20px 0; }
+.kanban-filters label, .kanban-detail label { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--subtle); }
+.kanban-filters input:not([type=checkbox]), .kanban-filters select, .kanban-move select, .kanban-detail select, .kanban-detail textarea { background: var(--panel); color: inherit; border: 1px solid var(--line); border-radius: 6px; padding: 8px; font: inherit; }
+.kanban-summary { display: flex; gap: 20px; align-items: center; font-size: 12px; color: var(--muted); margin: 16px 0; }
+.kanban-columns { display: flex; gap: 14px; overflow-x: auto; padding-bottom: 20px; align-items: flex-start; }
+.kanban-column { flex: 1 0 210px; min-width: 210px; min-height: 300px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2); }
+.kanban-column h2 { font-size: 13px; display: flex; justify-content: space-between; margin: 0 0 14px; }
+.kanban-column h2 small { color: var(--muted); }
+.kanban-card { padding: 12px; margin-bottom: 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; display: flex; flex-direction: column; gap: 10px; }
+.kanban-card[draggable=true] { cursor: grab; }
+.kanban-card-title { padding: 0; background: transparent; border: 0; text-align: left; font-size: 13px; font-weight: 600; line-height: 1.45; cursor: pointer; }
+.kanban-card-title:hover { color: var(--blue); }
+.kanban-badges { display: flex; gap: 6px; flex-wrap: wrap; font-size: 10px; color: var(--subtle); }
+.kanban-badges span { padding: 3px 5px; border: 1px solid var(--line); border-radius: 4px; }
+.kanban-move { font-size: 11px; color: var(--muted); display: flex; align-items: center; gap: 8px; }
+.kanban-move select { min-width: 0; flex: 1; }
+.kanban-notice { padding: 16px; border: 1px solid var(--line); border-radius: 8px; font-size: 13px; color: var(--subtle); margin-bottom: 16px; }
+.kanban-detail-backdrop { position: fixed; inset: 0; z-index: 60; background: rgba(0,0,0,.45); display: flex; justify-content: flex-end; }
+.kanban-detail { width: min(520px, 100vw); overflow-y: auto; background: var(--panel); padding: 26px; border-left: 1px solid var(--line); }
+.kanban-detail h2 { line-height: 1.4; font-size: 20px; }
+.kanban-detail p { line-height: 1.5; color: var(--subtle); font-size: 13px; }
+.kanban-detail label { align-items: stretch; flex-direction: column; margin: 20px 0; }
+.kanban-detail textarea { resize: vertical; min-height: 140px; }
+.kanban-link { display: block; text-align: left; background: transparent; border: 0; color: var(--blue); padding: 10px 0; cursor: pointer; }
+.kanban-order { display: flex; gap: 8px; }
+.kanban-order button { border: 0; background: transparent; color: var(--muted); padding: 2px 0; font-size: 10px; cursor: pointer; }
+.kanban-order button:disabled { opacity: .4; cursor: default; }
+.activity-refresh-error { color: var(--red); font-size: 12px; line-height: 1.5; }
+
+.topbar-navigation { display: flex; align-items: center; gap: 24px; }
+.topbar-nav-button { border: 0; border-radius: 6px; background: transparent; color: var(--subtle); padding: 8px 10px; font-size: 12px; cursor: pointer; }
+.topbar-nav-button:hover, .topbar-nav-button[aria-current=page] { color: var(--blue); background: var(--panel-hover); }
+.topbar-nav-button:focus-visible, .app-shell .refresh-button:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
+.app-shell .button.refresh-button { appearance: none; border: 0; box-shadow: none; background: #087ff5; }
+.app-shell.light .button.refresh-button { background: #0877e5; }
+.app-shell .button.refresh-button:hover:not(:disabled) { background: #168afd; }
+.sidebar-heading { gap: 12px; align-items: center; }
+.sidebar-heading .eyebrow { display: flex; gap: 8px; align-items: center; }
+.sidebar-heading .feed-count { font-size: 9px; padding: 1px 5px; }
+.activity-refresh-button { max-width: 128px; flex: 0 0 auto; line-height: 1.35; text-align: center; }
+.refresh-timestamps { display: flex; flex-direction: column; gap: 4px; padding-left: 14px; border-left: 1px solid var(--line); font-size: 10px; color: var(--muted); }
+.refresh-timestamps > span { display: flex; justify-content: space-between; gap: 14px; }
+.refresh-timestamps strong { font-weight: 500; color: var(--subtle); }
+.refresh-timestamps .refresh-running { justify-content: flex-start; gap: 5px; color: var(--blue); }
+.activity-as-of { margin: -7px 0 13px; font-size: 10px; color: var(--muted); }
+.feed-tabs button { display: inline-flex; justify-content: center; align-items: center; gap: 6px; }
+.settings-interval-warning { font-size: 11px; color: var(--yellow); max-width: 300px; line-height: 1.5; margin: 8px 0 0; }
+.app-shell .kanban-filters select, .app-shell .kanban-move select, .app-shell .kanban-detail select { background: var(--control-surface); border-color: var(--control-border); color: var(--control-text); box-shadow: var(--control-shadow); border-radius: 6px; font-size: 12px; min-height: 30px; }
+.app-shell .kanban-filters select option, .app-shell .kanban-move select option, .app-shell .kanban-detail select option { background: var(--panel); color: var(--control-text); }
+.app-shell .topbar-nav-button { min-height: 32px; }
+
+.settings-metric-option { flex-direction: column; justify-content: center; gap: 7px; padding: 12px 4px; }
+.settings-metric-copy { align-items: center; text-align: center; gap: 4px; }
+.settings-metric-copy strong { font-size: 10px; white-space: nowrap; }
+.settings-metric-copy small { font-size: 9px; }
+.settings-metric-indicator { position: absolute; top: 3px; right: 3px; width: 12px; height: 12px; }
+.settings-update-checks { align-items: center; }
+.settings-update-checks .settings-update-interval-options { grid-template-columns: 1fr; }
+.settings-update-checks .settings-update-interval-options label { justify-content: flex-start; padding-left: 12px; }
+@media (max-width: 480px) { .settings-update-checks { align-items: stretch; } }
+@media (max-width: 420px) { .settings-metric-options { grid-template-columns: repeat(5, minmax(76px, 1fr)); overflow-x: auto; padding-bottom: 5px; } }

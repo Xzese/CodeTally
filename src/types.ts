@@ -184,6 +184,10 @@ export interface DashboardTotals extends DashboardMetrics {
 }
 
 export interface DashboardData {
+  last_lines_refresh_at?: string | null
+  last_full_refresh_at?: string | null
+  last_activity_refresh_at?: string | null
+  last_personal_refresh_at?: string | null
   user?: GitHubUser | null
   repositories?: Repository[]
   repos?: Repository[]
@@ -239,6 +243,7 @@ export type ThemeMode = 'light' | 'dark' | 'system'
 export type UpdateCheckInterval = 'daily' | 'weekly' | 'monthly' | 'never'
 
 export interface AppSettings {
+  kanban_enabled: boolean
   theme_mode: ThemeMode
   activity_relationship: ActivityRelationship
   update_check_interval: UpdateCheckInterval
@@ -246,6 +251,7 @@ export interface AppSettings {
   menu_bar_metric: MenuBarMetric
   menu_bar_metrics: MenuBarMetric[]
   show_menu_bar: boolean
+  personal_refresh_minutes: number
   activity_refresh_minutes: number
   lines_refresh_minutes: number
   refresh_lines_on_change: boolean
@@ -273,4 +279,54 @@ export interface FeedRequest {
   repositoryIds?: number[]
   state?: string
   relationship?: ActivityRelationship
+}
+
+export type KanbanKind = 'prs' | 'issues' | 'both'
+export interface KanbanMetadata {
+  item_key: string
+  manual_column: string | null
+  priority: string
+  notes: string
+  sort_rank: number
+  revision: number
+}
+export interface KanbanItem extends KanbanMetadata {
+  unavailable?: boolean
+  kind: 'pr' | 'issue'
+  repository_id: number
+  repository: string
+  number: number
+  title: string
+  state: string
+  is_draft: boolean
+  updated_at: string
+  url: string
+  author: string | null
+  assignees: string[]
+  ci_state: string | null
+  closed_at: string | null
+  merged_at: string | null
+  completion_reason: string | null
+}
+export interface KanbanPage {
+  items: KanbanItem[]
+  total: number
+  active_count: number
+  completed_count: number
+  last_successful_refresh?: string | null
+  partial: boolean
+  errors: string[]
+}
+export interface KanbanLinks {
+  items: Array<{ item_key?: string; kind: string; repository: string; number: number; title: string; url: string; state?: string }>
+  partial: boolean
+  message?: string | null
+}
+
+export interface KanbanPreferences {
+  kind: KanbanKind
+  repository_scope: string
+  relationship: ActivityRelationship
+  search: string
+  show_completed: boolean
 }

@@ -155,6 +155,10 @@ pub struct Dashboard {
     pub totals: DashboardTotals,
     pub history: Vec<HistoryPoint>,
     pub last_sync_at: Option<String>,
+    pub last_lines_refresh_at: Option<String>,
+    pub last_full_refresh_at: Option<String>,
+    pub last_activity_refresh_at: Option<String>,
+    pub last_personal_refresh_at: Option<String>,
     pub errors: Vec<String>,
 }
 
@@ -245,6 +249,8 @@ pub struct AppSettings {
     #[serde(default)]
     pub theme_mode: ThemeMode,
     pub activity_refresh_minutes: i64,
+    #[serde(default = "default_personal_refresh_minutes")]
+    pub personal_refresh_minutes: i64,
     #[serde(default)]
     pub activity_relationship: ActivityRelationship,
     #[serde(default)]
@@ -267,6 +273,8 @@ pub struct AppSettings {
     pub include_company_repositories: bool,
     #[serde(default)]
     pub excluded_repository_ids: Vec<String>,
+    #[serde(default)]
+    pub kanban_enabled: bool,
 }
 
 impl AppSettings {
@@ -285,12 +293,14 @@ impl AppSettings {
 }
 
 fn default_run_in_background() -> bool { true }
+fn default_personal_refresh_minutes() -> i64 { 5 }
 
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
             theme_mode: ThemeMode::default(),
-            activity_refresh_minutes: 30,
+            activity_refresh_minutes: 1440,
+            personal_refresh_minutes: default_personal_refresh_minutes(),
             activity_relationship: ActivityRelationship::default(),
             update_check_interval: UpdateCheckInterval::default(),
             lines_refresh_minutes: 1440,
@@ -303,7 +313,87 @@ impl Default for AppSettings {
             include_personal_repositories: true,
             include_company_repositories: true,
             excluded_repository_ids: Vec::new(),
+            kanban_enabled: false,
         }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct KanbanItem {
+    pub item_key: String,
+    pub kind: String,
+    pub repository_id: i64,
+    pub repository: String,
+    pub number: i64,
+    pub title: String,
+    pub state: String,
+    pub is_draft: bool,
+    pub updated_at: String,
+    pub url: String,
+    pub author: Option<String>,
+    pub assignees: Vec<String>,
+    pub ci_state: Option<String>,
+    pub closed_at: Option<String>,
+    pub merged_at: Option<String>,
+    pub completion_reason: Option<String>,
+    pub unavailable: bool,
+    pub manual_column: Option<String>,
+    pub priority: String,
+    pub notes: String,
+    pub sort_rank: i64,
+    pub revision: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct KanbanPage {
+    pub items: Vec<KanbanItem>,
+    pub total: i64,
+    pub active_count: i64,
+    pub completed_count: i64,
+    pub last_successful_refresh: Option<String>,
+    pub partial: bool,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct KanbanMetadata {
+    pub item_key: String,
+    pub manual_column: Option<String>,
+    pub priority: String,
+    pub notes: String,
+    pub sort_rank: i64,
+    pub revision: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct KanbanLink {
+    pub kind: String,
+    pub repository: String,
+    pub number: i64,
+    pub title: String,
+    pub state: String,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct KanbanLinks {
+    pub items: Vec<KanbanLink>,
+    pub partial: bool,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KanbanPreferences {
+    pub kind: String,
+    pub repository_scope: String,
+    pub relationship: String,
+    pub search: String,
+    pub show_completed: bool,
+}
+
+impl Default for KanbanPreferences {
+    fn default() -> Self {
+        Self { kind:"both".into(),repository_scope:"all".into(),relationship:"author".into(),search:String::new(),show_completed:false }
     }
 }
 
