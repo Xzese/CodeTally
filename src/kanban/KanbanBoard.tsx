@@ -20,6 +20,7 @@ export default function KanbanBoard({ repositories, login, relationship: default
   const [refreshing, setRefreshing] = useState(false)
   const [ordering, setOrdering] = useState(false)
   const [draggedKey, setDraggedKey] = useState<string | null>(null)
+  const [dragPosition, setDragPosition] = useState<{ left: number; top: number } | null>(null)
   const [dropTarget, setDropTarget] = useState<{ column: Column; index: number } | null>(null)
   const dropTargetRef = useRef<{ column: Column; index: number } | null>(null)
   const suppressClickRef = useRef<string | null>(null)
@@ -79,7 +80,7 @@ export default function KanbanBoard({ repositories, login, relationship: default
     } finally { pendingRef.current.delete(item.item_key); setPending(new Set(pendingRef.current)) }
   }
   const cardsIn = (column: Column) => (page?.items ?? []).filter((row) => columnFor(row) === column).sort((a, b) => a.sort_rank - b.sort_rank || b.updated_at.localeCompare(a.updated_at) || a.item_key.localeCompare(b.item_key))
-  const clearDrag = () => { dropTargetRef.current = null; setDraggedKey(null); setDropTarget(null) }
+  const clearDrag = () => { dropTargetRef.current = null; setDraggedKey(null); setDragPosition(null); setDropTarget(null) }
   const place = async (item: KanbanItem, column: Column, index: number) => {
     if (column === 'Done' || columnFor(item) === 'Done') { setBlockedMove(item); return }
     const currentColumn = columnFor(item)
@@ -134,12 +135,14 @@ export default function KanbanBoard({ repositories, login, relationship: default
       window.removeEventListener('pointerup', end)
       window.removeEventListener('pointercancel', cancel)
       document.body.style.userSelect = originalUserSelect
+      document.body.classList.remove('kanban-drag-active')
     }
     const move = (pointer: PointerEvent) => {
       if (pointer.pointerId !== pointerId) return
       if (!started && Math.hypot(pointer.clientX - clientX, pointer.clientY - clientY) < 6) return
-      if (!started) { started = true; document.body.style.userSelect = 'none'; setDraggedKey(item.item_key) }
+      if (!started) { started = true; document.body.style.userSelect = 'none'; document.body.classList.add('kanban-drag-active'); setDraggedKey(item.item_key) }
       pointer.preventDefault()
+      setDragPosition({ left: Math.max(8, Math.min(pointer.clientX + 16, window.innerWidth - 276)), top: Math.max(8, Math.min(pointer.clientY - 24, window.innerHeight - 124)) })
       updateDropTarget(item, pointer.clientX, pointer.clientY)
     }
     const end = (pointer: PointerEvent) => {
@@ -169,6 +172,7 @@ export default function KanbanBoard({ repositories, login, relationship: default
     finally { await load(); if (failure) setError(failure); setRefreshing(false) }
   }
   const item = page?.items.find((row) => row.item_key === selected)
+  const draggedItem = page?.items.find((row) => row.item_key === draggedKey)
   return <main className="kanban-main">
     <div className="page-heading"><div><p className="eyebrow">Local workflow</p><h1>Kanban</h1></div><button className="button primary" disabled={refreshing || loading || pending.size > 0} onClick={() => void refresh()}>{refreshing ? 'Refreshing…' : 'Refresh Tickets'}</button></div>
     <p className="small-note">Last successful activity refresh: {relativeTime(page?.last_successful_refresh)} · Refresh fetches PRs and issues from all tracked repositories. Local changes do not update GitHub.</p>
@@ -208,6 +212,7 @@ export default function KanbanBoard({ repositories, login, relationship: default
         </article>)}
       </section>
     })}</div>
+    {draggedItem && dragPosition && <div className="kanban-drag-preview" aria-hidden="true" style={dragPosition}><span className="kanban-drag-preview-source">{draggedItem.kind === 'pr' ? <GitPullRequest size={13} /> : <CircleDot size={13} />}{draggedItem.kind === 'pr' ? 'PR' : 'Issue'} · {draggedItem.repository} #{draggedItem.number}</span><strong>{draggedItem.title}</strong></div>}
     {page && page.items.length < page.total && <button className="button secondary" disabled={loading} onClick={() => void load(true, page.items.length)}>Load more ({page.items.length} of {page.total})</button>}
     {item && <ItemDetails key={item.item_key} item={item} saving={pending.has(item.item_key)} onClose={() => setSelected(null)} onSave={(changes) => void save(item, changes)} />}
   </main>
