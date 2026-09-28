@@ -689,10 +689,9 @@ function App() {
   return (
     <div className={lightMode ? 'app-shell light' : 'app-shell'}>
       <header className="topbar">
-        <div className={`topbar-navigation${appSettings.kanban_enabled && !isSetup ? ' with-kanban' : ''}`}><div className="brand-mark"><img src={codetallyMark} alt="" aria-hidden="true" /><span>CodeTally</span></div>{appSettings.kanban_enabled && !isSetup && <nav aria-label="Main navigation"><button className="button secondary topbar-nav-button" onClick={screen === 'kanban' ? backToDashboard : () => setScreen('kanban')}>{screen === 'kanban' ? 'Back to dashboard' : 'Kanban Board'}</button></nav>}</div>
+        <div className={`topbar-navigation${appSettings.kanban_enabled && !isSetup ? ' with-kanban' : ''}`}><div className="brand-mark"><img src={codetallyMark} alt="" aria-hidden="true" /><span>CodeTally</span></div>{appSettings.kanban_enabled && !isSetup && <nav aria-label="Main navigation"><button className="button secondary topbar-nav-button" aria-label={screen === 'kanban' ? 'Back to dashboard' : 'Kanban Board'} onClick={screen === 'kanban' ? backToDashboard : () => setScreen('kanban')}><span className="topbar-nav-label-full">{screen === 'kanban' ? 'Back to dashboard' : 'Kanban Board'}</span><span className="topbar-nav-label-compact" aria-hidden="true">{screen === 'kanban' ? 'Dashboard' : 'Kanban'}</span></button></nav>}</div>
         <div className="topbar-status">
           <div className="topbar-account">
-            {login ? <span className="identity"><span className="status-dot" /><span className="identity-name">{login}</span></span> : <span className="muted">Local desktop dashboard</span>}
             <button className="icon-button" title="Settings" onClick={() => setSettingsOpen(true)}><Settings size={17} /></button>
           </div>
           <UpdateStatus updateCheckInterval={settingsLoaded ? appSettings.update_check_interval : null} />
@@ -750,7 +749,7 @@ function App() {
         </div>
       )}
 
-      {settingsOpen && <SettingsDrawer onForceRefresh={() => void refreshData()} onRefreshAllTickets={() => void refreshAllTickets()} refreshing={syncActive} settings={appSettings} loaded={settingsLoaded} metrics={dashboard.metrics} saving={settingsSaving} error={settingsError} onChange={changeSettings} onRetry={() => void (settingsLoaded ? flushSettings() : loadSettings())} onClose={() => setSettingsOpen(false)} />}
+      {settingsOpen && <SettingsDrawer login={login} onForceRefresh={() => void refreshData()} onRefreshAllTickets={() => void refreshAllTickets()} refreshing={syncActive} settings={appSettings} loaded={settingsLoaded} metrics={dashboard.metrics} saving={settingsSaving} error={settingsError} onChange={changeSettings} onRetry={() => void (settingsLoaded ? flushSettings() : loadSettings())} onClose={() => setSettingsOpen(false)} />}
     </div>
   )
 }

@@ -143,9 +143,9 @@ function OpenAtLoginControl() {
   </>
 }
 
-type Props = { settings: AppSettings; loaded: boolean; metrics: NormalizedMetrics; saving: boolean; error: string | null; onChange: (update: (current: AppSettings) => AppSettings) => void; onRetry: () => void; onClose: () => void; onForceRefresh: () => void; onRefreshAllTickets: () => void; refreshing: boolean }
+type Props = { login: string; settings: AppSettings; loaded: boolean; metrics: NormalizedMetrics; saving: boolean; error: string | null; onChange: (update: (current: AppSettings) => AppSettings) => void; onRetry: () => void; onClose: () => void; onForceRefresh: () => void; onRefreshAllTickets: () => void; refreshing: boolean }
 
-export default function SettingsDrawer({ settings, loaded, metrics, saving, error, onChange, onRetry, onClose, onForceRefresh, onRefreshAllTickets, refreshing }: Props) {
+export default function SettingsDrawer({ login, settings, loaded, metrics, saving, error, onChange, onRetry, onClose, onForceRefresh, onRefreshAllTickets, refreshing }: Props) {
   const [hoverMetric, setHoverMetric] = useState<MenuBarMetric | null>(null)
   const [focusMetric, setFocusMetric] = useState<MenuBarMetric | null>(null)
   const drawerRef = useRef<HTMLElement>(null)
@@ -381,6 +381,7 @@ export default function SettingsDrawer({ settings, loaded, metrics, saving, erro
     </section>
     </fieldset>
     <section className="settings-section" id="settings-storage"><SectionHeading title="Storage & connection" help="Your repository data, history, and preferences are stored on this Mac. CodeTally uses your existing GitHub sign-in and never stores your token." />
+      <div className="settings-row"><span className="settings-row-label">GitHub account</span><span className="settings-account-name">{login || 'Not signed in'}</span></div>
       <span className="setting-label">Data location</span>{databaseLocationLoading ? <div className="setting-value setting-status" role="status"><LoaderCircle size={14} className="spin" /> Loading location…</div> : databaseLocationError ? <div className="settings-error storage-error" role="alert"><AlertCircle size={14} /><span>{databaseLocationError}</span><button className="button secondary compact" type="button" onClick={() => void loadDatabaseLocation()}>Retry</button></div> : databaseLocation ? <a className="setting-value storage-link" href={databaseLocation} title="Show data location in Finder" onClick={handleRevealDatabase}><HardDrive size={14} /><span>{databaseLocation}</span></a> : <div className="setting-value setting-status"><AlertCircle size={14} /> Data location unavailable</div>}{databaseRevealError && <div className="settings-error storage-error" role="alert"><AlertCircle size={14} /><span>{databaseRevealError}</span></div>}
       <details className="settings-connection"><summary>GitHub connection details</summary><div className="github-command-list"><div className="github-command"><code>gh --version</code><span>Check that GitHub CLI is installed.</span></div><div className="github-command"><code>gh auth status</code><span>Check your GitHub sign-in.</span></div><div className="github-command"><code>gh api user --jq .login</code><span>Show the GitHub account in use.</span></div></div></details>
     </section>

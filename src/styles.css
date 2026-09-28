@@ -36,9 +36,6 @@ button { color: inherit; }
 .update-actions { display: flex; align-items: stretch; flex-wrap: nowrap; gap: 7px; }
 .update-actions .button { min-height: 38px; margin: 0; white-space: nowrap; }
 .update-panel .update-error { color: var(--red); }
-.identity { color: var(--subtle); display: flex; align-items: center; gap: 7px; min-width: 0; font-weight: 550; }
-.identity-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.status-dot { display: inline-block; width: 7px; height: 7px; border-radius: 100%; background: var(--green); box-shadow: 0 0 0 3px rgba(82, 210, 177, .12); }
 .sync-popover-wrap { position: relative; display: inline-flex; align-items: center; }
 .sync-status { display: inline-flex; gap: 6px; align-items: center; border: 0; border-left: 1px solid var(--line); padding: 4px 0 4px 14px; color: var(--muted); background: transparent; font-size: inherit; }
 .sync-status-trigger { cursor: pointer; }
@@ -468,6 +465,7 @@ td:first-child { padding-left: 18px; }
 .settings-metric-copy small { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 .settings-metric-indicator { display: flex; align-items: center; justify-content: center; flex: 0 0 17px; width: 17px; height: 17px; border-radius: 50%; color: var(--blue); }
 .settings-connection { margin-top: 20px; }
+.settings-account-name { min-width: 0; overflow-wrap: anywhere; color: var(--subtle); text-align: right; }
 .settings-connection summary { color: var(--control-text); cursor: pointer; font-size: 12px; font-weight: 500; }
 .settings-connection .github-command-list { margin-top: 14px; }
 .settings-section .repository-groups { margin-top: 10px; }
@@ -638,6 +636,7 @@ body.kanban-drag-active, body.kanban-drag-active * { cursor: grabbing !important
 
 .topbar-navigation { display: flex; align-items: center; gap: 24px; }
 .topbar-nav-button { border: 0; border-radius: 6px; background: transparent; color: var(--subtle); padding: 8px 10px; font-size: 12px; white-space: nowrap; cursor: pointer; }
+.topbar-nav-label-compact { display: none; }
 .topbar-nav-button:hover, .topbar-nav-button[aria-current=page] { color: var(--blue); background: var(--panel-hover); }
 .topbar-nav-button:focus-visible, .app-shell .refresh-button:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
 .feed-toggle:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
@@ -676,8 +675,6 @@ body.kanban-drag-active, body.kanban-drag-active * { cursor: grabbing !important
   .topbar-account { order: 1; margin-left: auto; }
   .topbar-refresh-group { order: 2; }
   .feed-toggle { order: 3; }
-  .topbar-account .identity-name { max-width: 90px; }
-  .topbar-account .muted { display: block; max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .update-status { order: 4; margin-left: auto; }
   .content-shell:not(.kanban-shell) { position: relative; display: block; }
   .activity-sidebar { position: absolute; z-index: 4; top: 0; right: 0; width: min(380px, calc(100% - 32px)); box-shadow: -14px 0 38px rgba(0, 0, 0, .28); transform: translateX(105%); transition: transform .28s ease, opacity .2s ease, visibility 0s .28s; }
@@ -690,9 +687,9 @@ body.kanban-drag-active, body.kanban-drag-active * { cursor: grabbing !important
 }
 @media (max-width: 620px) {
   .topbar { padding: 8px 14px; gap: 3px 6px; }
+  .topbar-navigation { gap: 8px; }
   .topbar-refresh-group { gap: 6px; }
   .topbar-account { gap: 8px; }
-  .topbar-account .identity-name { max-width: 70px; }
   .refresh-timestamps { padding-left: 8px; gap: 4px; font-size: 9px; }
   .refresh-timestamp-list > span { gap: 5px; }
   .refresh-label-full { display: none; }
@@ -708,15 +705,17 @@ body.kanban-drag-active, body.kanban-drag-active * { cursor: grabbing !important
   .brand-mark span { display: none; }
 }
 @media (max-width: 500px) {
+  .topbar-nav-label-full { display: none; }
+  .topbar-nav-label-compact { display: inline; }
+}
+@media (max-width: 340px) {
   .feed-toggle { order: 2; }
   .topbar-refresh-group { order: 3; flex-basis: 100%; justify-content: flex-end; }
 }
-@media (max-width: 400px) {
+@media (max-width: 374px) {
   .topbar-navigation.with-kanban .brand-mark { display: none; }
   .topbar-navigation .topbar-nav-button { padding-inline: 6px; font-size: 11px; }
   .topbar-account { gap: 4px; }
-  .topbar-account .identity-name { max-width: 44px; }
-  .topbar-account .muted { max-width: 60px; }
   .topbar-account .icon-button { width: 26px; height: 26px; }
   .feed-toggle { width: 26px; height: 26px; }
   .main-column, .kanban-main { padding: 14px 12px 32px; }

@@ -429,7 +429,9 @@ describe('dashboard UI', () => {
     const backend = invokeMock.getMockImplementation()!
     invokeMock.mockImplementation((command, args) => command === 'sync_work_items' ? Promise.resolve({ ...syncOk, message: 'All tracked tickets refreshed' }) : backend(command, args))
     const user = await renderDashboard()
+    expect(within(screen.getByRole('banner')).queryByText('sam')).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Settings' }))
+    expect(within(screen.getByRole('dialog', { name: 'Settings' })).getByText('sam')).toBeInTheDocument()
     const historyReads = invokeMock.mock.calls.filter(([command]) => command === 'get_loc_history').length
     await user.click(screen.getByRole('button', { name: 'Refresh All Tickets' }))
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('sync_work_items', undefined))
