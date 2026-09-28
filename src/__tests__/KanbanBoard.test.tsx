@@ -8,7 +8,7 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke }))
 const item: KanbanItem = { item_key: 'pr:1:2', kind: 'pr', repository_id: 1, repository: 'sam/repo', number: 2, title: 'Review changes', state: 'open', is_draft: false, updated_at: '2026-09-27', url: 'https://github.com/sam/repo/pull/2', author: 'sam', assignees: [], ci_state: 'SUCCESS', closed_at: null, merged_at: null, completion_reason: null, manual_column: null, priority: 'None', notes: '', sort_rank: 0, revision: 0 }
 const preferences = { kind: 'both', repository_id: null, repository_scope: 'all', relationship: 'author', search: '', show_completed: false }
 const page = { items: [item], total: 1, active_count: 1, completed_count: 7, partial: false, errors: [] }
-const props = { repositories: [{ id: 1, name: 'repo', owner: 'sam' }], login: 'sam', relationship: 'author' as const, onRelationship: vi.fn(), onBack: vi.fn(), revision: 0 }
+const props = { repositories: [{ id: 1, name: 'repo', owner: 'sam' }], login: 'sam', relationship: 'author' as const, onRelationship: vi.fn(), onBack: vi.fn(), onActivityRefreshed: vi.fn(), revision: 0 }
 const hitTest = vi.fn()
 class TestPointerEvent extends MouseEvent {
   readonly pointerId: number
@@ -40,12 +40,15 @@ describe('local Kanban workflow', () => {
     await screen.findByText('Work 999')
     expect(invoke).toHaveBeenCalledWith('get_kanban_page', expect.objectContaining({ kind: 'both', show_completed: false, limit: 200 }))
     expect(screen.queryByRole('region', { name: 'Done column' })).not.toBeInTheDocument()
-    expect(screen.getByText('1 cached active · 7 cached completed')).toBeInTheDocument()
+    expect(screen.getByText('1 active · 7 completed')).toBeInTheDocument()
+    expect(screen.queryByText(/Signed in as/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Last successful activity refresh/)).not.toBeInTheDocument()
     fireEvent.click(screen.getByText('Load more (1000 of 1001)'))
     await screen.findByText('Beyond initial thousand')
     expect(invoke).toHaveBeenCalledWith('get_kanban_page', expect.objectContaining({ offset: 1000 }))
     fireEvent.click(screen.getByText('Refresh Tickets'))
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('sync_work_items', undefined))
+    await waitFor(() => expect(props.onActivityRefreshed).toHaveBeenCalled())
     expect(invoke.mock.calls.some(([command]) => command === 'get_loc_history' || command === 'sync_github_data')).toBe(false)
   }, 15000)
   it('filters ticket types independently and keeps the completed control as a button', async () => {

@@ -7,7 +7,7 @@ import type { ActivityRelationship, KanbanItem, KanbanKind, KanbanLinks, KanbanM
 import { relativeTime, repositoryId } from '../utils'
 import { COLUMNS, columnFor, isGitHubWorkUrl, type Column } from './model'
 
-export default function KanbanBoard({ repositories, login, relationship: defaultRelationship, revision }: { repositories: Repository[]; login: string; relationship: ActivityRelationship; onRelationship: (value: ActivityRelationship) => void; onBack: () => void; revision: number }) {
+export default function KanbanBoard({ repositories, login, relationship: defaultRelationship, revision, onActivityRefreshed }: { repositories: Repository[]; login: string; relationship: ActivityRelationship; onRelationship: (value: ActivityRelationship) => void; onBack: () => void; revision: number; onActivityRefreshed: () => void }) {
   const [kind, setKind] = useState<KanbanKind>('both')
   const [scope, setScope] = useState('all')
   const [relationship, setRelationship] = useState(defaultRelationship)
@@ -169,20 +169,19 @@ export default function KanbanBoard({ repositories, login, relationship: default
     let failure = ''
     try { const result = await syncWorkItems(); if (!result.ok || result.errors.length) failure = [result.message, ...result.errors].join(' ') }
     catch (reason) { failure = String(reason) }
-    finally { await load(); if (failure) setError(failure); setRefreshing(false) }
+    finally { await load(); onActivityRefreshed(); if (failure) setError(failure); setRefreshing(false) }
   }
   const item = page?.items.find((row) => row.item_key === selected)
   const draggedItem = page?.items.find((row) => row.item_key === draggedKey)
   return <main className="kanban-main">
-    <div className="page-heading"><div><p className="eyebrow">Local workflow</p><h1>Kanban</h1></div><button className="button primary" disabled={refreshing || loading || pending.size > 0} onClick={() => void refresh()}>{refreshing ? 'Refreshing…' : 'Refresh Tickets'}</button></div>
-    <p className="small-note">Last successful activity refresh: {relativeTime(page?.last_successful_refresh)} · Refresh fetches PRs and issues from all tracked repositories. Local changes do not update GitHub.</p>
+    <div className="page-heading"><div><p className="eyebrow">Local workflow</p><h1>Kanban</h1></div><button className="button primary" title="Refresh PRs and issues from all tracked repositories, regardless of board filters, without scanning lines of code" disabled={refreshing || loading || pending.size > 0} onClick={() => void refresh()}>{refreshing ? 'Refreshing…' : 'Refresh Tickets'}</button></div>
     <div className="kanban-filters"><div className="kanban-kind-buttons" role="group" aria-label="Ticket types"><button className={kind === 'prs' || kind === 'both' ? 'active' : ''} aria-pressed={kind === 'prs' || kind === 'both'} onClick={() => setKind(kind === 'both' ? 'issues' : kind === 'prs' ? 'none' : kind === 'issues' ? 'both' : 'prs')}><GitPullRequest size={14} aria-hidden="true" /> PRs</button><button className={kind === 'issues' || kind === 'both' ? 'active' : ''} aria-pressed={kind === 'issues' || kind === 'both'} onClick={() => setKind(kind === 'both' ? 'prs' : kind === 'issues' ? 'none' : kind === 'prs' ? 'both' : 'issues')}><CircleDot size={14} aria-hidden="true" /> Issues</button></div>
       <ActivityRepositoryMenu repositories={repositories} login={login} value={scope} disabled={false} onChange={setScope} />
-      <ActivityInvolvementFilter id="kanban-involvement-select" value={relationship} login={login} onChange={setRelationship} />
+      <ActivityInvolvementFilter id="kanban-involvement-select" value={relationship} onChange={setRelationship} />
       <input aria-label="Search board" placeholder="Search work items" value={search} onChange={(event) => setSearch(event.target.value)} />
-      <button className={completed ? 'button secondary compact kanban-completed active' : 'button secondary compact kanban-completed'} aria-pressed={completed} onClick={() => setCompleted(!completed)}>Show completed</button>
+      <div className="kanban-kind-buttons"><button className={completed ? 'active' : ''} aria-pressed={completed} onClick={() => setCompleted(!completed)}>Show completed</button></div>
     </div>
-    <div className="kanban-summary" aria-live="polite"><span>{page?.active_count ?? 0} cached active · {page?.completed_count ?? 0} cached completed</span>{loading && <span>Loading board…</span>}</div>
+    <div className="kanban-summary" aria-live="polite"><span>{page?.active_count ?? 0} active · {page?.completed_count ?? 0} completed</span>{loading && <span>Loading board…</span>}</div>
     {blockedMove && <div role="alert" className="kanban-notice">Done reflects GitHub completion. Close or reopen this item on GitHub.<button className="button secondary compact" disabled={!isGitHubWorkUrl(blockedMove.url)} onClick={() => void openExternalUrl(blockedMove.url).catch((reason) => setError(String(reason)))}>Open in GitHub</button><button className="button secondary compact" onClick={() => setBlockedMove(null)}>Dismiss</button></div>}
     {error && <div role="alert" className="error-banner">{error}</div>}
     {page?.partial && <div role="status" className="kanban-notice">Activity data is partial. {page.errors.join(' ')}</div>}

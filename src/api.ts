@@ -156,6 +156,10 @@ export async function getSyncProgress(): Promise<SyncProgress> {
   return call<SyncProgress>('get_sync_progress')
 }
 
+export async function getActivityRefreshAt(): Promise<string | null> {
+  return call<string | null>('get_activity_refresh_at')
+}
+
 export async function syncRepository(repositoryId: number | string): Promise<unknown> {
   return call('sync_repository', { repo_id: repositoryId })
 }

@@ -315,6 +315,11 @@ pub async fn get_dashboard(state: State<'_, AppState>) -> Result<Dashboard, Stri
     }).await.map_err(|error| error.to_string())?
 }
 
+#[tauri::command]
+pub fn get_activity_refresh_at(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    state.database().metadata(sync::LAST_ACTIVITY_REFRESH_METADATA_KEY).map_err(|error| error.to_string())
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub async fn get_loc_history(state: State<'_, AppState>, repository_id: Option<i64>, range: Option<String>) -> Result<LocHistory, String> {
     let state = state.inner().clone();

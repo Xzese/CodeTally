@@ -147,6 +147,7 @@ pub fn run() {
             commands::sync_repository,
             commands::backfill_loc,
             commands::get_sync_progress,
+            commands::get_activity_refresh_at,
             commands::get_repository_classification,
             commands::set_repository_classification,
             commands::get_dashboard,

@@ -34,6 +34,7 @@ export async function screenshotCall(command: string, args: Record<string, unkno
     case 'get_app_settings': return settings
     case 'set_app_settings': settings = args.settings as AppSettings; return settings
     case 'get_dashboard': return { user: { login: 'demo' }, repositories, totals: { repositories: 3, total_loc: 54500, source_loc: 43690, test_loc: 10810, loc_change_30d: 720, open_prs: 3, open_issues: 2 }, history: [], last_sync_at: now, last_lines_refresh_at: now, last_full_refresh_at: now, last_activity_refresh_at: now, last_personal_refresh_at: now, errors: [] }
+    case 'get_activity_refresh_at': return now
     case 'get_loc_history': return []
     case 'get_repository_selection': return repositories.map((repo) => ({ github_id: repo.github_id, name_with_owner: repo.name_with_owner, owner: repo.owner, group: 'company' }))
     case 'get_activity_feed': {
