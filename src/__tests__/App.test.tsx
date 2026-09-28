@@ -420,7 +420,7 @@ describe('dashboard UI', () => {
     expect(invokeMock).toHaveBeenCalledWith('get_personal_refresh_at', undefined)
     expect(invokeMock.mock.calls.some(([command]) => command === 'sync_work_items')).toBe(false)
     const titlebar = screen.getByRole('banner')
-    await waitFor(() => expect(within(titlebar).getByText('Activities refreshed').closest('span')).toHaveAttribute('title', expect.not.stringContaining('No successful')))
+    await waitFor(() => expect(within(titlebar).getByLabelText(/Activities refreshed/)).toHaveAttribute('title', expect.not.stringContaining('No successful')))
     expect(invokeMock.mock.calls.filter(([command]) => command === 'get_loc_history')).toHaveLength(histories)
     expect(screen.queryByRole('button', { name: /Kanban Board/ })).not.toBeInTheDocument()
   })

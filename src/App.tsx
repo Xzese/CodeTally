@@ -1,7 +1,7 @@
 import { listen } from '@tauri-apps/api/event'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { AreaChart, CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
-import { AlertCircle, ArrowDown, ArrowLeft, ArrowUp, BarChart3, Check, ChevronDown, ChevronUp, CircleDot, ExternalLink, GitBranch, GitPullRequest, Github, HardDrive, ListFilter, LoaderCircle, PanelRightClose, PanelRightOpen, Settings, Terminal, X, Zap } from 'lucide-react'
+import { Activity, AlertCircle, ArrowDown, ArrowLeft, ArrowUp, BarChart3, Check, ChevronDown, ChevronUp, CircleDot, ExternalLink, GitBranch, GitPullRequest, Github, HardDrive, ListFilter, LoaderCircle, PanelRightClose, PanelRightOpen, Settings, Terminal, X, Zap } from 'lucide-react'
 import { checkDependencies, discoverRepositories, getActivityFeed, getActivityRefreshAt, getPersonalRefreshAt, getAppSettings, getDashboard, getGithubUser, getLocHistory, getSyncProgress, openExternalUrl, setAppSettings, syncActivity, syncGithubData, syncPersonalWorkItems, syncWorkItems } from './api'
 import type { ActivityRelationship, AppSettings, DashboardData, DependencyStatus, FeedKind, Issue, LocSnapshot, PullRequest, Repository, SyncProgress, TimeRange } from './types'
 import { aggregateHistory, filterIssues, filterPullRequests, isDraft, isMerged, sortRepositories, type FeedState } from './model'
@@ -689,13 +689,13 @@ function App() {
   return (
     <div className={lightMode ? 'app-shell light' : 'app-shell'}>
       <header className="topbar">
-        <div className="topbar-navigation"><div className="brand-mark"><img src={codetallyMark} alt="" aria-hidden="true" /><span>CodeTally</span></div>{appSettings.kanban_enabled && !isSetup && <nav aria-label="Main navigation"><button className="button secondary topbar-nav-button" onClick={screen === 'kanban' ? backToDashboard : () => setScreen('kanban')}>{screen === 'kanban' ? 'Back to dashboard' : 'Kanban Board'}</button></nav>}</div>
+        <div className={`topbar-navigation${appSettings.kanban_enabled && !isSetup ? ' with-kanban' : ''}`}><div className="brand-mark"><img src={codetallyMark} alt="" aria-hidden="true" /><span>CodeTally</span></div>{appSettings.kanban_enabled && !isSetup && <nav aria-label="Main navigation"><button className="button secondary topbar-nav-button" onClick={screen === 'kanban' ? backToDashboard : () => setScreen('kanban')}>{screen === 'kanban' ? 'Back to dashboard' : 'Kanban Board'}</button></nav>}</div>
         <div className="topbar-status">
           <div className="topbar-account">
             {login ? <span className="identity"><span className="status-dot" /><span className="identity-name">{login}</span></span> : <span className="muted">Local desktop dashboard</span>}
             <button className="icon-button" title="Settings" onClick={() => setSettingsOpen(true)}><Settings size={17} /></button>
-            <UpdateStatus updateCheckInterval={settingsLoaded ? appSettings.update_check_interval : null} />
           </div>
+          <UpdateStatus updateCheckInterval={settingsLoaded ? appSettings.update_check_interval : null} />
           <div className="topbar-refresh-group">
             <div
             className={syncDetailsAvailable ? 'sync-popover-wrap active' : 'sync-popover-wrap'}
@@ -709,7 +709,7 @@ function App() {
           >
             <div className="refresh-timestamps" tabIndex={0} aria-label="Refresh times">
               <div className="refresh-timestamp-list">
-                <span title={latestActivityRefreshAt ? `${activityRefreshDescription} ${exactDate(latestActivityRefreshAt)}` : 'No successful PR and issue refresh has completed.'}>Activities refreshed <strong>{latestActivityRefreshAt ? relativeTime(latestActivityRefreshAt) : 'Not recorded'}</strong></span>
+                <span title={latestActivityRefreshAt ? `${activityRefreshDescription} ${exactDate(latestActivityRefreshAt)}` : 'No successful PR and issue refresh has completed.'} aria-label={`Activities refreshed ${latestActivityRefreshAt ? relativeTime(latestActivityRefreshAt) : 'Not recorded'}`}><Activity className="activity-refresh-icon" size={13} aria-hidden="true" /><span className="activity-refresh-label">Activities refreshed</span><strong>{latestActivityRefreshAt ? relativeTime(latestActivityRefreshAt) : 'Not recorded'}</strong></span>
                 <span title={dashboard.last_full_refresh_at ? exactDate(dashboard.last_full_refresh_at) : 'No successful Repo Refresh or Force Refresh has completed. Partial or failed attempts do not set this time.'}>Last refreshed <strong>{dashboard.last_full_refresh_at ? relativeTime(dashboard.last_full_refresh_at) : 'Not recorded'}</strong></span>
               </div>
               {syncActive && <span className="refresh-running" role="status" aria-label={importing ? 'Importing' : 'Refreshing'}><LoaderCircle size={13} className="spin" aria-hidden="true" /></span>}
@@ -723,8 +723,8 @@ function App() {
               {syncActive && <SyncProgressPanel progress={syncPopoverProgress} />}
             </div>}
             </div>
-            {!isSetup && screen !== 'kanban' && <button className="icon-button feed-toggle" type="button" aria-label={feedOpen ? 'Hide activity sidebar' : 'Show activity sidebar'} aria-controls="activity-sidebar" aria-expanded={feedOpen} title={feedOpen ? 'Hide Live Feed' : 'Show Live Feed'} onClick={toggleFeed}>{feedOpen ? <PanelRightClose size={17} /> : <PanelRightOpen size={17} />}</button>}
           </div>
+          {!isSetup && screen !== 'kanban' && <button className="icon-button feed-toggle" type="button" aria-label={feedOpen ? 'Hide activity sidebar' : 'Show activity sidebar'} aria-controls="activity-sidebar" aria-expanded={feedOpen} title={feedOpen ? 'Hide Live Feed' : 'Show Live Feed'} onClick={toggleFeed}>{feedOpen ? <PanelRightClose size={17} /> : <PanelRightOpen size={17} />}</button>}
         </div>
       </header>
 
@@ -736,7 +736,7 @@ function App() {
             <main className="main-column">
               {deps.gh && !dependenciesAuthenticated(deps) && <GitHubConnection deps={deps} login={login} compact checking={checkingDependencies} onRetry={checkSetupConnection} />}
               {activeRepositories.length === 0 ? <EmptySelectionState onOpenSettings={() => setSettingsOpen(true)} /> : <>
-                <div className="page-heading"><div><p className="eyebrow">Your repositories</p><h1>Code at a glance</h1></div><span className="small-note"><CircleDot size={13} /> {activeRepositories.length} active repositories</span></div>
+                <div className="page-heading"><div><p className="eyebrow">Your repositories</p><h1>Code at a glance</h1></div></div>
                 <SummaryStrip metrics={metrics} partialLoc={partialLoc} />
                 <LocChart history={visibleHistory} metric={metric} range={range} onMetric={setMetric} onRange={setRange} />
                 <RepositoryTable repositories={sortedRepositories} login={login} sort={repoSort} direction={repoSortDirection} onSort={(next) => { if (next === repoSort) setRepoSortDirection((current) => current === 'asc' ? 'desc' : 'asc'); else { setRepoSort(next); setRepoSortDirection(next === 'name' ? 'asc' : 'desc') } }} onSelect={(repo) => void openRepository(repo)} />
