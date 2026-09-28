@@ -456,7 +456,7 @@ fn cadence_settings_round_trip_through_persisted_app_metadata() {
     assert!(loaded.include_forks_in_totals);
     assert!(!loaded.include_personal_repositories);
     assert!(loaded.include_company_repositories);
-    assert!(loaded.kanban_enabled, "older settings without this field enable the board by default");
+    assert!(!loaded.kanban_enabled);
     assert_eq!(loaded.excluded_repository_ids, vec!["repo-excluded"]);
     assert_eq!(
         reopened
@@ -541,6 +541,7 @@ fn legacy_saved_app_settings_keep_cadence_and_receive_new_defaults() {
     assert!(!loaded.include_forks_in_totals);
     assert!(loaded.include_personal_repositories);
     assert!(loaded.include_company_repositories);
+    assert!(loaded.kanban_enabled, "older settings without this field enable the board by default");
     assert!(loaded.excluded_repository_ids.is_empty());
     let changed_personal = AppSettings { personal_refresh_minutes: 15, ..loaded };
     sync::save_app_settings(&database, &changed_personal).expect("save independent personal cadence");

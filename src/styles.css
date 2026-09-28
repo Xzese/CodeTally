@@ -438,7 +438,6 @@ td:first-child { padding-left: 18px; }
 .settings-update-interval-options label.selected, .settings-update-interval-options label:has(input:checked) { color: white; background: linear-gradient(#2793ff, #007aff); box-shadow: 0 1px 3px rgba(0,0,0,.16); }
 .settings-update-interval-options label:has(input:focus-visible) { outline: 3px solid color-mix(in srgb, var(--control-accent) 55%, transparent); outline-offset: 2px; }
 .settings-update-interval-options input { position: absolute; width: 1px; height: 1px; padding: 0; opacity: 0; }
-.settings-row-unit { color: var(--muted); font-size: 10px; font-weight: 450; }
 .settings-menu-preview { margin-bottom: 14px; padding: 16px; border: 1px solid color-mix(in srgb, var(--blue) 22%, var(--line)); border-radius: 12px; background: linear-gradient(135deg, color-mix(in srgb, var(--blue) 15%, var(--panel)), var(--panel)); }
 .settings-menu-preview-label { margin-bottom: 12px; color: var(--muted); font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .09em; }
 .settings-menu-preview-strip { display: flex; align-items: center; justify-content: flex-end; gap: 14px; min-height: 36px; padding: 0 12px; border: 1px solid var(--control-border); border-radius: 7px; color: var(--control-text); background: var(--popover-surface); box-shadow: 0 4px 12px rgba(0,0,0,.14); }
@@ -516,10 +515,13 @@ td:first-child { padding-left: 18px; }
 @media (max-width: 480px) {
   .settings-interval-row, .settings-update-interval-row { grid-template-columns: minmax(0, 1fr); gap: 5px; padding: 5px 0; }
 }
-.settings-menu-preview-strip { justify-content: flex-start; overflow-x: auto; scrollbar-width: thin; }
-.settings-preview-value { flex: 0 0 auto; margin-inline: auto; }
-.settings-preview-metric { display: inline-flex; align-items: center; gap: 5px; }
-.settings-preview-metric svg { width: 17px; height: 17px; flex: 0 0 17px; }
+.settings-menu-preview-strip { container-type: inline-size; justify-content: flex-start; overflow: hidden; padding-inline: 8px; }
+.settings-preview-value { flex: 1 1 auto; justify-content: space-between; width: 100%; min-width: 0; margin: 0; gap: 4px; font-size: 10px; letter-spacing: -.015em; }
+.settings-preview-metric { display: inline-flex; align-items: center; gap: 0; min-width: 0; white-space: nowrap; }
+.settings-preview-metric svg { width: 13px; height: 13px; flex: 0 0 13px; margin-right: 2px; }
+@container (max-width: 345px) {
+  .settings-preview-unit { display: none; }
+}
 .settings-metric-icon { color: var(--blue); flex: 0 0 auto; width: 18px; height: 18px; }
 .settings-metric-hint { margin: 10px 0 0; font-size: 11px; color: var(--muted); }
 .setup-card { margin-block: auto; }
@@ -610,8 +612,8 @@ td:first-child { padding-left: 18px; }
 .kanban-column h2 { font-size: 13px; display: flex; justify-content: space-between; margin: 0 0 14px; }
 .kanban-column h2 small { color: var(--muted); }
 .kanban-card { padding: 12px; margin-bottom: 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; display: flex; flex-direction: column; gap: 10px; }
-.kanban-card[draggable=true] { cursor: grab; }
-.kanban-card-dragging { position: absolute; visibility: hidden; pointer-events: none; }
+.kanban-card { cursor: grab; }
+.kanban-card-dragging { opacity: .15; cursor: grabbing; }
 .kanban-drop-placeholder { min-height: 92px; margin-bottom: 12px; border: 2px dashed var(--blue); border-radius: 8px; background: color-mix(in srgb, var(--blue) 9%, transparent); }
 .kanban-card-title { padding: 0; background: transparent; border: 0; text-align: left; font-size: 13px; font-weight: 600; line-height: 1.45; cursor: pointer; }
 .kanban-card-title:hover { color: var(--blue); }
@@ -655,7 +657,5 @@ td:first-child { padding-left: 18px; }
 .settings-metric-copy small { font-size: 9px; }
 .settings-metric-indicator { position: absolute; top: 3px; right: 3px; width: 12px; height: 12px; }
 .settings-update-checks { align-items: center; }
-.settings-update-checks .settings-update-interval-options { grid-template-columns: 1fr; }
-.settings-update-checks .settings-update-interval-options label { justify-content: flex-start; padding-left: 12px; }
 @media (max-width: 480px) { .settings-update-checks { align-items: stretch; } }
 @media (max-width: 420px) { .settings-metric-options { grid-template-columns: repeat(5, minmax(76px, 1fr)); overflow-x: auto; padding-bottom: 5px; } }

@@ -135,14 +135,14 @@ The title bar shows when line counts and a full refresh last succeeded. **Settin
 Automatic refreshes run while CodeTally is open, including with its window closed when background operation is enabled. The defaults are:
 
 - **Repo Refresh** daily: discover repository metadata, refresh PRs, issues, and open counts across selected repositories, and perform due line-count work. Hourly, weekly, and monthly choices are also available; hourly may reach GitHub API limits sooner.
-- **Personal PR & issue refresh** every five minutes: search for authored and assigned tickets across the signed-in account and update matches in tracked repositories, including recently closed and merged tickets. This does not scan lines of code or alter repository-wide open counts.
+- **PR & Issue Refresh** every five minutes: search for authored and assigned tickets across the signed-in account and update matches in tracked repositories, including recently closed and merged tickets. This does not scan lines of code or alter repository-wide open counts.
 - During Repo Refresh, inspect a changed GitHub `pushedAt` and fetch due code revisions, with exact commit-SHA deduplication preventing an already measured commit from being recounted.
 
 Settings apply automatically when you change a control and are stored in the local database. The status at the top shows when changes are being saved and provides a retry if saving fails. Rapid changes are saved in order, and the drawer stays open. Supporting explanations are available from the **?** buttons by hovering, focusing, or clicking.
 
 **Settings → About CodeTally** displays the installed and latest versions together, update actions, and the project repository. An **About me** section introduces Sam and links to [www.samfaid.com](https://www.samfaid.com/) and [Buy Me a Coffee](https://www.buymeacoffee.com/samfaid).
 
-The **Background & refresh** section has one **Repo Refresh** interval for repository data and due line counts: hourly, daily, weekly, or monthly, with daily as the default. Its hourly choice warns about GitHub API limits. Previously saved custom Repo Refresh intervals change to daily on upgrade. **Personal PR & issue refresh** has a separate interval, five minutes by default, and retains its custom option.
+The **Background & refresh** section has one **Repo Refresh** interval for repository data and due line counts: hourly, daily, weekly, or monthly, with daily as the default. Its hourly choice warns about GitHub API limits. Previously saved custom Repo Refresh intervals change to daily on upgrade. **PR & Issue Refresh** has a separate interval, five minutes by default, and retains its custom option.
 
 In **Settings → Appearance & menu bar**, choose **Light**, **Dark**, or **Follow system**. Follow system is the default and responds to macOS appearance changes while the app is open.
 
@@ -176,7 +176,7 @@ The activity sidebar starts on open pull requests. Switching between pull reques
 
 Use **My involvement** in the feed to choose **Everyone**, **Authored by me** (default), **Assigned to me**, or **Authored or assigned to me**. “Me” is the connected GitHub account. The choice is saved automatically and applies to both pull requests and issues alongside the repository and state filters.
 
-**Refresh Tickets** and Repo Refresh cover all selected repositories. Personal PR & issue refresh searches items involving the connected GitHub account and updates matching tracked items. **My involvement** changes what appears in the live feed; its default is **Authored by me**.
+**Refresh Tickets** and Repo Refresh cover all selected repositories. Scheduled **PR & Issue Refresh** searches items involving the connected GitHub account and updates matching tracked items. **My involvement** changes what appears in the live feed; its default is **Authored by me**.
 
 The activity repository filter opens collapsed **Personal repositories** and named company groups. Expand a group to choose all its repositories or one repository, or choose **All company repositories** across organizations. The selected scope carries across PR and issue tabs and only filters the feed; it does not change tracking. Group selection is applied before the activity result limit.
 

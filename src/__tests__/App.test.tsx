@@ -1144,7 +1144,7 @@ describe('dashboard UI', () => {
 
     const activityRefresh = screen.getByRole('radiogroup', { name: 'Repo Refresh' })
     expect(screen.queryByRole('radiogroup', { name: 'Lines of Code Refresh' })).not.toBeInTheDocument()
-    const personalRefresh = screen.getByRole('radiogroup', { name: 'Personal PR & issue refresh' })
+    const personalRefresh = screen.getByRole('radiogroup', { name: 'PR & Issue Refresh' })
     expect(within(personalRefresh).getByRole('radio', { name: '5 minutes' })).toBeChecked()
     await user.click(within(personalRefresh).getByRole('radio', { name: '15 minutes' }))
     await waitFor(() => expect(savedSettings().at(-1)).toEqual(expect.objectContaining({ personal_refresh_minutes: 15, activity_refresh_minutes: 1440 })))
@@ -1196,10 +1196,10 @@ describe('dashboard UI', () => {
 
     await user.click(screen.getByRole('button', { name: 'Settings' }))
     const drawer = await screen.findByRole('dialog', { name: 'Settings' })
-    const activityRefresh = within(drawer).getByRole('radiogroup', { name: 'Personal PR & issue refresh' })
+    const activityRefresh = within(drawer).getByRole('radiogroup', { name: 'PR & Issue Refresh' })
 
     await user.click(within(activityRefresh).getByRole('radio', { name: 'Custom' }))
-    const activityInput = within(drawer).getByRole('textbox', { name: 'Custom minutes for personal pr & issue refresh' }) as HTMLInputElement
+    const activityInput = within(drawer).getByRole('textbox', { name: 'Custom minutes for pr & issue refresh' }) as HTMLInputElement
     expect(activityInput).toHaveAttribute('inputmode', 'numeric')
     expect(activityInput).toHaveValue('5')
 
@@ -1229,7 +1229,7 @@ describe('dashboard UI', () => {
     await waitFor(() => expect(savedSettings()[savedSettings().length - 1]).toEqual(expect.objectContaining({ personal_refresh_minutes: 15 })))
 
     await user.click(within(activityRefresh).getByRole('radio', { name: 'Custom' }))
-    const customActivityInput = within(drawer).getByRole('textbox', { name: 'Custom minutes for personal pr & issue refresh' }) as HTMLInputElement
+    const customActivityInput = within(drawer).getByRole('textbox', { name: 'Custom minutes for pr & issue refresh' }) as HTMLInputElement
     await user.clear(customActivityInput)
     await user.type(customActivityInput, '17')
     fireEvent.blur(customActivityInput)
@@ -1238,8 +1238,8 @@ describe('dashboard UI', () => {
     await user.click(within(drawer).getByRole('button', { name: 'Close settings' }))
     await user.click(screen.getByRole('button', { name: 'Settings' }))
     const reopened = await screen.findByRole('dialog', { name: 'Settings' })
-    expect(within(within(reopened).getByRole('radiogroup', { name: 'Personal PR & issue refresh' })).getByRole('radio', { name: 'Custom' })).toBeChecked()
-    expect(within(reopened).getByRole('textbox', { name: 'Custom minutes for personal pr & issue refresh' })).toHaveValue('17')
+    expect(within(within(reopened).getByRole('radiogroup', { name: 'PR & Issue Refresh' })).getByRole('radio', { name: 'Custom' })).toBeChecked()
+    expect(within(reopened).getByRole('textbox', { name: 'Custom minutes for pr & issue refresh' })).toHaveValue('17')
   })
 
   it('serializes rapid setting changes and persists the latest intended value', async () => {

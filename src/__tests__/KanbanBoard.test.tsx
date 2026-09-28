@@ -1,4 +1,4 @@
-import { createEvent, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import KanbanBoard from '../kanban/KanbanBoard'
 import { columnFor, isGitHubWorkUrl } from '../kanban/model'
@@ -9,7 +9,15 @@ const item: KanbanItem = { item_key: 'pr:1:2', kind: 'pr', repository_id: 1, rep
 const preferences = { kind: 'both', repository_id: null, repository_scope: 'all', relationship: 'author', search: '', show_completed: false }
 const page = { items: [item], total: 1, active_count: 1, completed_count: 7, partial: false, errors: [] }
 const props = { repositories: [{ id: 1, name: 'repo', owner: 'sam' }], login: 'sam', relationship: 'author' as const, onRelationship: vi.fn(), onBack: vi.fn(), revision: 0 }
-beforeEach(() => { invoke.mockReset(); invoke.mockImplementation(async (command) => command === 'get_kanban_preferences' ? preferences : command === 'get_kanban_page' ? page : command === 'get_kanban_links' ? { items: [], partial: false } : undefined) })
+const hitTest = vi.fn()
+class TestPointerEvent extends MouseEvent {
+  readonly pointerId: number
+  constructor(type: string, init: PointerEventInit = {}) { super(type, init); this.pointerId = init.pointerId ?? 0 }
+}
+beforeEach(() => { invoke.mockReset(); hitTest.mockReset(); Object.defineProperty(window, 'PointerEvent', { configurable: true, value: TestPointerEvent }); Object.defineProperty(document, 'elementFromPoint', { configurable: true, value: hitTest }); invoke.mockImplementation(async (command) => command === 'get_kanban_preferences' ? preferences : command === 'get_kanban_page' ? page : command === 'get_kanban_links' ? { items: [], partial: false } : undefined) })
+function beginPointerDrag(card: HTMLElement) { fireEvent.pointerDown(card, { pointerId: 1, button: 0, clientX: 0, clientY: 0 }) }
+function movePointer(x: number, y: number) { fireEvent.pointerMove(window, { pointerId: 1, clientX: x, clientY: y }) }
+function releasePointer(x: number, y: number) { fireEvent.pointerUp(window, { pointerId: 1, clientX: x, clientY: y }) }
 describe('local Kanban workflow', () => {
   it('accepts only canonical HTTPS GitHub work item URLs', () => {
     expect(isGitHubWorkUrl(item.url)).toBe(true)
@@ -75,22 +83,17 @@ describe('local Kanban workflow', () => {
     render(<KanbanBoard {...props} />)
     await screen.findByText('Second work')
     const review = screen.getByRole('region', { name: 'Review column' })
-    const transfer = { setData: vi.fn(), getData: () => 'second', effectAllowed: '', dropEffect: '' }
     Object.defineProperty(within(review).getAllByRole('article')[0], 'getBoundingClientRect', { value: () => ({ top: 0, height: 100 }) })
-    fireEvent.dragStart(within(review).getAllByRole('article')[1], { dataTransfer: transfer })
-    const unchanged = createEvent.dragOver(review, { dataTransfer: transfer })
-    Object.defineProperty(unchanged, 'clientY', { value: 1000 })
-    fireEvent(review, unchanged)
-    expect(transfer.dropEffect).toBe('none')
+    hitTest.mockReturnValue(review)
+    beginPointerDrag(within(review).getAllByRole('article')[1])
+    expect(within(review).getAllByRole('article')[1]).not.toHaveClass('kanban-card-dragging')
     expect(within(review).queryByRole('status', { name: 'Drop in Review' })).not.toBeInTheDocument()
-    const over = createEvent.dragOver(review, { dataTransfer: transfer })
-    Object.defineProperty(over, 'clientY', { value: 10 })
-    fireEvent(review, over)
+    movePointer(10, 1000)
+    expect(within(review).queryByRole('status', { name: 'Drop in Review' })).not.toBeInTheDocument()
+    movePointer(10, 10)
     expect(within(review).getByRole('status', { name: 'Drop in Review' })).toHaveClass('kanban-drop-placeholder')
     expect(review.querySelectorAll('.kanban-card:not(.kanban-card-dragging)')).toHaveLength(1)
-    expect(transfer.effectAllowed).toBe('move')
-    expect(transfer.dropEffect).toBe('move')
-    fireEvent.drop(review, { dataTransfer: transfer })
+    releasePointer(10, 10)
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('set_kanban_metadata', expect.objectContaining({ item_key: 'second', manual_column: 'Review', sort_rank: -1024 })))
     await waitFor(() => expect(within(review).getAllByRole('article')[0]).toHaveTextContent('Second work'))
     fireEvent.keyDown(within(review).getAllByRole('article')[0], { key: 'ArrowDown', altKey: true })
@@ -107,20 +110,20 @@ describe('local Kanban workflow', () => {
     })
     render(<KanbanBoard {...props} />)
     await screen.findByText(item.title)
-    const transfer = { setData: vi.fn(), getData: () => item.item_key, effectAllowed: '', dropEffect: '' }
-    fireEvent.dragStart(within(screen.getByRole('region', { name: 'Review column' })).getByRole('article'), { dataTransfer: transfer })
+    beginPointerDrag(within(screen.getByRole('region', { name: 'Review column' })).getByRole('article'))
     const blocked = screen.getByRole('region', { name: 'Blocked column' })
-    fireEvent.dragOver(blocked, { dataTransfer: transfer, clientY: 100 })
+    hitTest.mockReturnValue(blocked)
+    movePointer(100, 100)
     expect(within(blocked).getByRole('status', { name: 'Drop in Blocked' })).toBeInTheDocument()
-    fireEvent.drop(blocked, { dataTransfer: transfer })
+    releasePointer(100, 100)
     await waitFor(() => expect(within(blocked).getByText(item.title)).toBeInTheDocument())
     fireEvent.click(screen.getByRole('button', { name: 'Show completed' }))
     const done = await screen.findByRole('region', { name: 'Done column' })
-    fireEvent.dragStart(within(blocked).getByRole('article'), { dataTransfer: transfer })
-    fireEvent.dragOver(done, { dataTransfer: transfer })
-    expect(transfer.dropEffect).toBe('none')
+    beginPointerDrag(within(blocked).getByRole('article'))
+    hitTest.mockReturnValue(done)
+    movePointer(100, 100)
     expect(within(done).queryByRole('status', { name: 'Drop in Done' })).not.toBeInTheDocument()
-    fireEvent.drop(done, { dataTransfer: transfer })
+    releasePointer(100, 100)
     expect(screen.getByRole('alert')).toHaveTextContent('Done reflects GitHub completion')
     expect(screen.getByRole('button', { name: 'Open in GitHub' })).toBeInTheDocument()
   })
@@ -154,10 +157,10 @@ describe('local Kanban workflow', () => {
     render(<KanbanBoard {...props} />)
     await screen.findByText(item.title)
     const review = screen.getByRole('region', { name: 'Review column' }), blocked = screen.getByRole('region', { name: 'Blocked column' })
-    const transfer = { setData: vi.fn(), getData: () => item.item_key, effectAllowed: '', dropEffect: '' }
-    fireEvent.dragStart(within(review).getByRole('article'), { dataTransfer: transfer })
-    fireEvent.dragOver(blocked, { dataTransfer: transfer, clientY: 100 })
-    fireEvent.drop(blocked, { dataTransfer: transfer })
+    hitTest.mockReturnValue(blocked)
+    beginPointerDrag(within(review).getByRole('article'))
+    movePointer(100, 100)
+    releasePointer(100, 100)
     expect(within(blocked).getByText(item.title)).toBeInTheDocument()
     rejectSave(new Error('Revision conflict'))
     await screen.findByRole('alert')
