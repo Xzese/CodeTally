@@ -281,7 +281,7 @@ export interface FeedRequest {
   relationship?: ActivityRelationship
 }
 
-export type KanbanKind = 'prs' | 'issues' | 'both'
+export type KanbanKind = 'prs' | 'issues' | 'both' | 'none'
 export interface KanbanMetadata {
   item_key: string
   manual_column: string | null

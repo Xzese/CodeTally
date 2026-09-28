@@ -6,6 +6,7 @@ use crate::github;
 use crate::github_sync;
 use crate::models::{AppSettings, Repository, Snapshot, SyncProgress, SyncResult};
 use chrono::{DateTime, Duration, Utc};
+use rusqlite::params;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -27,6 +28,8 @@ pub const APP_SETTINGS_METADATA_KEY: &str = "app_settings";
 pub const REFRESH_CADENCE_V2_METADATA_KEY: &str = "refresh_cadence_v2";
 pub const REFRESH_CADENCE_V3_METADATA_KEY: &str = "refresh_cadence_v3";
 pub const REFRESH_CADENCE_V4_METADATA_KEY: &str = "refresh_cadence_v4";
+pub const REFRESH_CADENCE_V5_METADATA_KEY: &str = "refresh_cadence_v5";
+const REPO_REFRESH_INTERVALS: [i64; 4] = [60, 1_440, 10_080, 43_200];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LocSyncDecision {
@@ -64,12 +67,26 @@ pub fn app_settings(db: &Database) -> AppResult<AppSettings> {
         db.set_metadata(APP_SETTINGS_METADATA_KEY, &serde_json::to_string(&settings)?)?;
         db.set_metadata(REFRESH_CADENCE_V4_METADATA_KEY, "1")?;
     }
+    if db.metadata(REFRESH_CADENCE_V5_METADATA_KEY)?.is_none() {
+        // Repo Refresh now has four presets. Migrate every older custom value
+        // to Daily while leaving the independent personal interval untouched.
+        if !REPO_REFRESH_INTERVALS.contains(&settings.activity_refresh_minutes) {
+            settings.activity_refresh_minutes = 1_440;
+        }
+        let mut conn = db.connect()?;
+        let tx = conn.transaction()?;
+        tx.execute("INSERT INTO app_metadata(key,value) VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![APP_SETTINGS_METADATA_KEY, serde_json::to_string(&settings)?])?;
+        tx.execute("INSERT INTO app_metadata(key,value) VALUES (?1,'1') ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [REFRESH_CADENCE_V5_METADATA_KEY])?;
+        tx.commit()?;
+    }
     if validate_app_settings(&settings).is_ok() { Ok(settings) } else { Ok(AppSettings::default()) }
 }
 
 pub fn validate_app_settings(settings: &AppSettings) -> AppResult<()> {
-    if !(15..=43_200).contains(&settings.activity_refresh_minutes) {
-        return Err(AppError::InvalidArgument("activity_refresh_minutes must be a whole number from 15 to 43200".into()));
+    if !REPO_REFRESH_INTERVALS.contains(&settings.activity_refresh_minutes) {
+        return Err(AppError::InvalidArgument("activity_refresh_minutes must be hourly, daily, weekly, or monthly".into()));
     }
     if !(1..=1_440).contains(&settings.personal_refresh_minutes) {
         return Err(AppError::InvalidArgument("personal_refresh_minutes must be a whole number from 1 to 1440".into()));
@@ -89,6 +106,7 @@ pub fn save_app_settings(db: &Database, settings: &AppSettings) -> AppResult<()>
     db.set_metadata(REFRESH_CADENCE_V2_METADATA_KEY, "1")?;
     db.set_metadata(REFRESH_CADENCE_V3_METADATA_KEY, "1")?;
     db.set_metadata(REFRESH_CADENCE_V4_METADATA_KEY, "1")?;
+    db.set_metadata(REFRESH_CADENCE_V5_METADATA_KEY, "1")?;
     if (!previous.include_personal_repositories && settings.include_personal_repositories)
         || (!previous.include_company_repositories && settings.include_company_repositories) {
         db.set_metadata("github_discovered_at", "")?;
@@ -413,7 +431,9 @@ pub fn sync_activity(state: &AppState) -> AppResult<SyncResult> {
     } else if result.loc_repositories_synced > 0 {
         result.message = format!("PR & issue refresh complete; line counts checked for {} repositories", result.loc_repositories_synced);
     }
-    record_refresh_timestamps(&state.database(), &mut result, false);
+    // A completed Repo Refresh covers repository activity and every line-count
+    // check due on this cadence, so it is the broad refresh shown in the header.
+    record_refresh_timestamps(&state.database(), &mut result, true);
     finish_progress(state, result.errors.first().cloned());
     Ok(result)
 }

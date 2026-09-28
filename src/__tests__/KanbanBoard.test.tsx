@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { createEvent, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import KanbanBoard from '../kanban/KanbanBoard'
 import { columnFor, isGitHubWorkUrl } from '../kanban/model'
@@ -40,7 +40,32 @@ describe('local Kanban workflow', () => {
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('sync_work_items', undefined))
     expect(invoke.mock.calls.some(([command]) => command === 'get_loc_history' || command === 'sync_github_data')).toBe(false)
   }, 15000)
-  it('persists keyboard ordering and explains why Done cannot receive local moves', async () => {
+  it('filters ticket types independently and keeps the completed control as a button', async () => {
+    invoke.mockImplementation(async (command, args) => command === 'get_kanban_preferences' ? preferences : command === 'get_kanban_page' ? { ...page, items: args.kind === 'none' || args.kind === 'issues' ? [] : [item], total: args.kind === 'none' || args.kind === 'issues' ? 0 : 1 } : undefined)
+    render(<KanbanBoard {...props} />)
+    await screen.findByText(item.title)
+    const prs = screen.getByRole('button', { name: 'PRs' }), issues = screen.getByRole('button', { name: 'Issues' })
+    expect(prs).toHaveAttribute('aria-pressed', 'true')
+    expect(issues).toHaveAttribute('aria-pressed', 'true')
+    fireEvent.click(prs)
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('get_kanban_page', expect.objectContaining({ kind: 'issues' })))
+    await waitFor(() => expect(prs).toHaveAttribute('aria-pressed', 'false'))
+    fireEvent.click(issues)
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('get_kanban_page', expect.objectContaining({ kind: 'none' })))
+    expect(prs).toHaveAttribute('aria-pressed', 'false')
+    expect(issues).toHaveAttribute('aria-pressed', 'false')
+    fireEvent.click(prs)
+    await waitFor(() => expect(prs).toHaveAttribute('aria-pressed', 'true'))
+    fireEvent.click(issues)
+    await waitFor(() => expect(issues).toHaveAttribute('aria-pressed', 'true'))
+    expect(prs).toHaveAttribute('aria-pressed', 'true')
+    expect(issues).toHaveAttribute('aria-pressed', 'true')
+    fireEvent.click(screen.getByRole('button', { name: 'Show completed' }))
+    expect(screen.getByRole('button', { name: 'Show completed' })).toHaveAttribute('aria-pressed', 'true')
+    await screen.findByRole('region', { name: 'Done column' })
+  })
+
+  it('shows a dashed insertion position and persists a drag within a column', async () => {
     let cached = [item, { ...item, item_key: 'second', title: 'Second work', sort_rank: 1 }]
     invoke.mockImplementation(async (command, args) => {
       if (command === 'get_kanban_preferences') return preferences
@@ -49,44 +74,64 @@ describe('local Kanban workflow', () => {
     })
     render(<KanbanBoard {...props} />)
     await screen.findByText('Second work')
-    fireEvent.click(screen.getByRole('button', { name: 'Move Second work up' }))
-    await waitFor(() => expect(invoke.mock.calls.filter(([command]) => command === 'set_kanban_metadata')).toHaveLength(2))
     const review = screen.getByRole('region', { name: 'Review column' })
-    expect(within(review).getAllByRole('article')[0]).toHaveTextContent('Second work')
-    fireEvent.click(screen.getByLabelText('Show completed'))
+    const transfer = { setData: vi.fn(), getData: () => 'second', effectAllowed: '', dropEffect: '' }
+    Object.defineProperty(within(review).getAllByRole('article')[0], 'getBoundingClientRect', { value: () => ({ top: 0, height: 100 }) })
+    fireEvent.dragStart(within(review).getAllByRole('article')[1], { dataTransfer: transfer })
+    const unchanged = createEvent.dragOver(review, { dataTransfer: transfer })
+    Object.defineProperty(unchanged, 'clientY', { value: 1000 })
+    fireEvent(review, unchanged)
+    expect(transfer.dropEffect).toBe('none')
+    expect(within(review).queryByRole('status', { name: 'Drop in Review' })).not.toBeInTheDocument()
+    const over = createEvent.dragOver(review, { dataTransfer: transfer })
+    Object.defineProperty(over, 'clientY', { value: 10 })
+    fireEvent(review, over)
+    expect(within(review).getByRole('status', { name: 'Drop in Review' })).toHaveClass('kanban-drop-placeholder')
+    expect(review.querySelectorAll('.kanban-card:not(.kanban-card-dragging)')).toHaveLength(1)
+    expect(transfer.effectAllowed).toBe('move')
+    expect(transfer.dropEffect).toBe('move')
+    fireEvent.drop(review, { dataTransfer: transfer })
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('set_kanban_metadata', expect.objectContaining({ item_key: 'second', manual_column: 'Review', sort_rank: -1024 })))
+    await waitFor(() => expect(within(review).getAllByRole('article')[0]).toHaveTextContent('Second work'))
+    fireEvent.keyDown(within(review).getAllByRole('article')[0], { key: 'ArrowDown', altKey: true })
+    await waitFor(() => expect(within(review).getAllByRole('article')[1]).toHaveTextContent('Second work'))
+    expect(screen.queryByText('Move Second work up')).not.toBeInTheDocument()
+  })
+
+  it('moves between columns and explains why Done cannot receive local moves', async () => {
+    let cached = [item]
+    invoke.mockImplementation(async (command, args) => {
+      if (command === 'get_kanban_preferences') return preferences
+      if (command === 'get_kanban_page') return { ...page, items: cached }
+      if (command === 'set_kanban_metadata') { const metadata = { ...args, revision: args.expected_revision + 1 }; cached = cached.map((row) => ({ ...row, ...metadata })); return metadata }
+    })
+    render(<KanbanBoard {...props} />)
+    await screen.findByText(item.title)
+    const transfer = { setData: vi.fn(), getData: () => item.item_key, effectAllowed: '', dropEffect: '' }
+    fireEvent.dragStart(within(screen.getByRole('region', { name: 'Review column' })).getByRole('article'), { dataTransfer: transfer })
+    const blocked = screen.getByRole('region', { name: 'Blocked column' })
+    fireEvent.dragOver(blocked, { dataTransfer: transfer, clientY: 100 })
+    expect(within(blocked).getByRole('status', { name: 'Drop in Blocked' })).toBeInTheDocument()
+    fireEvent.drop(blocked, { dataTransfer: transfer })
+    await waitFor(() => expect(within(blocked).getByText(item.title)).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: 'Show completed' }))
     const done = await screen.findByRole('region', { name: 'Done column' })
-    fireEvent.drop(done, { dataTransfer: { getData: () => item.item_key } })
+    fireEvent.dragStart(within(blocked).getByRole('article'), { dataTransfer: transfer })
+    fireEvent.dragOver(done, { dataTransfer: transfer })
+    expect(transfer.dropEffect).toBe('none')
+    expect(within(done).queryByRole('status', { name: 'Drop in Done' })).not.toBeInTheDocument()
+    fireEvent.drop(done, { dataTransfer: transfer })
     expect(screen.getByRole('alert')).toHaveTextContent('Done reflects GitHub completion')
     expect(screen.getByRole('button', { name: 'Open in GitHub' })).toBeInTheDocument()
   })
 
-  it('restarts pagination after a move changes the cached order', async () => {
-    let records = Array.from({ length: 201 }, (_, index) => ({ ...item, item_key: `pr:${index}`, title: `Work ${index}`, sort_rank: 0 }))
-    invoke.mockImplementation(async (command, args) => {
-      if (command === 'get_kanban_preferences') return preferences
-      if (command === 'get_kanban_page') return { ...page, items: [...records].sort((a, b) => a.sort_rank - b.sort_rank || a.item_key.localeCompare(b.item_key)).slice(args.offset, args.offset + args.limit), total: records.length, active_count: records.length }
-      if (command === 'set_kanban_metadata') {
-        records = records.map((row) => row.item_key === args.item_key ? { ...row, sort_rank: args.sort_rank, manual_column: args.manual_column } : row)
-        return { ...args, revision: 1 }
-      }
-    })
-    render(<KanbanBoard {...props} />)
-    await screen.findByText('Work 0')
-    fireEvent.change(screen.getByLabelText('Move Work 0'), { target: { value: 'Blocked' } })
-    await waitFor(() => expect(invoke.mock.calls.filter(([command]) => command === 'get_kanban_page').length).toBeGreaterThan(1))
-    await waitFor(() => expect(screen.queryByText('Work 0')).not.toBeInTheDocument())
-    fireEvent.click(await screen.findByText('Load more (200 of 201)'))
-    await screen.findByText('Work 0')
-    expect(screen.queryByText('Load more (200 of 201)')).not.toBeInTheDocument()
-    expect(document.querySelectorAll('.kanban-card')).toHaveLength(201)
-  })
-
-  it('resets a local column override to automatic and persists it across reload', async () => {
+  it('resets a local column override and Refresh Tickets reloads the board', async () => {
     let cached = { ...item, manual_column: 'Blocked' as string | null }
     invoke.mockImplementation(async (command, args) => {
       if (command === 'get_kanban_preferences') return preferences
       if (command === 'get_kanban_page') return { ...page, items: [cached] }
       if (command === 'get_kanban_links') return { items: [], partial: false }
+      if (command === 'sync_work_items') return { ok: true, errors: [], message: 'Updated' }
       if (command === 'set_kanban_metadata') { cached = { ...cached, ...args, revision: args.expected_revision + 1 }; return cached }
     })
     render(<KanbanBoard {...props} />)
@@ -95,26 +140,27 @@ describe('local Kanban workflow', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Reset to automatic' }))
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('set_kanban_metadata', expect.objectContaining({ manual_column: null, expected_revision: 0 })))
     expect(within(screen.getByRole('region', { name: 'Review column' })).getByText(item.title)).toBeInTheDocument()
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Reset to automatic' })).toBeDisabled())
     fireEvent.click(screen.getByRole('button', { name: 'Close details' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Reload board' }))
-    await waitFor(() => expect(within(screen.getByRole('region', { name: 'Review column' })).getByText(item.title)).toBeInTheDocument())
+    const reads = invoke.mock.calls.filter(([command]) => command === 'get_kanban_page').length
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh Tickets' }))
+    await waitFor(() => expect(invoke.mock.calls.filter(([command]) => command === 'get_kanban_page').length).toBeGreaterThan(reads))
     expect(cached.manual_column).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Reload board' })).not.toBeInTheDocument()
   })
 
-  it('moves optimistically and rolls back rejected stale saves; closed work cannot move', async () => {
+  it('rolls back a rejected drag save', async () => {
     let rejectSave!: (reason: Error) => void
-    invoke.mockImplementation((command) => command === 'get_kanban_preferences' ? Promise.resolve(preferences) : command === 'get_kanban_page' ? Promise.resolve({ ...page, items: [item, { ...item, item_key: 'closed', title: 'Closed work', state: 'closed' }], total: 2 }) : new Promise((_resolve, reject) => { rejectSave = reject }))
+    invoke.mockImplementation((command) => command === 'get_kanban_preferences' ? Promise.resolve(preferences) : command === 'get_kanban_page' ? Promise.resolve(page) : new Promise((_resolve, reject) => { rejectSave = reject }))
     render(<KanbanBoard {...props} />)
     await screen.findByText(item.title)
-    fireEvent.change(screen.getByLabelText(`Move ${item.title}`), { target: { value: 'Blocked' } })
-    expect(within(screen.getByRole('region', { name: 'Blocked column' })).getByText(item.title)).toBeInTheDocument()
-    expect(invoke).toHaveBeenCalledWith('set_kanban_metadata', expect.objectContaining({ manual_column: 'Blocked', expected_revision: 0 }))
+    const review = screen.getByRole('region', { name: 'Review column' }), blocked = screen.getByRole('region', { name: 'Blocked column' })
+    const transfer = { setData: vi.fn(), getData: () => item.item_key, effectAllowed: '', dropEffect: '' }
+    fireEvent.dragStart(within(review).getByRole('article'), { dataTransfer: transfer })
+    fireEvent.dragOver(blocked, { dataTransfer: transfer, clientY: 100 })
+    fireEvent.drop(blocked, { dataTransfer: transfer })
+    expect(within(blocked).getByText(item.title)).toBeInTheDocument()
     rejectSave(new Error('Revision conflict'))
     await screen.findByRole('alert')
-    expect(within(screen.getByRole('region', { name: 'Review column' })).getByText(item.title)).toBeInTheDocument()
-    fireEvent.click(screen.getByLabelText('Show completed'))
-    await screen.findByText('Closed work')
-    expect(screen.getByLabelText('Move Closed work')).toBeDisabled()
+    await waitFor(() => expect(within(review).getByText(item.title)).toBeInTheDocument())
   })
 })

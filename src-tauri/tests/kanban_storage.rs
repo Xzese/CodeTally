@@ -84,15 +84,16 @@ fn add_pull_request(database: &Database, repository_id: i64, number: i64, state:
 }
 
 #[test]
-fn kanban_is_off_by_default_and_legacy_cache_upgrade_preserves_activity() {
+fn kanban_defaults_on_but_explicit_disable_survives_legacy_cache_upgrade() {
     let (database, path) = temporary_database("legacy-upgrade");
     assert!(
-        !sync::app_settings(&database)
+        sync::app_settings(&database)
             .expect("default settings")
             .kanban_enabled
     );
+    sync::save_app_settings(&database, &AppSettings { kanban_enabled: false, ..AppSettings::default() }).expect("disable board");
     assert!(kanban::page(&database, board_query("prs", false, 0, 50))
-        .expect_err("board reads are disabled by default")
+        .expect_err("board reads are disabled by user setting")
         .to_string()
         .contains("Enable Kanban"));
 
@@ -413,6 +414,9 @@ fn board_counts_selection_and_pagination_work_across_one_hundred_repositories() 
     assert_eq!(first_page.active_count, 1_100);
     assert_eq!(first_page.completed_count, 100);
     assert_eq!(first_page.items.len(), 200);
+    let none = kanban::page(&database, board_query("none", true, 0, 200)).expect("no ticket types selected");
+    assert_eq!((none.active_count, none.completed_count, none.total), (0, 0, 0));
+    assert!(none.items.is_empty());
 
     let late_page = kanban::page(&database, board_query("prs", false, 1_000, 200))
         .expect("page after one thousand");

@@ -1,9 +1,10 @@
 import type { ActivityRelationship, AppSettings, MenuBarMetric, UpdateCheckInterval } from './types'
 
 const METRIC_ORDER: MenuBarMetric[] = ['total_lines', 'source_lines', 'test_lines', 'open_prs', 'open_issues']
+const REPO_REFRESH_INTERVALS = [60, 1440, 10080, 43200]
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
-  kanban_enabled: false,
+  kanban_enabled: true,
   activity_refresh_minutes: 1440,
   personal_refresh_minutes: 5,
   activity_relationship: 'author',
@@ -34,6 +35,9 @@ export function normalizeAppSettings(settings: Partial<AppSettings>): AppSetting
   return {
     ...DEFAULT_APP_SETTINGS,
     ...settings,
+    activity_refresh_minutes: REPO_REFRESH_INTERVALS.includes(settings.activity_refresh_minutes ?? NaN)
+      ? settings.activity_refresh_minutes!
+      : DEFAULT_APP_SETTINGS.activity_refresh_minutes,
     theme_mode: settings.theme_mode ?? 'system',
     activity_relationship: activityRelationship,
     update_check_interval: updateCheckInterval,

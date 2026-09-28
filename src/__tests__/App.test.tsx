@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from '../App'
+import { DEFAULT_APP_SETTINGS, normalizeAppSettings } from '../settings'
 import type { AppUpdate } from '../api'
 import type { AppSettings, DashboardData, DependencyStatus, FeedKind, Issue, LocSnapshot, MenuBarMetric, PullRequest, Repository, SyncProgress, SyncResult, ThemeMode } from '../types'
 
@@ -179,7 +180,7 @@ const syncOk: SyncResult = { ok: true, message: 'Sync complete', repositories_sy
 const defaultAppSettings: AppSettings = {
   personal_refresh_minutes: 5,
   kanban_enabled: false,
-  activity_refresh_minutes: 30,
+  activity_refresh_minutes: 1440,
   activity_relationship: 'author',
   update_check_interval: 'daily',
   lines_refresh_minutes: 1440,
@@ -397,6 +398,11 @@ afterEach(() => {
 })
 
 describe('dashboard UI', () => {
+  it('defaults the board on for settings without a Kanban field and preserves an explicit disable', () => {
+    expect(DEFAULT_APP_SETTINGS.kanban_enabled).toBe(true)
+    expect(normalizeAppSettings({ activity_refresh_minutes: 1440 }).kanban_enabled).toBe(true)
+    expect(normalizeAppSettings({ kanban_enabled: false }).kanban_enabled).toBe(false)
+  })
   it('refreshes PRs and issues from the sidebar while Kanban is disabled without loading history', async () => {
     const backend = invokeMock.getMockImplementation()!
     invokeMock.mockImplementation((command, args) => command === 'sync_work_items' ? Promise.resolve({ ...syncOk, message: 'Activity refresh finished' }) : backend(command, args))
@@ -494,8 +500,8 @@ describe('dashboard UI', () => {
     await user.click(screen.getByRole('button', { name: 'Settings' }))
     const drawer = await screen.findByRole('dialog', { name: 'Settings' })
     const activityRefresh = within(drawer).getByRole('radiogroup', { name: 'Repo Refresh' })
-    await user.click(within(activityRefresh).getByRole('radio', { name: 'Daily' }))
-    await waitFor(() => expect(savedSettings()[savedSettings().length - 1]).toEqual(expect.objectContaining({ activity_refresh_minutes: 1440 })))
+    await user.click(within(activityRefresh).getByRole('radio', { name: 'Weekly' }))
+    await waitFor(() => expect(savedSettings()[savedSettings().length - 1]).toEqual(expect.objectContaining({ activity_refresh_minutes: 10080 })))
 
     startupHistory.resolve(history)
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Code at a glance' })).toBeInTheDocument())
@@ -955,7 +961,7 @@ describe('dashboard UI', () => {
 
     try {
       await screen.findByRole('heading', { name: 'Code at a glance' })
-      const trigger = await screen.findByLabelText('Last refresh times')
+      const trigger = await screen.findByLabelText('Last refresh')
 
       fireEvent.focus(trigger)
       expect(await screen.findByText(/Repositories 1 \/ 2/)).toBeInTheDocument()
@@ -973,18 +979,18 @@ describe('dashboard UI', () => {
     }
   })
 
-  it('shows refresh timestamps in the titlebar and keeps Repo Refresh in Settings', async () => {
+  it('shows one broad refresh time and a separate spinner in the titlebar', async () => {
     const sync = deferred<SyncResult>()
     configureBackend({ fullSyncPromise: sync.promise, cachedDashboard: { ...dashboard, last_lines_refresh_at: null, last_full_refresh_at: null } })
     const user = await renderDashboard()
     try {
       const titlebar = screen.getByRole('banner')
       expect(within(titlebar).queryByRole('button', { name: /Refresh/ })).not.toBeInTheDocument()
-      expect(within(titlebar).getByText('Line counts')).toBeInTheDocument()
-      expect(within(titlebar).getByText('Everything')).toBeInTheDocument()
+      expect(within(titlebar).getByText('Last refreshed')).toBeInTheDocument()
+      expect(within(titlebar).queryByText('Line counts')).not.toBeInTheDocument()
+      expect(within(titlebar).queryByText('Everything')).not.toBeInTheDocument()
       expect(within(titlebar).getByText('Not recorded')).toBeInTheDocument()
-      expect(within(titlebar).getByText('No complete refresh')).toBeInTheDocument()
-      expect(within(titlebar).getByText('Everything').closest('span')).toHaveAttribute('title', 'No successful Force Refresh has completed. Partial or failed attempts do not set this time.')
+      expect(within(titlebar).getByText('Last refreshed').closest('span')).toHaveAttribute('title', 'No successful Repo Refresh or Force Refresh has completed. Partial or failed attempts do not set this time.')
       expect(screen.getByText('Personal activity · As of Not recorded')).toBeInTheDocument()
       await user.click(screen.getByRole('button', { name: 'Settings' }))
       const force = screen.getByRole('button', { name: 'Force Refresh' })
@@ -992,7 +998,20 @@ describe('dashboard UI', () => {
       await user.click(force)
       await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('sync_github_data', undefined))
       expect(screen.getByRole('button', { name: 'Refreshing…' })).toBeDisabled()
+      expect(within(titlebar).getByRole('status', { name: 'Refreshing' })).toBeInTheDocument()
+      expect(within(titlebar).queryByText('Refreshing')).not.toBeInTheDocument()
     } finally { sync.resolve(syncOk) }
+  })
+
+  it('shows only the last successful broad refresh date when idle', async () => {
+    configureBackend({ cachedDashboard: { ...dashboard, last_full_refresh_at: '2026-09-27T10:30:00Z' }, progress: { running: false, phase: 'complete', current: 1, total: 1, repository_name: 'sam/old-repository', message: 'Ready' } })
+    await renderDashboard()
+    fireEvent.focus(screen.getByLabelText('Last refresh'))
+    const details = await screen.findByRole('dialog', { name: 'Last refresh' })
+    expect(within(details).getByText('Last refresh')).toBeInTheDocument()
+    expect(details.querySelector('time')).toHaveAttribute('dateTime', '2026-09-27T10:30:00Z')
+    expect(within(details).queryByText('Ready')).not.toBeInTheDocument()
+    expect(within(details).queryByText('sam/old-repository')).not.toBeInTheDocument()
   })
 
   it('returns to an idle Refresh control after completed automatic sync progress', async () => {
@@ -1128,11 +1147,12 @@ describe('dashboard UI', () => {
     const personalRefresh = screen.getByRole('radiogroup', { name: 'Personal PR & issue refresh' })
     expect(within(personalRefresh).getByRole('radio', { name: '5 minutes' })).toBeChecked()
     await user.click(within(personalRefresh).getByRole('radio', { name: '15 minutes' }))
-    await waitFor(() => expect(savedSettings().at(-1)).toEqual(expect.objectContaining({ personal_refresh_minutes: 15, activity_refresh_minutes: 30 })))
+    await waitFor(() => expect(savedSettings().at(-1)).toEqual(expect.objectContaining({ personal_refresh_minutes: 15, activity_refresh_minutes: 1440 })))
     const updateChecks = within(await screen.findByRole('region', { name: 'About CodeTally' })).getByRole('radiogroup', { name: 'Check for Updates' })
     const codeChangeRefresh = screen.getByRole('switch', { name: /Refresh Lines of Code when code changes/i })
     await waitFor(() => {
-      expect(within(activityRefresh).getByRole('radio', { name: 'Current setting: 30 min' })).toBeChecked()
+      expect(within(activityRefresh).getByRole('radio', { name: 'Daily' })).toBeChecked()
+      expect(within(activityRefresh).queryByRole('radio', { name: /Current setting/ })).not.toBeInTheDocument()
       expect(within(updateChecks).getByRole('radio', { name: 'Daily' })).toBeChecked()
       expect(codeChangeRefresh).not.toBeChecked()
     })
@@ -1148,7 +1168,7 @@ describe('dashboard UI', () => {
     expect(linesRefreshHelp).toHaveTextContent(/line counts|lines of code/i)
     expect(linesRefreshHelp).not.toHaveTextContent(/pushedAt|commit SHA/i)
 
-    await user.click(within(activityRefresh).getByRole('radio', { name: 'Daily' }))
+    await user.click(within(activityRefresh).getByRole('radio', { name: 'Weekly' }))
     await user.click(within(activityRefresh).getByRole('radio', { name: 'Hourly' }))
     expect(screen.getByText(/Hourly repository refreshes/)).toHaveTextContent('API limits')
     await user.click(within(activityRefresh).getByRole('radio', { name: 'Daily' }))
@@ -1242,7 +1262,7 @@ describe('dashboard UI', () => {
 
     await user.click(screen.getByRole('button', { name: 'Settings' }))
     const activityRefresh = screen.getByRole('radiogroup', { name: 'Repo Refresh' })
-    await user.click(within(activityRefresh).getByRole('radio', { name: 'Daily' }))
+    await user.click(within(activityRefresh).getByRole('radio', { name: 'Weekly' }))
     await waitFor(() => expect(writes).toHaveLength(1))
 
     await user.click(within(activityRefresh).getByRole('radio', { name: 'Hourly' }))
@@ -1671,7 +1691,7 @@ describe('dashboard UI', () => {
         for (let index = 0; index < 12; index += 1) await Promise.resolve()
       })
       expect(screen.getByRole('heading', { name: 'Code at a glance' })).toBeInTheDocument()
-      fireEvent.focus(screen.getByLabelText('Last refresh times'))
+      fireEvent.focus(screen.getByLabelText('Last refresh'))
       const firstProgress = screen.getByText(/Repositories 1 \/ 7/)
       const firstPanel = firstProgress.closest('.sync-progress-panel')
       expect(firstPanel).not.toBeNull()
@@ -1754,7 +1774,7 @@ describe('dashboard UI', () => {
       expect(await screen.findByRole('heading', { name: 'Code at a glance' })).toBeInTheDocument()
       expect(screen.getByRole('heading', { name: 'Total Lines' })).toBeInTheDocument()
       expect(screen.queryByText('No LOC history for this range')).not.toBeInTheDocument()
-      fireEvent.focus(screen.getByLabelText('Last refresh times'))
+      fireEvent.focus(screen.getByLabelText('Last refresh'))
       expect(screen.getByText(/Repositories 1 \/ 2/)).toBeInTheDocument()
 
       const dashboardCalls = invokeMock.mock.calls.filter(([command]) => command === 'get_dashboard')

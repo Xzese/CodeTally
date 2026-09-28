@@ -1,7 +1,8 @@
 import { GitPullRequest, CircleDot } from 'lucide-react'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type DragEvent } from 'react'
 import { getKanbanLinks, getKanbanPage, getKanbanPreferences, setKanbanPreferences, openExternalUrl, setKanbanMetadata, syncWorkItems } from '../api'
 import ActivityRepositoryMenu, { activityScopeRepositories } from '../ActivityRepositoryMenu'
+import ActivityInvolvementFilter from '../ActivityInvolvementFilter'
 import type { ActivityRelationship, KanbanItem, KanbanKind, KanbanLinks, KanbanMetadata, KanbanPage, Repository } from '../types'
 import { relativeTime, repositoryId } from '../utils'
 import { COLUMNS, columnFor, isGitHubWorkUrl, type Column } from './model'
@@ -18,6 +19,9 @@ export default function KanbanBoard({ repositories, login, relationship: default
   const [loading, setLoading] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
   const [ordering, setOrdering] = useState(false)
+  const [draggedKey, setDraggedKey] = useState<string | null>(null)
+  const draggedKeyRef = useRef<string | null>(null)
+  const [dropTarget, setDropTarget] = useState<{ column: Column; index: number } | null>(null)
   const [blockedMove, setBlockedMove] = useState<KanbanItem | null>(null)
   const [error, setError] = useState('')
   const [selected, setSelected] = useState<string | null>(null)
@@ -73,53 +77,89 @@ export default function KanbanBoard({ repositories, login, relationship: default
       return false
     } finally { pendingRef.current.delete(item.item_key); setPending(new Set(pendingRef.current)) }
   }
-  const move = (item: KanbanItem, column: Column) => {
+  const cardsIn = (column: Column) => (page?.items ?? []).filter((row) => columnFor(row) === column).sort((a, b) => a.sort_rank - b.sort_rank || b.updated_at.localeCompare(a.updated_at) || a.item_key.localeCompare(b.item_key))
+  const clearDrag = () => { draggedKeyRef.current = null; setDraggedKey(null); setDropTarget(null) }
+  const place = async (item: KanbanItem, column: Column, index: number) => {
     if (column === 'Done' || columnFor(item) === 'Done') { setBlockedMove(item); return }
-    void save(item, { manual_column: column, sort_rank: Math.min(1_000_000_000, Math.max(0, ...(page?.items ?? []).map((row) => row.sort_rank)) + 1) }).then((saved) => { if (saved) void load() })
-  }
-  const reorder = async (cards: KanbanItem[], index: number, direction: number) => {
-    const target = index + direction
-    if (target < 0 || target >= cards.length) return
-    const ordered = [...cards]
-    ;[ordered[index], ordered[target]] = [ordered[target], ordered[index]]
+    const currentColumn = columnFor(item)
+    const sourceIndex = cardsIn(currentColumn).findIndex((row) => row.item_key === item.item_key)
+    if (currentColumn === column && sourceIndex === index) return
+    const ordered = cardsIn(column).filter((row) => row.item_key !== item.item_key)
+    ordered.splice(index, 0, item)
+    const before = ordered[index - 1]?.sort_rank
+    const after = ordered[index + 1]?.sort_rank
+    const rank = before === undefined ? after === undefined ? 0 : after - 1024 : after === undefined ? before + 1024 : Math.floor((before + after) / 2)
     setOrdering(true)
     try {
-      // Integer ranks need spacing when imported items all start at zero.
-      // Stop on a conflict so a newer local edit is never overwritten.
-      for (let position = 0; position < ordered.length; position++) {
-        const row = ordered[position], rank = -1_000_000_000 + position * 1024
-        if (row.sort_rank !== rank && !await save(row, { sort_rank: rank })) break
+      if (Math.abs(rank) <= 1_000_000_000 && (before === undefined || rank > before) && (after === undefined || rank < after)) {
+        await save(item, { manual_column: column, sort_rank: rank })
+      } else {
+        // Rebalance only when adjacent integer ranks have no room between them.
+        for (let position = 0; position < ordered.length; position++) {
+          const row = ordered[position], nextRank = -100_000_000 + position * 1024
+          if ((row.sort_rank !== nextRank || row.item_key === item.item_key || currentColumn !== column) && !await save(row, { sort_rank: nextRank, ...(row.item_key === item.item_key ? { manual_column: column } : {}) })) break
+        }
       }
     } finally { setOrdering(false); void load() }
   }
+  const dragOver = (event: DragEvent<HTMLElement>, column: Column) => {
+    const dragged = page?.items.find((row) => row.item_key === draggedKeyRef.current)
+    if (!dragged) return
+    event.preventDefault()
+    if (column === 'Done' || columnFor(dragged) === 'Done') { event.dataTransfer.dropEffect = 'none'; setDropTarget(null); return }
+    const visible = cardsIn(column).filter((row) => row.item_key !== dragged.item_key)
+    const nodes = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('.kanban-card:not(.kanban-card-dragging)'))
+    const index = nodes.findIndex((node) => event.clientY < node.getBoundingClientRect().top + node.getBoundingClientRect().height / 2)
+    const targetIndex = index < 0 ? visible.length : index
+    const sourceIndex = cardsIn(column).findIndex((row) => row.item_key === dragged.item_key)
+    const next = sourceIndex === targetIndex ? null : { column, index: targetIndex }
+    event.dataTransfer.dropEffect = next ? 'move' : 'none'
+    setDropTarget((current) => current?.column === next?.column && current?.index === next?.index ? current : next)
+  }
   const refresh = async () => {
     setRefreshing(true); setError('')
-    try { const result = await syncWorkItems(); await load(); if (!result.ok || result.errors.length) setError([result.message, ...result.errors].join(' ')) }
-    catch (reason) { setError(String(reason)) }
-    finally { setRefreshing(false) }
+    let failure = ''
+    try { const result = await syncWorkItems(); if (!result.ok || result.errors.length) failure = [result.message, ...result.errors].join(' ') }
+    catch (reason) { failure = String(reason) }
+    finally { await load(); if (failure) setError(failure); setRefreshing(false) }
   }
   const item = page?.items.find((row) => row.item_key === selected)
   return <main className="kanban-main">
     <div className="page-heading"><div><p className="eyebrow">Local workflow</p><h1>Kanban</h1></div><button className="button primary" disabled={refreshing || loading || pending.size > 0} onClick={() => void refresh()}>{refreshing ? 'Refreshing…' : 'Refresh Tickets'}</button></div>
     <p className="small-note">Last successful activity refresh: {relativeTime(page?.last_successful_refresh)} · Refresh fetches PRs and issues from all tracked repositories. Local changes do not update GitHub.</p>
-    <div className="kanban-filters"><label>Items <select aria-label="Board item type" value={kind} onChange={(event) => setKind(event.target.value as KanbanKind)}><option value="prs">Pull requests</option><option value="issues">Issues</option><option value="both">Both</option></select></label>
+    <div className="kanban-filters"><div className="kanban-kind-buttons" role="group" aria-label="Ticket types"><button className={kind === 'prs' || kind === 'both' ? 'active' : ''} aria-pressed={kind === 'prs' || kind === 'both'} onClick={() => setKind(kind === 'both' ? 'issues' : kind === 'prs' ? 'none' : kind === 'issues' ? 'both' : 'prs')}><GitPullRequest size={14} aria-hidden="true" /> PRs</button><button className={kind === 'issues' || kind === 'both' ? 'active' : ''} aria-pressed={kind === 'issues' || kind === 'both'} onClick={() => setKind(kind === 'both' ? 'prs' : kind === 'issues' ? 'none' : kind === 'prs' ? 'both' : 'issues')}><CircleDot size={14} aria-hidden="true" /> Issues</button></div>
       <ActivityRepositoryMenu repositories={repositories} login={login} value={scope} disabled={false} onChange={setScope} />
-      <label>My involvement <select aria-label="Board involvement" value={relationship} onChange={(event) => setRelationship(event.target.value as ActivityRelationship)}><option value="everyone">Everyone</option><option value="author">Authored by me</option><option value="assignee">Assigned to me</option><option value="author_or_assignee">Authored or assigned to me</option></select></label>
+      <ActivityInvolvementFilter id="kanban-involvement-select" value={relationship} login={login} onChange={setRelationship} />
       <input aria-label="Search board" placeholder="Search work items" value={search} onChange={(event) => setSearch(event.target.value)} />
-      <label><input type="checkbox" checked={completed} onChange={(event) => setCompleted(event.target.checked)} /> Show completed</label>
+      <button className={completed ? 'button secondary compact kanban-completed active' : 'button secondary compact kanban-completed'} aria-pressed={completed} onClick={() => setCompleted(!completed)}>Show completed</button>
     </div>
-    <div className="kanban-summary" aria-live="polite"><span>{page?.active_count ?? 0} cached active · {page?.completed_count ?? 0} cached completed</span>{loading && <span>Loading board…</span>}<button className="button secondary compact" disabled={loading || pending.size > 0} onClick={() => void load()}>Reload board</button></div>
+    <div className="kanban-summary" aria-live="polite"><span>{page?.active_count ?? 0} cached active · {page?.completed_count ?? 0} cached completed</span>{loading && <span>Loading board…</span>}</div>
     {blockedMove && <div role="alert" className="kanban-notice">Done reflects GitHub completion. Close or reopen this item on GitHub.<button className="button secondary compact" disabled={!isGitHubWorkUrl(blockedMove.url)} onClick={() => void openExternalUrl(blockedMove.url).catch((reason) => setError(String(reason)))}>Open in GitHub</button><button className="button secondary compact" onClick={() => setBlockedMove(null)}>Dismiss</button></div>}
     {error && <div role="alert" className="error-banner">{error}</div>}
     {page?.partial && <div role="status" className="kanban-notice">Activity data is partial. {page.errors.join(' ')}</div>}
-    {!loading && page && !page.items.length && <p className="kanban-notice">No work items match these filters. Refresh activity to fetch the latest GitHub data.</p>}
+    {!loading && page && !page.items.length && <p className="kanban-notice">{kind === 'none' ? 'Select PRs or Issues to show work items.' : 'No work items match these filters. Refresh activity to fetch the latest GitHub data.'}</p>}
     <div className="kanban-columns">{COLUMNS.filter((column) => completed || column !== 'Done').map((column) => {
-      const cards = (page?.items ?? []).filter((row) => columnFor(row) === column).sort((a, b) => a.sort_rank - b.sort_rank || b.updated_at.localeCompare(a.updated_at) || a.item_key.localeCompare(b.item_key))
-      return <section className="kanban-column" key={column} aria-label={`${column} column`} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); const dragged = page?.items.find((row) => row.item_key === event.dataTransfer.getData('text/plain')); if (dragged) move(dragged, column) }}>
-        <h2>{column} <small>{cards.length}{page && page.items.length < page.total ? ' loaded' : ''}</small></h2>{cards.map((card, cardIndex) => <article className="kanban-card" key={card.item_key} draggable={column !== 'Done' && !ordering && !pending.has(card.item_key)} onDragStart={(event) => event.dataTransfer.setData('text/plain', card.item_key)}>
+      const cards = cardsIn(column)
+      const rendered: Array<KanbanItem | null> = [...cards]
+      if (dropTarget?.column === column) {
+        const sourceIndex = cards.findIndex((card) => card.item_key === draggedKey)
+        rendered.splice(dropTarget.index + (sourceIndex >= 0 && sourceIndex <= dropTarget.index ? 1 : 0), 0, null)
+      }
+      return <section className="kanban-column" key={column} aria-label={`${column} column`} onDragOver={(event) => dragOver(event, column)} onDrop={(event) => { event.preventDefault(); const dragged = page?.items.find((row) => row.item_key === draggedKeyRef.current); const target = dropTarget; clearDrag(); if (dragged && column === 'Done') setBlockedMove(dragged); else if (dragged && target?.column === column) void place(dragged, column, target.index) }}>
+        <h2>{column} <small>{cards.length}{page && page.items.length < page.total ? ' loaded' : ''}</small></h2>{rendered.map((card) => card === null ? <div key="drop-placeholder" className="kanban-drop-placeholder" role="status" aria-label={`Drop in ${column}`} /> : <article className={card.item_key === draggedKey ? 'kanban-card kanban-card-dragging' : 'kanban-card'} key={card.item_key} tabIndex={0} aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown Alt+ArrowLeft Alt+ArrowRight" title="Drag to move. With keyboard focus, use Alt and arrow keys to move." draggable={column !== 'Done' && !ordering && !pending.has(card.item_key)} onKeyDown={(event) => {
+          if (!event.altKey || ordering || pending.size || column === 'Done') return
+          const direction = event.key === 'ArrowUp' ? -1 : event.key === 'ArrowDown' ? 1 : 0
+          if (direction) {
+            event.preventDefault()
+            const index = cards.findIndex((row) => row.item_key === card.item_key) + direction
+            if (index >= 0 && index < cards.length) void place(card, column, index)
+          } else if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+            event.preventDefault()
+            const nextColumn = COLUMNS[COLUMNS.indexOf(column) + (event.key === 'ArrowLeft' ? -1 : 1)]
+            if (nextColumn) void place(card, nextColumn, cardsIn(nextColumn).length)
+          }
+        }} onDragStart={(event) => { draggedKeyRef.current = card.item_key; setDraggedKey(card.item_key); event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', card.item_key) }} onDragEnd={clearDrag}>
           <button className="kanban-card-title" onClick={() => setSelected(card.item_key)}>{card.title}</button><span className="small-note">{card.kind === 'pr' ? <GitPullRequest size={13} aria-label="Pull request" /> : <CircleDot size={13} aria-label="Issue" />}{card.kind === 'pr' ? 'PR' : 'Issue'} · {card.repository} #{card.number}</span><div className="kanban-badges">{card.unavailable && <span>Unavailable · cached state</span>}<span>{card.merged_at || card.state.toLowerCase() === 'merged' ? 'Merged' : columnFor(card) === 'Done' ? card.kind === 'pr' ? 'Closed without merge' : card.completion_reason ?? 'Closed' : card.state}{card.is_draft ? ' · Draft' : ''}</span>{card.priority !== 'None' && <span>{card.priority}</span>}{card.ci_state && <span>CI: {card.ci_state}</span>}{card.notes && <span>Local notes</span>}</div><span className="small-note">{card.author ? `@${card.author} · ` : ''}{relativeTime(card.updated_at)}</span>
-          <label className="kanban-move">Move to <select aria-label={`Move ${card.title}`} value={column} disabled={column === 'Done' || ordering || pending.has(card.item_key)} onChange={(event) => move(card, event.target.value as Column)}>{COLUMNS.filter((value) => value !== 'Done' || column === 'Done').map((value) => <option key={value}>{value}</option>)}</select></label>
-          {column !== 'Done' && <div className="kanban-order"><button aria-label={`Move ${card.title} up`} disabled={ordering || pending.size > 0 || cardIndex === 0} onClick={() => void reorder(cards, cardIndex, -1)}>↑ Move up</button><button aria-label={`Move ${card.title} down`} disabled={ordering || pending.size > 0 || cardIndex === cards.length - 1} onClick={() => void reorder(cards, cardIndex, 1)}>↓ Move down</button></div>}
         </article>)}
       </section>
     })}</div>

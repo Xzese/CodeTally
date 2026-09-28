@@ -49,7 +49,7 @@ export async function screenshotCall(command: string, args: Record<string, unkno
       const relationship = String(args.relationship ?? 'everyone')
       const login = 'demo'
       const search = String(args.search ?? '').toLowerCase()
-      const filtered = items.filter((row) => ids.includes(row.repository_id) && (args.kind === 'both' || row.kind === (args.kind === 'issues' ? 'issue' : 'pr')) && (!search || `${row.title} ${row.repository} ${row.number}`.toLowerCase().includes(search)) && (relationship === 'everyone' || (relationship === 'author' ? row.author === login : relationship === 'assignee' ? row.assignees.includes(login) : row.author === login || row.assignees.includes(login))))
+      const filtered = items.filter((row) => ids.includes(row.repository_id) && (args.kind === 'both' || (args.kind !== 'none' && row.kind === (args.kind === 'issues' ? 'issue' : 'pr'))) && (!search || `${row.title} ${row.repository} ${row.number}`.toLowerCase().includes(search)) && (relationship === 'everyone' || (relationship === 'author' ? row.author === login : relationship === 'assignee' ? row.assignees.includes(login) : row.author === login || row.assignees.includes(login))))
       const active = filtered.filter((row) => row.state === 'OPEN').length
       const completed = filtered.length - active
       const visible = filtered.filter((row) => args.show_completed || row.state === 'OPEN')

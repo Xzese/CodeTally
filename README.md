@@ -8,7 +8,7 @@
   <a href="https://github.com/Xzese/CodeTally/releases"><img src="https://img.shields.io/github/v/release/Xzese/CodeTally?style=flat-square" alt="Latest release"></a>
 </p>
 
-CodeTally is a local desktop dashboard for understanding the repositories available to your GitHub account. It combines source and test line history, repository metadata, and recent pull-request and issue activity. An optional Kanban board adds local planning notes and placement.
+CodeTally is a local desktop dashboard for understanding the repositories available to your GitHub account. It combines source and test line history, repository metadata, and recent pull-request and issue activity. A local Kanban board adds planning notes and placement.
 
 The app is built with Tauri 2, React, TypeScript, Rust, SQLite, Recharts, the GitHub CLI, Git, and Tokei. It runs on your computer, stores its database and repository cache locally, and does not operate a hosted service.
 
@@ -22,7 +22,7 @@ The app is built with Tauri 2, React, TypeScript, Rust, SQLite, Recharts, the Gi
 - Repository detail pages with their own history, recent pull requests, recent issues, and GitHub link.
 - An activity sidebar that switches between pull requests and issues and filters by state, all personal repositories, all company repositories, a particular company, or a single repository.
 - Progress details during imports, full refreshes, and historical backfills.
-- An optional local Kanban board for tracked pull requests and issues.
+- A local Kanban board for tracked pull requests and issues, enabled by default.
 
 ## Menu bar
 
@@ -142,7 +142,7 @@ Settings apply automatically when you change a control and are stored in the loc
 
 **Settings → About CodeTally** displays the installed and latest versions together, update actions, and the project repository. An **About me** section introduces Sam and links to [www.samfaid.com](https://www.samfaid.com/) and [Buy Me a Coffee](https://www.buymeacoffee.com/samfaid).
 
-The **Background & refresh** section has one **Repo Refresh** interval for repository data and due line counts: hourly, daily, weekly, or monthly, with daily as the default. Its hourly choice warns about GitHub API limits. **Personal PR & issue refresh** has a separate interval, five minutes by default. Previously saved custom intervals remain in effect until you select a preset.
+The **Background & refresh** section has one **Repo Refresh** interval for repository data and due line counts: hourly, daily, weekly, or monthly, with daily as the default. Its hourly choice warns about GitHub API limits. Previously saved custom Repo Refresh intervals change to daily on upgrade. **Personal PR & issue refresh** has a separate interval, five minutes by default, and retains its custom option.
 
 In **Settings → Appearance & menu bar**, choose **Light**, **Dark**, or **Follow system**. Follow system is the default and responds to macOS appearance changes while the app is open.
 
@@ -180,15 +180,15 @@ Use **My involvement** in the feed to choose **Everyone**, **Authored by me** (d
 
 The activity repository filter opens collapsed **Personal repositories** and named company groups. Expand a group to choose all its repositories or one repository, or choose **All company repositories** across organizations. The selected scope carries across PR and issue tabs and only filters the feed; it does not change tracking. Group selection is applied before the activity result limit.
 
-## Optional local Kanban board
+## Local Kanban board
 
-Open **Settings → Kanban** and enable **Kanban board**. It is off by default. A **Kanban Board** button then appears in the title bar and becomes **Back to dashboard** while the board is open; the dashboard remains the landing screen. The board reads already cached PRs and issues from the repositories CodeTally tracks. Enabling it does not import history or create Git clones. Disabling it hides the board and retains local planning data for later reenabling; the ordinary activity sidebar and its refresh schedule continue.
+The board is enabled by default. Open it with **Kanban Board** in the title bar; that button becomes **Back to dashboard** while the board is open. The dashboard remains the landing screen. The board reads already cached PRs and issues from the repositories CodeTally tracks. Opening it does not import history or create Git clones. You can disable it under **Settings → Kanban**; doing so hides the board and retains local planning data for later reenabling. The ordinary activity sidebar and its refresh schedule continue.
 
-The board starts with both pull requests and issues selected. Choose **Pull requests**, **Issues**, or **Both**, then filter by repository or owner group, involvement, and text. Filters and **Show completed** are saved locally for the current GitHub account. A single-repository filter stays scoped to that repository; the all-repositories scope includes newly discovered eligible repositories. Board filters never change which repositories CodeTally tracks or which repositories **Refresh Tickets** contacts.
+The board starts with both **PRs** and **Issues** selected. Each button can be selected independently, including neither, then filter by repository or owner group, involvement, and text. Filters and **Show completed** are saved locally for the current GitHub account. A single-repository filter stays scoped to that repository; the all-repositories scope includes newly discovered eligible repositories. Board filters never change which repositories CodeTally tracks or which repositories **Refresh Tickets** contacts.
 
-The fixed columns are **Todo**, **In progress**, **Review**, **Blocked**, and **Done**. Open issues automatically start in Todo, draft PRs in In progress, and other open PRs in Review. Review means review work, not GitHub approval or merge readiness; CI is shown separately as a badge. You can drag an open card or use its keyboard-accessible **Move to** control, change order with **Move up/down**, set None/Low/Medium/High priority, and save a plain-text note. **Reset to automatic** removes a local column choice. These changes never edit GitHub. GitHub-closed issues and closed or merged PRs go to Done regardless of local placement; a closed PR is labeled **Closed without merge** unless GitHub reports a merge. Reopened items return to their previous manual active column, or their automatic column. To close, merge, or reopen anything, use **Open in GitHub**.
+The fixed columns are **Todo**, **In progress**, **Review**, **Blocked**, and **Done**. Open issues automatically start in Todo, draft PRs in In progress, and other open PRs in Review. Review means review work, not GitHub approval or merge readiness; CI is shown separately as a badge. Drag open cards within or between active columns. With keyboard focus on a card, use Alt+arrow keys to move it. Set None/Low/Medium/High priority and save a plain-text note in its details. **Reset to automatic** removes a local column choice. These changes never edit GitHub. GitHub-closed issues and closed or merged PRs go to Done regardless of local placement; a closed PR is labeled **Closed without merge** unless GitHub reports a merge. Reopened items return to their previous manual active column, or their automatic column. To close, merge, or reopen anything, use **Open in GitHub**.
 
-Completed cards are hidden by default. **Show completed** reveals Done and cached completed history. The separate **cached active** and **cached completed** counts cover all matching cached cards, including those beyond the current page. Closed and merged cards never contribute to active count. **Load more** pages through the local cache past 1,000 items. The board displays partial or stale import information separately from those exact cache counts, and cached items remain available offline. GitHub state appears after a successful refresh rather than through real-time webhooks. Automatic updates require CodeTally to be running and to complete a refresh.
+Completed cards are hidden by default. The **Show completed** button reveals Done and cached completed history. The separate **cached active** and **cached completed** counts cover all matching cached cards, including those beyond the current page. Closed and merged cards never contribute to active count. **Load more** pages through the local cache past 1,000 items. **Refresh Tickets** updates ticket data and reloads the board cache. The board displays partial or stale import information separately from those exact cache counts, and cached items remain available offline. GitHub state appears after a successful refresh rather than through real-time webhooks. Automatic updates require CodeTally to be running and to complete a refresh.
 
 Card details show local notes and a read-only section of explicit GitHub closing relationships when available. This is a bounded, cached view of closing links, not a claim to include all mentions or cross-references. A linked PR merging does not locally close an issue; the issue moves to Done only when its own GitHub state is refreshed as closed. Notes, priorities, placement, ordering, and filters stay on this computer. There is no cross-device sync, GitHub Projects integration, extra GitHub scope, per-repository installation, PAT, or new Actions secret. The existing `gh auth login` account and its repository permissions still determine which GitHub data is available.
 
@@ -198,7 +198,7 @@ These screenshots use fictional fixture repositories, tickets, and people in the
 | --- | --- |
 | Active board across repositories | ![Active Kanban columns with fictional pull requests and issues from three repositories](docs/screenshots/kanban-overview.png) |
 | Card details | ![Local column, priority, notes, GitHub source state, and explicit linked work](docs/screenshots/kanban-item-details.png) |
-| Opt-in and refresh settings | ![Kanban opt-in with local-storage explanation and separate refresh intervals](docs/screenshots/kanban-settings.png) |
+| Board and refresh settings | ![Kanban setting with local-storage explanation and separate refresh intervals](docs/screenshots/kanban-settings.png) |
 | Activity-only progress | ![Refresh Tickets progress for tracked repositories with unchanged line-count timestamps](docs/screenshots/kanban-activity-refresh.png) |
 | Completed work | ![Done column with completed issue, merged PR, closed without merge PR, and unchanged active count](docs/screenshots/kanban-completed.png) |
 

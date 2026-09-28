@@ -652,6 +652,7 @@ fn excluded_repositories_are_skipped_by_activity_sync_but_selected_repositories_
     let result = fake.with_path(|| sync::sync_activity(&state).expect("selected repository refresh"));
     assert!(result.ok);
     assert_eq!(result.activity_repositories_synced, 1);
+    assert!(database.metadata(sync::LAST_FULL_REFRESH_METADATA_KEY).expect("broad refresh marker").is_some());
     let calls = fake.calls();
     assert!(calls.lines().any(|call| call.contains("name=one")), "selected repository should reach GitHub: {calls}");
     assert!(!calls.lines().any(|call| call.contains("name=two")), "excluded repository must not reach GitHub: {calls}");
@@ -699,6 +700,8 @@ fn unavailable_repository_is_removed_with_cached_data_and_other_repositories_con
     let mut fake = FakeGh::new("unavailable-repository", "pages", 2);
     let repos = [repository("repo-1", "one"), repository("repo-2", "two")];
     let (database, database_path) = seed_database(&root, &repos);
+    // This test covers the legacy removal policy when the board is explicitly disabled.
+    sync::save_app_settings(&database, &AppSettings { kanban_enabled: false, ..AppSettings::default() }).expect("disable board");
     let sync_state = state(database_path, &root);
     fake.with_path(|| sync::sync_activity(&sync_state).expect("seed cached activity"));
     let stored = database.repositories().unwrap().remove(0);
@@ -802,6 +805,9 @@ fn explicit_work_item_sync_does_not_touch_loc_even_when_all_loc_triggers_are_due
     database
         .set_metadata(sync::LAST_LOC_REFRESH_METADATA_KEY, old_sweep)
         .expect("previous line refresh");
+    database
+        .set_metadata(sync::LAST_FULL_REFRESH_METADATA_KEY, old_sweep)
+        .expect("previous broad refresh");
     codetally_lib::kanban::remember_repository(&database, &stored.github_id)
         .expect("remember tracked repo");
     let cached_loc = Snapshot {
@@ -867,6 +873,7 @@ fn explicit_work_item_sync_does_not_touch_loc_even_when_all_loc_triggers_are_due
         Some(old_sweep)
     );
     assert_eq!(database.metadata(sync::LAST_LOC_REFRESH_METADATA_KEY).expect("line refresh marker").as_deref(), Some(old_sweep));
+    assert_eq!(database.metadata(sync::LAST_FULL_REFRESH_METADATA_KEY).expect("broad refresh marker").as_deref(), Some(old_sweep));
     assert!(database.metadata(sync::LAST_ACTIVITY_REFRESH_METADATA_KEY).expect("ticket refresh marker").is_some());
 
     let conn = rusqlite::Connection::open(database.path()).expect("database connection");

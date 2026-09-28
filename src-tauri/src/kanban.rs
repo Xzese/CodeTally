@@ -158,7 +158,7 @@ pub fn page(db: &Database, query: KanbanQuery) -> AppResult<KanbanPage> {
             "Enable Kanban in Settings first".into(),
         ));
     }
-    if !["prs", "issues", "both"].contains(&query.kind.as_str())
+    if !["prs", "issues", "both", "none"].contains(&query.kind.as_str())
         || !["everyone", "author", "assignee", "author_or_assignee"]
             .contains(&query.relationship.as_str())
         || query.offset < 0
@@ -560,7 +560,7 @@ pub fn preferences(db: &Database) -> AppResult<KanbanPreferences> {
 }
 
 pub fn save_preferences(db: &Database, value: KanbanPreferences) -> AppResult<KanbanPreferences> {
-    if !["prs", "issues", "both"].contains(&value.kind.as_str())
+    if !["prs", "issues", "both", "none"].contains(&value.kind.as_str())
         || !["everyone", "author", "assignee", "author_or_assignee"]
             .contains(&value.relationship.as_str())
         || value.repository_scope.len() > 200

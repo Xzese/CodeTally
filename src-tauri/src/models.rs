@@ -273,7 +273,7 @@ pub struct AppSettings {
     pub include_company_repositories: bool,
     #[serde(default)]
     pub excluded_repository_ids: Vec<String>,
-    #[serde(default)]
+    #[serde(default = "default_kanban_enabled")]
     pub kanban_enabled: bool,
 }
 
@@ -293,6 +293,7 @@ impl AppSettings {
 }
 
 fn default_run_in_background() -> bool { true }
+fn default_kanban_enabled() -> bool { true }
 fn default_personal_refresh_minutes() -> i64 { 5 }
 
 impl Default for AppSettings {
@@ -313,7 +314,7 @@ impl Default for AppSettings {
             include_personal_repositories: true,
             include_company_repositories: true,
             excluded_repository_ids: Vec::new(),
-            kanban_enabled: false,
+            kanban_enabled: true,
         }
     }
 }

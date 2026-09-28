@@ -13,17 +13,11 @@ import UpdateStatus from './UpdateStatus'
 import { DEFAULT_APP_SETTINGS, normalizeAppSettings } from './settings'
 import GitHubConnection from './GitHubConnection'
 import ActivityRepositoryMenu, { activityScopeRepositories } from './ActivityRepositoryMenu'
+import ActivityInvolvementFilter from './ActivityInvolvementFilter'
 import './styles.css'
 
 type Screen = 'dashboard' | 'detail' | 'kanban'
 type RepoSort = 'name' | 'loc' | 'source' | 'tests' | 'growth' | 'prs' | 'issues' | 'stars' | 'forks' | 'activity'
-
-const ACTIVITY_RELATIONSHIP_OPTIONS: Array<{ value: ActivityRelationship; label: string }> = [
-  { value: 'everyone', label: 'Everyone' },
-  { value: 'author', label: 'Authored by me' },
-  { value: 'assignee', label: 'Assigned to me' },
-  { value: 'author_or_assignee', label: 'Authored or assigned to me' }
-]
 
 const EMPTY_DEPS: DependencyStatus = { gh: false, git: false, tokei: false, gh_authenticated: false, authenticated: false, login: null }
 
@@ -542,7 +536,7 @@ function App() {
   const hasSavedRepositorySelection = !appSettings.include_personal_repositories || !appSettings.include_company_repositories || appSettings.excluded_repository_ids.length > 0
   const isSetup = activeRepositories.length === 0 && !busy && settingsLoaded && !hasSavedRepositorySelection
   const syncActive = syncing || importing || Boolean(syncProgress?.running)
-  const syncDetailsAvailable = syncActive || Boolean(syncProgress)
+  const syncDetailsAvailable = true
   const syncPopoverProgress = syncProgress ?? { running: true, phase: importing ? 'importing' : 'starting', current: 0, total: 0, message: importing ? importStep : 'Starting refresh' }
   const flushSettings = useCallback(async () => {
     if (settingsWorkerRef.current) return
@@ -630,14 +624,13 @@ function App() {
               if (!syncPopoverPinned && !event.currentTarget.contains(event.relatedTarget as Node | null)) setSyncPopoverOpen(false)
             }}
           >
-            <div className="refresh-timestamps" tabIndex={0} aria-label="Last refresh times">
-              <span title={exactDate(dashboard.last_lines_refresh_at)}>Line counts <strong>{dashboard.last_lines_refresh_at ? relativeTime(dashboard.last_lines_refresh_at) : 'Not recorded'}</strong></span>
-              <span title={dashboard.last_full_refresh_at ? exactDate(dashboard.last_full_refresh_at) : 'No successful Force Refresh has completed. Partial or failed attempts do not set this time.'}>Everything <strong>{dashboard.last_full_refresh_at ? relativeTime(dashboard.last_full_refresh_at) : 'No complete refresh'}</strong></span>
-              {syncActive && <span className="refresh-running"><LoaderCircle size={12} className="spin" />{importing ? 'Importing' : 'Refreshing'}</span>}
+            <div className="refresh-timestamps" tabIndex={0} aria-label="Last refresh">
+              <span title={dashboard.last_full_refresh_at ? exactDate(dashboard.last_full_refresh_at) : 'No successful Repo Refresh or Force Refresh has completed. Partial or failed attempts do not set this time.'}>Last refreshed <strong>{dashboard.last_full_refresh_at ? relativeTime(dashboard.last_full_refresh_at) : 'Not recorded'}</strong></span>
+              {syncActive && <span className="refresh-running" role="status" aria-label={importing ? 'Importing' : 'Refreshing'}><LoaderCircle size={13} className="spin" aria-hidden="true" /></span>}
             </div>
-            {syncDetailsAvailable && syncPopoverOpen && <div className="sync-popover" role="dialog" aria-label="Refresh details">
-              <div className="sync-popover-heading"><span>Refresh details</span><button className="icon-button subtle" type="button" aria-label="Close refresh details" onClick={() => { syncPopoverDismissedRef.current = true; setSyncPopoverOpen(false); setSyncPopoverPinned(false) }}><X size={14} /></button></div>
-              <SyncProgressPanel progress={syncPopoverProgress} />
+            {syncDetailsAvailable && syncPopoverOpen && <div className="sync-popover" role="dialog" aria-label={syncActive ? 'Refresh details' : 'Last refresh'}>
+              <div className="sync-popover-heading"><span>{syncActive ? 'Refresh details' : 'Last refresh'}</span><button className="icon-button subtle" type="button" aria-label="Close refresh details" onClick={() => { syncPopoverDismissedRef.current = true; setSyncPopoverOpen(false); setSyncPopoverPinned(false) }}><X size={14} /></button></div>
+              {syncActive ? <SyncProgressPanel progress={syncPopoverProgress} /> : <time className="sync-popover-date" dateTime={dashboard.last_full_refresh_at ?? undefined}>{dashboard.last_full_refresh_at ? exactDate(dashboard.last_full_refresh_at) : 'Not recorded'}</time>}
             </div>}
           </div>
         </div>
@@ -901,7 +894,7 @@ function ActivitySidebar({ asOf, onActivityRefreshed, syncBusy, activityProgress
   const effectiveAsOf = refreshedAt && (!asOf || new Date(refreshedAt).getTime() > new Date(asOf).getTime()) ? refreshedAt : asOf
   const feed = kind === 'prs' ? prs : issues
   const selectedRepository = lockedRepository ?? repository
-  return <aside className="activity-sidebar"><div className="sidebar-sticky"><div className="sidebar-heading"><div><p className="eyebrow">Live feed <span className="feed-count">{feed.length}</span></p><h2>Recent activity</h2></div><button className="button primary compact activity-refresh-button" disabled={syncBusy || refreshing} title="Fetch PRs and issues from all tracked repositories without scanning lines of code" onClick={() => void refreshActivity()}>{refreshing ? 'Refreshing…' : 'Refresh Tickets'}</button></div><p className="activity-as-of" title={exactDate(effectiveAsOf)}>{relationship === 'everyone' ? 'All tracked activity' : 'Personal activity'} · As of {effectiveAsOf ? relativeTime(effectiveAsOf) : 'Not recorded'}</p>{refreshing || refreshMessage ? <p className="small-note" role="status">{refreshing && activityProgress?.phase.includes('work_items') ? activityProgress.message : refreshMessage}</p> : null}{refreshError && <p className="activity-refresh-error" role="alert">{refreshError}</p>}<div className="feed-tabs" role="tablist"><button className={kind === 'prs' ? 'active' : ''} onClick={() => onKind('prs')}><GitPullRequest size={14} aria-hidden="true" />Pull requests</button><button className={kind === 'issues' ? 'active' : ''} onClick={() => onKind('issues')}><CircleDot size={14} aria-hidden="true" />Issues</button></div><div className="feed-filters"><div className="filter-pills">{(kind === 'prs' ? (['all', 'open', 'merged'] as FeedState[]) : (['all', 'open', 'closed'] as FeedState[])).map((key) => <button key={key} className={state === key ? 'active' : ''} onClick={() => onState(key)}>{key[0].toUpperCase() + key.slice(1)}</button>)}</div><div className="activity-involvement-filter"><label htmlFor="activity-involvement-select">My involvement</label><div className="select-wrap"><select id="activity-involvement-select" aria-label="My involvement" value={relationship} onChange={(event) => onRelationship(event.target.value as ActivityRelationship)}>{ACTIVITY_RELATIONSHIP_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select><ChevronDown size={14} /></div>{login && <span className="activity-involvement-note">Signed in as {login}</span>}</div><ActivityRepositoryMenu repositories={repositories} login={login} value={selectedRepository} disabled={Boolean(lockedRepository)} onChange={onRepository} /></div></div><div className="feed-list">{feed.length ? feed.map((item) => kind === 'prs' ? <PullRequestItem key={`${activityRepo(item)}-${item.number}`} item={item} onOpen={() => onOpenUrl(item.url)} /> : <IssueItem key={`${activityRepo(item)}-${item.number}`} item={item} onOpen={() => onOpenUrl(item.url)} />) : <div className="feed-empty"><CircleDot size={21} /><p>No {kind === 'prs' ? 'pull requests' : 'issues'} match these filters</p><span>Activity will appear here after the next refresh.</span></div>}</div></aside>
+  return <aside className="activity-sidebar"><div className="sidebar-sticky"><div className="sidebar-heading"><div><p className="eyebrow">Live feed <span className="feed-count">{feed.length}</span></p><h2>Recent activity</h2></div><button className="button primary compact activity-refresh-button" disabled={syncBusy || refreshing} title="Fetch PRs and issues from all tracked repositories without scanning lines of code" onClick={() => void refreshActivity()}>{refreshing ? 'Refreshing…' : 'Refresh Tickets'}</button></div><p className="activity-as-of" title={exactDate(effectiveAsOf)}>{relationship === 'everyone' ? 'All tracked activity' : 'Personal activity'} · As of {effectiveAsOf ? relativeTime(effectiveAsOf) : 'Not recorded'}</p>{refreshing || refreshMessage ? <p className="small-note" role="status">{refreshing && activityProgress?.phase.includes('work_items') ? activityProgress.message : refreshMessage}</p> : null}{refreshError && <p className="activity-refresh-error" role="alert">{refreshError}</p>}<div className="feed-tabs" role="tablist"><button className={kind === 'prs' ? 'active' : ''} onClick={() => onKind('prs')}><GitPullRequest size={14} aria-hidden="true" />Pull requests</button><button className={kind === 'issues' ? 'active' : ''} onClick={() => onKind('issues')}><CircleDot size={14} aria-hidden="true" />Issues</button></div><div className="feed-filters"><div className="filter-pills">{(kind === 'prs' ? (['all', 'open', 'merged'] as FeedState[]) : (['all', 'open', 'closed'] as FeedState[])).map((key) => <button key={key} className={state === key ? 'active' : ''} onClick={() => onState(key)}>{key[0].toUpperCase() + key.slice(1)}</button>)}</div><ActivityInvolvementFilter id="activity-involvement-select" value={relationship} login={login} onChange={onRelationship} /><ActivityRepositoryMenu repositories={repositories} login={login} value={selectedRepository} disabled={Boolean(lockedRepository)} onChange={onRepository} /></div></div><div className="feed-list">{feed.length ? feed.map((item) => kind === 'prs' ? <PullRequestItem key={`${activityRepo(item)}-${item.number}`} item={item} onOpen={() => onOpenUrl(item.url)} /> : <IssueItem key={`${activityRepo(item)}-${item.number}`} item={item} onOpen={() => onOpenUrl(item.url)} />) : <div className="feed-empty"><CircleDot size={21} /><p>No {kind === 'prs' ? 'pull requests' : 'issues'} match these filters</p><span>Activity will appear here after the next refresh.</span></div>}</div></aside>
 }
 
 function PullRequestItem({ item, onOpen }: { item: PullRequest; onOpen: () => void }) {
