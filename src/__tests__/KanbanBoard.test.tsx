@@ -33,7 +33,7 @@ describe('local Kanban workflow', () => {
   it('starts with both PRs and issues and hides completed cards, loads subsequent pages past 1000, and refreshes only activity', async () => {
     invoke.mockImplementation(async (command, args) => {
       if (command === 'get_kanban_preferences') return preferences
-      if (command === 'sync_work_items') return { ok: true, errors: [], message: 'Updated' }
+      if (command === 'sync_personal_work_items') return { ok: true, errors: [], message: 'Updated' }
       if (command === 'get_kanban_page') return args.offset === 0 ? { ...page, items: Array.from({ length: 1000 }, (_, i) => ({ ...item, item_key: `pr:${i}`, title: `Work ${i}` })), total: 1001 } : { ...page, items: [{ ...item, title: 'Beyond initial thousand' }], total: 1001 }
     })
     render(<KanbanBoard {...props} />)
@@ -47,9 +47,9 @@ describe('local Kanban workflow', () => {
     await screen.findByText('Beyond initial thousand')
     expect(invoke).toHaveBeenCalledWith('get_kanban_page', expect.objectContaining({ offset: 1000 }))
     fireEvent.click(screen.getByText('Refresh Tickets'))
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith('sync_work_items', undefined))
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('sync_personal_work_items', undefined))
     await waitFor(() => expect(props.onActivityRefreshed).toHaveBeenCalled())
-    expect(invoke.mock.calls.some(([command]) => command === 'get_loc_history' || command === 'sync_github_data')).toBe(false)
+    expect(invoke.mock.calls.some(([command]) => command === 'get_loc_history' || command === 'sync_github_data' || command === 'sync_work_items')).toBe(false)
   }, 15000)
   it('filters ticket types independently and keeps the completed control as a button', async () => {
     invoke.mockImplementation(async (command, args) => command === 'get_kanban_preferences' ? preferences : command === 'get_kanban_page' ? { ...page, items: args.kind === 'none' || args.kind === 'issues' ? [] : [item], total: args.kind === 'none' || args.kind === 'issues' ? 0 : 1 } : undefined)
@@ -81,7 +81,7 @@ describe('local Kanban workflow', () => {
     await screen.findByText(item.title)
     view.rerender(<KanbanBoard {...props} syncBusy />)
     expect(screen.getByRole('button', { name: 'Refresh in progress…' })).toBeDisabled()
-    expect(invoke.mock.calls.some(([command]) => command === 'sync_work_items')).toBe(false)
+    expect(invoke.mock.calls.some(([command]) => command === 'sync_personal_work_items')).toBe(false)
   })
 
   it('shows a dashed insertion position and persists a drag within a column', async () => {
@@ -153,7 +153,7 @@ describe('local Kanban workflow', () => {
       if (command === 'get_kanban_preferences') return preferences
       if (command === 'get_kanban_page') return { ...page, items: [cached] }
       if (command === 'get_kanban_links') return { items: [], partial: false }
-      if (command === 'sync_work_items') return { ok: true, errors: [], message: 'Updated' }
+      if (command === 'sync_personal_work_items') return { ok: true, errors: [], message: 'Updated' }
       if (command === 'set_kanban_metadata') { cached = { ...cached, ...args, revision: args.expected_revision + 1 }; return cached }
     })
     render(<KanbanBoard {...props} />)

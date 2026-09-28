@@ -1,8 +1,8 @@
 import { listen } from '@tauri-apps/api/event'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { AreaChart, CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
-import { AlertCircle, ArrowDown, ArrowLeft, ArrowUp, BarChart3, Check, ChevronDown, ChevronUp, CircleDot, ExternalLink, GitBranch, GitPullRequest, Github, HardDrive, ListFilter, LoaderCircle, Settings, Terminal, X, Zap } from 'lucide-react'
-import { checkDependencies, discoverRepositories, getActivityFeed, getActivityRefreshAt, getAppSettings, getDashboard, getGithubUser, getLocHistory, getSyncProgress, openExternalUrl, setAppSettings, syncActivity, syncGithubData, syncWorkItems } from './api'
+import { AlertCircle, ArrowDown, ArrowLeft, ArrowUp, BarChart3, Check, ChevronDown, ChevronUp, CircleDot, ExternalLink, GitBranch, GitPullRequest, Github, HardDrive, ListFilter, LoaderCircle, PanelRightClose, PanelRightOpen, Settings, Terminal, X, Zap } from 'lucide-react'
+import { checkDependencies, discoverRepositories, getActivityFeed, getActivityRefreshAt, getPersonalRefreshAt, getAppSettings, getDashboard, getGithubUser, getLocHistory, getSyncProgress, openExternalUrl, setAppSettings, syncActivity, syncGithubData, syncPersonalWorkItems, syncWorkItems } from './api'
 import type { ActivityRelationship, AppSettings, DashboardData, DependencyStatus, FeedKind, Issue, LocSnapshot, PullRequest, Repository, SyncProgress, TimeRange } from './types'
 import { aggregateHistory, filterIssues, filterPullRequests, isDraft, isMerged, sortRepositories, type FeedState } from './model'
 import { activityRepo, exactDate, formatCompact, formatCount, formatSigned, normalizeDashboard, normalizeLabels, relativeTime, repoActivity, repoBaseline30Available, repoChange, repoChangePercent, repoForks, repoLocAvailable, repoName, repoOpenIssues, repoOpenPrs, repoSource, repoStars, repoTests, repoTotal, repositoryId, repositoryLabel } from './utils'
@@ -18,6 +18,7 @@ import './styles.css'
 
 type Screen = 'dashboard' | 'detail' | 'kanban'
 type RepoSort = 'name' | 'loc' | 'source' | 'tests' | 'growth' | 'prs' | 'issues' | 'stars' | 'forks' | 'activity'
+const NARROW_FEED_WIDTH = 1000
 
 const EMPTY_DEPS: DependencyStatus = { gh: false, git: false, tokei: false, gh_authenticated: false, authenticated: false, login: null }
 
@@ -71,6 +72,7 @@ function App() {
   const [dashboard, setDashboard] = useState(toDashboard())
   const [busy, setBusy] = useState(true)
   const [syncing, setSyncing] = useState(false)
+  const [allTicketsRefreshing, setAllTicketsRefreshing] = useState(false)
   const [importing, setImporting] = useState(false)
   const [importStep, setImportStep] = useState('Preparing import')
   const [syncProgress, setSyncProgress] = useState<SyncProgress | null>(null)
@@ -94,6 +96,24 @@ function App() {
   const [settingsLoaded, setSettingsLoaded] = useState(false)
   const [settingsSaving, setSettingsSaving] = useState(false)
   const [settingsError, setSettingsError] = useState<string | null>(null)
+  const [narrowFeed, setNarrowFeed] = useState(() => window.innerWidth < NARROW_FEED_WIDTH)
+  const [wideFeedOpen, setWideFeedOpen] = useState(true)
+  const [narrowFeedOpen, setNarrowFeedOpen] = useState(false)
+  const feedOpen = narrowFeed ? narrowFeedOpen : wideFeedOpen
+  useEffect(() => {
+    const updateWidth = () => setNarrowFeed(window.innerWidth < NARROW_FEED_WIDTH)
+    window.addEventListener('resize', updateWidth)
+    return () => window.removeEventListener('resize', updateWidth)
+  }, [])
+  useEffect(() => { if (narrowFeed) setNarrowFeedOpen(false) }, [narrowFeed])
+  useEffect(() => { setNarrowFeedOpen(false) }, [screen])
+  useEffect(() => {
+    if (!narrowFeed || !narrowFeedOpen) return
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === 'Escape') setNarrowFeedOpen(false) }
+    window.addEventListener('keydown', closeOnEscape)
+    return () => window.removeEventListener('keydown', closeOnEscape)
+  }, [narrowFeed, narrowFeedOpen])
+  const toggleFeed = () => narrowFeed ? setNarrowFeedOpen((open) => !open) : setWideFeedOpen((open) => !open)
   useEffect(() => { if (!appSettings.kanban_enabled && screen === 'kanban') setScreen('dashboard') }, [appSettings.kanban_enabled, screen])
   const feedRelationship = appSettings.activity_relationship
   const settingsIntentRef = useRef(DEFAULT_APP_SETTINGS)
@@ -241,6 +261,43 @@ function App() {
     refreshActivityTimestamp()
   }, [refreshActivityTimestamp])
 
+  const refreshPersonalTimestamp = useCallback(() => {
+    void getPersonalRefreshAt().then((timestamp) => {
+      setDashboard((current) => {
+        const existing = current.last_personal_refresh_at
+        if (existing && (!timestamp || new Date(existing).getTime() > new Date(timestamp).getTime())) return current
+        return { ...current, last_personal_refresh_at: timestamp }
+      })
+    }).catch(() => undefined)
+  }, [])
+
+  const refreshPersonalCache = useCallback(() => {
+    setFeedRevision((current) => current + 1)
+    refreshPersonalTimestamp()
+    if (screen === 'detail' && selectedRepoId !== null) {
+      void Promise.all([getActivityFeed({ kind: 'prs', repositoryId: selectedRepoId }), getActivityFeed({ kind: 'issues', repositoryId: selectedRepoId })]).then(([prs, issues]) => {
+        setDetailPrs(prs as PullRequest[])
+        setDetailIssues(issues as Issue[])
+      }).catch(() => undefined)
+    }
+  }, [refreshPersonalTimestamp, screen, selectedRepoId])
+
+  const refreshAllTickets = useCallback(async () => {
+    if (syncingRef.current || importingRef.current) return
+    setAllTicketsRefreshing(true)
+    setError(null)
+    try {
+      const result = await syncWorkItems()
+      refreshActivityCache()
+      const failure = syncFailure(result)
+      if (failure) setError(failure)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason))
+    } finally {
+      setAllTicketsRefreshing(false)
+    }
+  }, [refreshActivityCache])
+
   const refreshData = useCallback(async (automatic = false) => {
     if (syncingRef.current || importingRef.current) return
     syncingRef.current = true
@@ -322,6 +379,7 @@ function App() {
     let polling = false
     let wasRunning = false
     let workItemsOnly = false
+    let personalOnly = false
     const poll = async () => {
       if (polling || syncingRef.current || importingRef.current) return
       polling = true
@@ -330,15 +388,19 @@ function App() {
         if (!alive || syncingRef.current || importingRef.current) return
         setSyncProgress(progress)
         if (progress.running) {
-          workItemsOnly = progress.phase === 'discovering_work_items' || progress.phase === 'syncing_work_items'
+          personalOnly = progress.phase === 'syncing_personal_work_items'
+          workItemsOnly = personalOnly || progress.phase === 'discovering_work_items' || progress.phase === 'syncing_work_items'
           wasRunning = true
           if (!workItemsOnly) await refreshCachedData()
         } else if (wasRunning) {
           wasRunning = false
-          if (workItemsOnly || progress.phase === 'work_items_complete') {
+          if (personalOnly || progress.phase === 'personal_work_items_complete') {
+            refreshPersonalCache()
+          } else if (workItemsOnly || progress.phase === 'work_items_complete') {
             refreshActivityCache()
           } else await loadFinalData()
           workItemsOnly = false
+          personalOnly = false
         }
       } catch { /* Keep the cached dashboard available. */ }
       finally { polling = false }
@@ -353,7 +415,7 @@ function App() {
     const timer = window.setInterval(() => void poll(), 2000)
     window.addEventListener('focus', onFocus)
     return () => { alive = false; unlisten?.(); window.clearInterval(timer); window.removeEventListener('focus', onFocus) }
-  }, [loadFinalData, refreshCachedData, refreshActivityCache])
+  }, [loadFinalData, refreshCachedData, refreshActivityCache, refreshPersonalCache])
 
   useEffect(() => {
     if (!syncing && !importing) return
@@ -550,7 +612,10 @@ function App() {
   const filteredIssues = useMemo(() => filterIssues(dashboard.issues, feedState === 'merged' ? 'all' : feedState, groupedFeedScope ? 'all' : feedRepo).filter((item) => !groupedFeedScope || scopedFeedRepositories.some((repo) => isRepoActivity(item, repo))), [dashboard.issues, feedRepo, feedState, groupedFeedScope, scopedFeedRepositories])
   const hasSavedRepositorySelection = !appSettings.include_personal_repositories || !appSettings.include_company_repositories || appSettings.excluded_repository_ids.length > 0
   const isSetup = activeRepositories.length === 0 && !busy && settingsLoaded && !hasSavedRepositorySelection
-  const syncActive = syncing || importing || Boolean(syncProgress?.running)
+  const syncActive = syncing || importing || allTicketsRefreshing || Boolean(syncProgress?.running)
+  const personalActivityNewest = Boolean(dashboard.last_personal_refresh_at && (!dashboard.last_activity_refresh_at || new Date(dashboard.last_personal_refresh_at).getTime() > new Date(dashboard.last_activity_refresh_at).getTime()))
+  const latestActivityRefreshAt = personalActivityNewest ? dashboard.last_personal_refresh_at : dashboard.last_activity_refresh_at
+  const activityRefreshDescription = personalActivityNewest ? 'Personal tickets were refreshed' : 'All tracked repositories were refreshed'
   const syncDetailsAvailable = true
   const syncPopoverProgress = syncProgress ?? { running: true, phase: importing ? 'importing' : 'starting', current: 0, total: 0, message: importing ? importStep : 'Starting refresh' }
   const flushSettings = useCallback(async () => {
@@ -629,7 +694,8 @@ function App() {
           {login ? <span className="identity"><span className="status-dot" />{login}</span> : <span className="muted">Local desktop dashboard</span>}
           <button className="icon-button" title="Settings" onClick={() => setSettingsOpen(true)}><Settings size={17} /></button>
           <UpdateStatus updateCheckInterval={settingsLoaded ? appSettings.update_check_interval : null} />
-          <div
+          <div className="topbar-refresh-group">
+            <div
             className={syncDetailsAvailable ? 'sync-popover-wrap active' : 'sync-popover-wrap'}
             ref={syncPopoverRef}
             onMouseEnter={() => { syncPopoverDismissedRef.current = false; if (syncDetailsAvailable) setSyncPopoverOpen(true) }}
@@ -641,7 +707,7 @@ function App() {
           >
             <div className="refresh-timestamps" tabIndex={0} aria-label="Refresh times">
               <div className="refresh-timestamp-list">
-                <span title={dashboard.last_activity_refresh_at ? exactDate(dashboard.last_activity_refresh_at) : 'No successful all-repository PR and issue refresh has completed.'}>Activities refreshed <strong>{dashboard.last_activity_refresh_at ? relativeTime(dashboard.last_activity_refresh_at) : 'Not recorded'}</strong></span>
+                <span title={latestActivityRefreshAt ? `${activityRefreshDescription} ${exactDate(latestActivityRefreshAt)}` : 'No successful PR and issue refresh has completed.'}>Activities refreshed <strong>{latestActivityRefreshAt ? relativeTime(latestActivityRefreshAt) : 'Not recorded'}</strong></span>
                 <span title={dashboard.last_full_refresh_at ? exactDate(dashboard.last_full_refresh_at) : 'No successful Repo Refresh or Force Refresh has completed. Partial or failed attempts do not set this time.'}>Last refreshed <strong>{dashboard.last_full_refresh_at ? relativeTime(dashboard.last_full_refresh_at) : 'Not recorded'}</strong></span>
               </div>
               {syncActive && <span className="refresh-running" role="status" aria-label={importing ? 'Importing' : 'Refreshing'}><LoaderCircle size={13} className="spin" aria-hidden="true" /></span>}
@@ -649,11 +715,13 @@ function App() {
             {syncDetailsAvailable && syncPopoverOpen && <div className="sync-popover" role="dialog" aria-label={syncActive ? 'Refresh details' : 'Last refresh'}>
               <div className="sync-popover-heading"><span>{syncActive ? 'Refresh details' : 'Last refresh'}</span><button className="icon-button subtle" type="button" aria-label="Close refresh details" onClick={() => { syncPopoverDismissedRef.current = true; setSyncPopoverOpen(false); setSyncPopoverPinned(false) }}><X size={14} /></button></div>
               <div className="sync-popover-timestamps">
-                <div><span>Activities refreshed</span><time dateTime={dashboard.last_activity_refresh_at ?? undefined}>{dashboard.last_activity_refresh_at ? exactDate(dashboard.last_activity_refresh_at) : 'Not recorded'}</time></div>
+                <div><span>Activities refreshed</span><time dateTime={latestActivityRefreshAt ?? undefined} title={activityRefreshDescription}>{latestActivityRefreshAt ? exactDate(latestActivityRefreshAt) : 'Not recorded'}</time></div>
                 <div><span>Last refreshed</span><time dateTime={dashboard.last_full_refresh_at ?? undefined}>{dashboard.last_full_refresh_at ? exactDate(dashboard.last_full_refresh_at) : 'Not recorded'}</time></div>
               </div>
               {syncActive && <SyncProgressPanel progress={syncPopoverProgress} />}
             </div>}
+            </div>
+            {!isSetup && screen !== 'kanban' && <button className="icon-button feed-toggle" type="button" aria-label={feedOpen ? 'Hide activity sidebar' : 'Show activity sidebar'} aria-controls="activity-sidebar" aria-expanded={feedOpen} title={feedOpen ? 'Hide Live Feed' : 'Show Live Feed'} onClick={toggleFeed}>{feedOpen ? <PanelRightClose size={17} /> : <PanelRightOpen size={17} />}</button>}
           </div>
         </div>
       </header>
@@ -661,8 +729,8 @@ function App() {
       {error && <div className="error-banner"><AlertCircle size={16} /><span>{error}</span><button className="icon-button subtle" onClick={() => setError(null)} aria-label="Dismiss error"><X size={15} /></button></div>}
 
       {busy && !dashboard.repositories.length ? <LoadingScreen /> : isSetup ? <SetupScreen deps={deps} login={login} error={error} importing={importing} importStep={importStep} checking={checkingDependencies} onImport={() => void importRepositories()} onRetry={checkSetupConnection} /> : (
-        <div className={screen === 'kanban' && appSettings.kanban_enabled ? 'content-shell kanban-shell' : 'content-shell'}>
-          {screen === 'kanban' && appSettings.kanban_enabled ? <KanbanBoard repositories={activeRepositories} login={login} relationship={feedRelationship} onRelationship={handleFeedRelationship} onBack={backToDashboard} onActivityRefreshed={refreshActivityTimestamp} syncBusy={syncActive} revision={feedRevision} /> : screen === 'dashboard' ? (
+        <div className={screen === 'kanban' && appSettings.kanban_enabled ? 'content-shell kanban-shell' : `content-shell${feedOpen ? '' : ' feed-collapsed'}`}>
+          {screen === 'kanban' && appSettings.kanban_enabled ? <KanbanBoard repositories={activeRepositories} login={login} relationship={feedRelationship} onRelationship={handleFeedRelationship} onBack={backToDashboard} onActivityRefreshed={refreshPersonalCache} syncBusy={syncActive} revision={feedRevision} /> : screen === 'dashboard' ? (
             <main className="main-column">
               {deps.gh && !dependenciesAuthenticated(deps) && <GitHubConnection deps={deps} login={login} compact checking={checkingDependencies} onRetry={checkSetupConnection} />}
               {activeRepositories.length === 0 ? <EmptySelectionState onOpenSettings={() => setSettingsOpen(true)} /> : <>
@@ -675,11 +743,12 @@ function App() {
           ) : selectedRepo ? (
             <RepositoryDetails repo={selectedRepo} history={visibleHistory} historyLoading={detailLoading} metric={metric} range={range} onMetric={setMetric} onRange={setRange} onBack={backToDashboard} pullRequests={detailPrs} issues={detailIssues} onOpenUrl={(url) => void openUrl(url, setError)} />
           ) : null}
-          {screen !== 'kanban' && <ActivitySidebar asOf={feedRelationship === 'everyone' ? dashboard.last_activity_refresh_at : dashboard.last_personal_refresh_at} onActivityRefreshed={refreshActivityCache} syncBusy={syncActive} activityProgress={syncProgress} login={login} kind={feedKind} state={feedState} relationship={feedRelationship} repository={feedRepo} lockedRepository={screen === 'detail' && selectedRepo ? String(repositoryId(selectedRepo)) : null} repositories={activeRepositories} prs={filteredPrs} issues={filteredIssues} onKind={handleFeedKind} onState={handleFeedState} onRelationship={handleFeedRelationship} onRepository={handleFeedRepository} onOpenUrl={(url) => void openUrl(url, setError)} />}
+          {screen !== 'kanban' && narrowFeed && <button className="activity-backdrop" type="button" aria-label="Close activity sidebar" aria-hidden={!feedOpen} tabIndex={feedOpen ? 0 : -1} onClick={() => setNarrowFeedOpen(false)} />}
+          {screen !== 'kanban' && <ActivitySidebar hidden={!feedOpen} asOf={feedRelationship === 'everyone' ? dashboard.last_activity_refresh_at : dashboard.last_personal_refresh_at} onActivityRefreshed={refreshPersonalCache} syncBusy={syncActive} activityProgress={syncProgress} login={login} kind={feedKind} state={feedState} relationship={feedRelationship} repository={feedRepo} lockedRepository={screen === 'detail' && selectedRepo ? String(repositoryId(selectedRepo)) : null} repositories={activeRepositories} prs={filteredPrs} issues={filteredIssues} onKind={handleFeedKind} onState={handleFeedState} onRelationship={handleFeedRelationship} onRepository={handleFeedRepository} onOpenUrl={(url) => void openUrl(url, setError)} />}
         </div>
       )}
 
-      {settingsOpen && <SettingsDrawer onForceRefresh={() => void refreshData()} refreshing={syncActive} settings={appSettings} loaded={settingsLoaded} metrics={dashboard.metrics} saving={settingsSaving} error={settingsError} onChange={changeSettings} onRetry={() => void (settingsLoaded ? flushSettings() : loadSettings())} onClose={() => setSettingsOpen(false)} />}
+      {settingsOpen && <SettingsDrawer onForceRefresh={() => void refreshData()} onRefreshAllTickets={() => void refreshAllTickets()} refreshing={syncActive} settings={appSettings} loaded={settingsLoaded} metrics={dashboard.metrics} saving={settingsSaving} error={settingsError} onChange={changeSettings} onRetry={() => void (settingsLoaded ? flushSettings() : loadSettings())} onClose={() => setSettingsOpen(false)} />}
     </div>
   )
 }
@@ -710,6 +779,8 @@ function ProgressMeter({ value, max, label }: { value: number; max: number; labe
 
 function readablePhase(phase: string): string {
   if (!phase) return 'Working'
+  if (phase === 'syncing_personal_work_items') return 'Searching your tickets'
+  if (phase === 'personal_work_items_complete') return 'Tickets updated'
   if (phase === 'discovering' || phase === 'discovering_activity') return 'Finding repositories'
   if (phase === 'syncing' || phase === 'syncing_repository' || phase === 'syncing_activity') return 'Updating'
   if (phase === 'backfilling') return 'Building line history'
@@ -724,7 +795,8 @@ function SyncProgressPanel({ progress }: { progress: SyncProgress }) {
   const overallLabel = counts.repositoriesTotal > 0 ? `Repositories ${counts.repositoriesCurrent} / ${counts.repositoriesTotal}` : 'Waiting for repository count'
   const samplesLabel = counts.snapshotsTotal > 0 ? `Lines scanned ${counts.snapshotsCurrent} / ${counts.snapshotsTotal}` : null
   const activityOnly = progress.phase.includes('work_items')
-  return <section className="sync-progress-panel" aria-live="polite"><div className="sync-progress-heading"><div><p className="eyebrow">{progress.running ? readablePhase(progress.phase) : 'Last refresh'}</p><strong>{progress.message || readablePhase(progress.phase)}</strong>{progress.repository_name && <span>{progress.repository_name}</span>}</div><span className={progress.running ? 'sync-progress-state active' : 'sync-progress-state'}>{progress.running ? 'Updating' : 'Updated'}</span>{progress.error && <div className="sync-progress-error"><AlertCircle size={13} /> {progress.error}</div>}</div><div className="sync-progress-bars"><div className="sync-progress-row"><div><span>Repository progress</span><b>{overallLabel}</b></div><ProgressMeter value={counts.repositoriesCurrent} max={counts.repositoriesTotal} label="Repository progress" /></div>{!activityOnly && <div className="sync-progress-row samples"><div><span>Current line scan</span><b>{samplesLabel ?? 'Waiting to scan lines'}</b></div><ProgressMeter value={counts.snapshotsCurrent} max={counts.snapshotsTotal} label="Current line scan progress" /></div>}</div></section>
+  const personalOnly = progress.phase.includes('personal_work_items')
+  return <section className="sync-progress-panel" aria-live="polite"><div className="sync-progress-heading"><div><p className="eyebrow">{progress.running ? readablePhase(progress.phase) : 'Last refresh'}</p><strong>{progress.message || readablePhase(progress.phase)}</strong>{progress.repository_name && !personalOnly && <span>{progress.repository_name}</span>}</div><span className={progress.running ? 'sync-progress-state active' : 'sync-progress-state'}>{progress.running ? 'Updating' : 'Updated'}</span>{progress.error && <div className="sync-progress-error"><AlertCircle size={13} /> {progress.error}</div>}</div>{personalOnly ? <p className="sync-progress-personal">Searching your authored and assigned tickets in tracked repositories.</p> : <div className="sync-progress-bars"><div className="sync-progress-row"><div><span>Repository progress</span><b>{overallLabel}</b></div><ProgressMeter value={counts.repositoriesCurrent} max={counts.repositoriesTotal} label="Repository progress" /></div>{!activityOnly && <div className="sync-progress-row samples"><div><span>Current line scan</span><b>{samplesLabel ?? 'Waiting to scan lines'}</b></div><ProgressMeter value={counts.snapshotsCurrent} max={counts.snapshotsTotal} label="Current line scan progress" /></div>}</div>}</section>
 }
 
 function SetupScreen({ deps, login, error, importing, importStep, checking, onImport, onRetry }: { deps: DependencyStatus; login: string; error: string | null; importing: boolean; importStep: string; checking: boolean; onImport: () => void; onRetry: () => void | Promise<void> }) {
@@ -770,14 +842,15 @@ function LocTooltip({ active, payload, label }: { active?: boolean; payload?: Ar
 
 function RepositoryTable({ repositories, login, sort, direction, onSort, onSelect }: { repositories: Repository[]; login: string; sort: RepoSort; direction: 'asc' | 'desc'; onSort: (sort: RepoSort) => void; onSelect: (repo: Repository) => void }) {
   const [hiddenIds, setHiddenIds] = useState<Set<string>>(() => new Set())
-  const visibleRepositories = repositories.filter((repo) => !hiddenIds.has(String(repositoryId(repo))))
+  const [excludeForks, setExcludeForks] = useState(false)
+  const visibleRepositories = repositories.filter((repo) => !hiddenIds.has(String(repositoryId(repo))) && (!excludeForks || !(repo.is_fork ?? repo.isFork)))
   const setVisible = (ids: string[], visible: boolean) => setHiddenIds((current) => {
     const next = new Set(current)
     for (const id of ids) { if (visible) next.delete(id); else next.add(id) }
     return next
   })
   const columns: Array<{ key: RepoSort; label: string; title: string }> = [{ key: 'name', label: 'Repository', title: 'Repository' }, { key: 'loc', label: 'Total', title: 'Total lines' }, { key: 'source', label: 'Source', title: 'Source lines' }, { key: 'tests', label: 'Tests', title: 'Test lines' }, { key: 'growth', label: '30d', title: '30-day change' }, { key: 'prs', label: 'PRs', title: 'Open pull requests' }, { key: 'issues', label: 'Issues', title: 'Open issues' }, { key: 'stars', label: 'Stars', title: 'GitHub stars' }, { key: 'forks', label: 'Forks', title: 'GitHub forks' }, { key: 'activity', label: 'Activity', title: 'Last activity' }]
-  return <section className="repos-panel"><div className="panel-heading table-heading"><div><p className="eyebrow">Your repositories</p><h2>Repositories</h2></div><TrackedRepositoryMenu repositories={repositories} login={login} hiddenIds={hiddenIds} onVisibilityChange={setVisible} onShowAll={() => setHiddenIds(new Set())} /></div>{visibleRepositories.length ? <div className="table-scroll"><table><thead><tr>{columns.map((column) => <th key={column.key}><button className={sort === column.key ? 'sort-button active' : 'sort-button'} title={`Sort by ${column.title}`} onClick={() => onSort(column.key)}>{column.label}{sort === column.key && (direction === 'asc' ? <ChevronUp size={13} /> : <ChevronDown size={13} />)}</button></th>)}</tr></thead><tbody>{visibleRepositories.map((repo) => { const isPrivate = repo.is_private ?? repo.isPrivate ?? false; return <tr key={String(repositoryId(repo))} onClick={() => onSelect(repo)} tabIndex={0} onKeyDown={(event) => { if (event.key === 'Enter') onSelect(repo) }}><td><div className="repo-cell"><span className="repo-glyph"><GitBranch size={14} /></span><span><strong>{repoName(repo)}</strong><small><span className="repo-meta-text">{repo.owner ?? repositoryLabel(repo).split('/')[0]}{repo.primary_language ?? repo.primaryLanguage ? ` · ${repo.primary_language ?? repo.primaryLanguage}` : ''}</span><em className={`repo-visibility ${isPrivate ? 'private' : 'public'}`}>{isPrivate ? 'Private' : 'Public'}</em></small></span></div></td><td className="number-cell" title={!repoLocAvailable(repo) ? 'Lines are not available for this repository' : undefined}>{repoLocDisplay(repo, repoTotal(repo))}</td><td className="number-cell" title={!repoLocAvailable(repo) ? 'Lines are not available for this repository' : undefined}>{repoLocDisplay(repo, repoSource(repo))}</td><td className="number-cell" title={!repoLocAvailable(repo) ? 'Lines are not available for this repository' : undefined}>{repoLocDisplay(repo, repoTests(repo))}</td><td className={repoGrowthClass(repo)} title={repoGrowthTitle(repo)}>{repoChangeDisplay(repo)}</td><td className="number-cell">{formatCount(repoOpenPrs(repo))}</td><td className="number-cell">{formatCount(repoOpenIssues(repo))}</td><td className="number-cell">{formatCount(repoStars(repo))}</td><td className="number-cell">{formatCount(repoForks(repo))}</td><td><span className="relative" title={exactDate(repoActivity(repo))}>{relativeTime(repoActivity(repo))}</span></td></tr> })}</tbody></table></div> : <div className="empty-state"><GitBranch size={22} /><p>{repositories.length ? 'All repositories are hidden' : 'No repositories selected'}</p></div>}</section>
+  return <section className="repos-panel"><div className="panel-heading table-heading"><div><p className="eyebrow">Your repositories</p><h2>Repositories</h2></div><TrackedRepositoryMenu repositories={repositories} login={login} hiddenIds={hiddenIds} excludeForks={excludeForks} onExcludeForks={setExcludeForks} onVisibilityChange={setVisible} onShowAll={() => { setHiddenIds(new Set()); setExcludeForks(false) }} /></div>{visibleRepositories.length ? <div className="table-scroll" role="region" tabIndex={0} aria-label="Repository table; scroll sideways for more columns"><p className="table-scroll-hint">Scroll sideways for more columns</p><table><thead><tr>{columns.map((column) => <th key={column.key}><button className={sort === column.key ? 'sort-button active' : 'sort-button'} title={`Sort by ${column.title}`} onClick={() => onSort(column.key)}>{column.label}{sort === column.key && (direction === 'asc' ? <ChevronUp size={13} /> : <ChevronDown size={13} />)}</button></th>)}</tr></thead><tbody>{visibleRepositories.map((repo) => { const isPrivate = repo.is_private ?? repo.isPrivate ?? false; return <tr key={String(repositoryId(repo))} onClick={() => onSelect(repo)} tabIndex={0} onKeyDown={(event) => { if (event.key === 'Enter') onSelect(repo) }}><td><div className="repo-cell"><span className="repo-glyph"><GitBranch size={14} /></span><span><strong>{repoName(repo)}</strong><small><span className="repo-meta-text">{repo.owner ?? repositoryLabel(repo).split('/')[0]}{repo.primary_language ?? repo.primaryLanguage ? ` · ${repo.primary_language ?? repo.primaryLanguage}` : ''}</span><em className={`repo-visibility ${isPrivate ? 'private' : 'public'}`}>{isPrivate ? 'Private' : 'Public'}</em></small></span></div></td><td className="number-cell" title={!repoLocAvailable(repo) ? 'Lines are not available for this repository' : undefined}>{repoLocDisplay(repo, repoTotal(repo))}</td><td className="number-cell" title={!repoLocAvailable(repo) ? 'Lines are not available for this repository' : undefined}>{repoLocDisplay(repo, repoSource(repo))}</td><td className="number-cell" title={!repoLocAvailable(repo) ? 'Lines are not available for this repository' : undefined}>{repoLocDisplay(repo, repoTests(repo))}</td><td className={repoGrowthClass(repo)} title={repoGrowthTitle(repo)}>{repoChangeDisplay(repo)}</td><td className="number-cell">{formatCount(repoOpenPrs(repo))}</td><td className="number-cell">{formatCount(repoOpenIssues(repo))}</td><td className="number-cell">{formatCount(repoStars(repo))}</td><td className="number-cell">{formatCount(repoForks(repo))}</td><td><span className="relative" title={exactDate(repoActivity(repo))}>{relativeTime(repoActivity(repo))}</span></td></tr> })}</tbody></table></div> : <div className="empty-state"><GitBranch size={22} /><p>{excludeForks ? 'No non-fork repositories match this view' : repositories.length ? 'All repositories are hidden' : 'No repositories selected'}</p></div>}</section>
 }
 
 function SelectionCheckbox({ label, checked, mixed = false, disabled = false, onChange }: { label: string; checked: boolean; mixed?: boolean; disabled?: boolean; onChange: (checked: boolean) => void }) {
@@ -786,7 +859,7 @@ function SelectionCheckbox({ label, checked, mixed = false, disabled = false, on
   return <input ref={ref} className="mac-checkbox" type="checkbox" aria-label={label} aria-checked={mixed ? 'mixed' : checked} checked={checked} disabled={disabled} onChange={(event) => onChange(event.target.checked)} />
 }
 
-function TrackedRepositoryMenu({ repositories, login, hiddenIds, onVisibilityChange, onShowAll }: { repositories: Repository[]; login: string; hiddenIds: Set<string>; onVisibilityChange: (ids: string[], visible: boolean) => void; onShowAll: () => void }) {
+function TrackedRepositoryMenu({ repositories, login, hiddenIds, excludeForks, onExcludeForks, onVisibilityChange, onShowAll }: { repositories: Repository[]; login: string; hiddenIds: Set<string>; excludeForks: boolean; onExcludeForks: (exclude: boolean) => void; onVisibilityChange: (ids: string[], visible: boolean) => void; onShowAll: () => void }) {
   const [open, setOpen] = useState(false)
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
   const containerRef = useRef<HTMLDivElement>(null)
@@ -833,9 +906,10 @@ function TrackedRepositoryMenu({ repositories, login, hiddenIds, onVisibilityCha
     return () => { window.removeEventListener('resize', dismissOnViewportChange); document.removeEventListener('scroll', dismissOnScroll, true); document.removeEventListener('pointerdown', dismissOutside); document.removeEventListener('keydown', dismissOnEscape) }
   }, [open])
   const ownerOf = (repo: Repository) => repo.owner ?? repositoryLabel(repo).split('/')[0] ?? 'Unknown'
-  const personal = repositories.filter((repo) => ownerOf(repo).toLowerCase() === login.toLowerCase())
+  const filterableRepositories = repositories.filter((repo) => !excludeForks || !(repo.is_fork ?? repo.isFork))
+  const personal = filterableRepositories.filter((repo) => ownerOf(repo).toLowerCase() === login.toLowerCase())
   const companies = new Map<string, { owner: string; repositories: Repository[] }>()
-  for (const repo of repositories) {
+  for (const repo of filterableRepositories) {
     const owner = ownerOf(repo)
     if (owner.toLowerCase() === login.toLowerCase()) continue
     const key = owner.toLowerCase()
@@ -847,12 +921,13 @@ function TrackedRepositoryMenu({ repositories, login, hiddenIds, onVisibilityCha
     { key: 'personal', label: 'Personal repositories', repositories: personal },
     ...[...companies.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([key, group]) => ({ key: `company-${key}`, label: `${group.owner} repositories`, repositories: group.repositories }))
   ].filter((group) => group.repositories.length)
-  const visibleCount = repositories.filter((repo) => !hiddenIds.has(String(repositoryId(repo)))).length
+  const visibleCount = filterableRepositories.filter((repo) => !hiddenIds.has(String(repositoryId(repo)))).length
   return <div ref={containerRef} className={open ? 'tracked-repository-menu open' : 'tracked-repository-menu'} onBlur={(event) => { if (event.relatedTarget instanceof Node && !event.currentTarget.contains(event.relatedTarget)) setOpen(false) }}>
     <button ref={triggerRef} type="button" aria-expanded={open} aria-haspopup="dialog" aria-controls="repository-view-picker" onClick={() => { if (!open) setExpanded({}); setOpen((current) => !current) }}><CircleDot size={13} /> {repositories.length} tracked <ChevronDown size={14} /></button>
     {open && <div ref={panelRef} style={panelStyle} tabIndex={-1} role="dialog" aria-label="Show repositories in table" id="repository-view-picker" className="repo-picker tracked-repository-groups">
-      <div className="repo-picker-heading"><strong>Show in table</strong><span>{visibleCount} of {repositories.length} visible</span><button type="button" onClick={onShowAll} disabled={visibleCount === repositories.length}>Show all</button></div>
+      <div className="repo-picker-heading"><strong>Show in table</strong><span>{visibleCount} of {repositories.length} visible</span><button type="button" onClick={onShowAll} disabled={visibleCount === repositories.length && !excludeForks}>Show all</button></div>
       <p className="repo-picker-note">Tracking continues for hidden repositories.</p>
+      <label className="repo-picker-option repo-picker-fork-filter"><SelectionCheckbox label="Exclude forks from table" checked={excludeForks} onChange={onExcludeForks} /><span>Exclude forks</span></label>
       {groups.map((group) => {
         const groupOpen = expanded[group.key] ?? false
         const ids = group.repositories.map((repo) => String(repositoryId(repo)))
@@ -898,15 +973,17 @@ function detailChangeValue(repo: Repository): string {
   return repoLocAvailable(repo) && repoBaseline30Available(repo) ? formatSigned(repoChange(repo), true) : '—'
 }
 
-function ActivitySidebar({ asOf, onActivityRefreshed, syncBusy, activityProgress, login, kind, state, relationship, repository, lockedRepository, repositories, prs, issues, onKind, onState, onRelationship, onRepository, onOpenUrl }: { asOf?: string | null; onActivityRefreshed: () => void; syncBusy: boolean; activityProgress: SyncProgress | null; login: string; kind: FeedKind; state: FeedState; relationship: ActivityRelationship; repository: string; lockedRepository?: string | null; repositories: Repository[]; prs: PullRequest[]; issues: Issue[]; onKind: (kind: FeedKind) => void; onState: (state: FeedState) => void; onRelationship: (relationship: ActivityRelationship) => void; onRepository: (repository: string) => void; onOpenUrl: (url: string | undefined) => void }) {
+function ActivitySidebar({ hidden, asOf, onActivityRefreshed, syncBusy, activityProgress, login, kind, state, relationship, repository, lockedRepository, repositories, prs, issues, onKind, onState, onRelationship, onRepository, onOpenUrl }: { hidden: boolean; asOf?: string | null; onActivityRefreshed: () => void; syncBusy: boolean; activityProgress: SyncProgress | null; login: string; kind: FeedKind; state: FeedState; relationship: ActivityRelationship; repository: string; lockedRepository?: string | null; repositories: Repository[]; prs: PullRequest[]; issues: Issue[]; onKind: (kind: FeedKind) => void; onState: (state: FeedState) => void; onRelationship: (relationship: ActivityRelationship) => void; onRepository: (repository: string) => void; onOpenUrl: (url: string | undefined) => void }) {
+  const sidebarRef = useRef<HTMLElement>(null)
+  useEffect(() => { if (sidebarRef.current) sidebarRef.current.inert = hidden }, [hidden])
   const [refreshing, setRefreshing] = useState(false)
   const [refreshMessage, setRefreshMessage] = useState('')
   const [refreshedAt, setRefreshedAt] = useState<string | null>(null)
   const [refreshError, setRefreshError] = useState('')
   const refreshActivity = async () => {
-    setRefreshing(true); setRefreshMessage('Refreshing PRs and issues across all tracked repositories…'); setRefreshError('')
+    setRefreshing(true); setRefreshMessage('Searching your authored and assigned PRs and issues in tracked repositories…'); setRefreshError('')
     try {
-      const result = await syncWorkItems()
+      const result = await syncPersonalWorkItems()
       onActivityRefreshed()
       setRefreshMessage(result.message)
       if (result.ok && !result.errors.length) setRefreshedAt(new Date().toISOString())
@@ -914,10 +991,10 @@ function ActivitySidebar({ asOf, onActivityRefreshed, syncBusy, activityProgress
     } catch (reason) { setRefreshError(String(reason)); setRefreshMessage('') }
     finally { setRefreshing(false) }
   }
-  const effectiveAsOf = refreshedAt && (!asOf || new Date(refreshedAt).getTime() > new Date(asOf).getTime()) ? refreshedAt : asOf
+  const effectiveAsOf = relationship !== 'everyone' && refreshedAt && (!asOf || new Date(refreshedAt).getTime() > new Date(asOf).getTime()) ? refreshedAt : asOf
   const feed = kind === 'prs' ? prs : issues
   const selectedRepository = lockedRepository ?? repository
-  return <aside className="activity-sidebar"><div className="sidebar-sticky"><div className="sidebar-heading"><div><p className="eyebrow">Live feed <span className="feed-count">{feed.length}</span></p><h2>Recent activity</h2></div><button className="button primary compact activity-refresh-button" disabled={syncBusy || refreshing} title="Fetch PRs and issues from all tracked repositories without scanning lines of code" onClick={() => void refreshActivity()}>{refreshing ? 'Refreshing…' : 'Refresh Tickets'}</button></div><p className="activity-as-of" title={exactDate(effectiveAsOf)}>{relationship === 'everyone' ? 'All tracked activity' : 'Personal activity'} · As of {effectiveAsOf ? relativeTime(effectiveAsOf) : 'Not recorded'}</p>{refreshing || refreshMessage ? <p className="small-note" role="status">{refreshing && activityProgress?.phase.includes('work_items') ? activityProgress.message : refreshMessage}</p> : null}{refreshError && <p className="activity-refresh-error" role="alert">{refreshError}</p>}<div className="feed-tabs" role="tablist"><button className={kind === 'prs' ? 'active' : ''} onClick={() => onKind('prs')}><GitPullRequest size={14} aria-hidden="true" />Pull requests</button><button className={kind === 'issues' ? 'active' : ''} onClick={() => onKind('issues')}><CircleDot size={14} aria-hidden="true" />Issues</button></div><div className="feed-filters"><div className="filter-pills">{(kind === 'prs' ? (['all', 'open', 'merged'] as FeedState[]) : (['all', 'open', 'closed'] as FeedState[])).map((key) => <button key={key} className={state === key ? 'active' : ''} onClick={() => onState(key)}>{key[0].toUpperCase() + key.slice(1)}</button>)}</div><ActivityInvolvementFilter id="activity-involvement-select" value={relationship} onChange={onRelationship} /><ActivityRepositoryMenu repositories={repositories} login={login} value={selectedRepository} disabled={Boolean(lockedRepository)} onChange={onRepository} /></div></div><div className="feed-list">{feed.length ? feed.map((item) => kind === 'prs' ? <PullRequestItem key={`${activityRepo(item)}-${item.number}`} item={item} onOpen={() => onOpenUrl(item.url)} /> : <IssueItem key={`${activityRepo(item)}-${item.number}`} item={item} onOpen={() => onOpenUrl(item.url)} />) : <div className="feed-empty"><CircleDot size={21} /><p>No {kind === 'prs' ? 'pull requests' : 'issues'} match these filters</p><span>Activity will appear here after the next refresh.</span></div>}</div></aside>
+  return <aside id="activity-sidebar" ref={sidebarRef} className="activity-sidebar" aria-hidden={hidden}><div className="sidebar-sticky"><div className="sidebar-heading"><div><p className="eyebrow">Live feed <span className="feed-count">{feed.length}</span></p><h2>Recent activity</h2></div><button className="button primary compact activity-refresh-button" disabled={syncBusy || refreshing} title="Refresh your authored and assigned PRs and issues in tracked repositories without scanning lines of code" onClick={() => void refreshActivity()}>{refreshing ? 'Refreshing…' : 'Refresh Tickets'}</button></div><p className="activity-as-of" title={exactDate(effectiveAsOf)}>{relationship === 'everyone' ? 'All tracked activity' : 'Personal activity'} · As of {effectiveAsOf ? relativeTime(effectiveAsOf) : 'Not recorded'}</p>{refreshing || refreshMessage ? <p className="small-note" role="status">{refreshing && activityProgress?.phase.includes('work_items') ? activityProgress.message : refreshMessage}</p> : null}{refreshError && <p className="activity-refresh-error" role="alert">{refreshError}</p>}<div className="feed-tabs" role="tablist"><button className={kind === 'prs' ? 'active' : ''} onClick={() => onKind('prs')}><GitPullRequest size={14} aria-hidden="true" />Pull requests</button><button className={kind === 'issues' ? 'active' : ''} onClick={() => onKind('issues')}><CircleDot size={14} aria-hidden="true" />Issues</button></div><div className="feed-filters"><div className="filter-pills">{(kind === 'prs' ? (['all', 'open', 'merged'] as FeedState[]) : (['all', 'open', 'closed'] as FeedState[])).map((key) => <button key={key} className={state === key ? 'active' : ''} onClick={() => onState(key)}>{key[0].toUpperCase() + key.slice(1)}</button>)}</div><ActivityInvolvementFilter id="activity-involvement-select" value={relationship} onChange={onRelationship} /><ActivityRepositoryMenu repositories={repositories} login={login} value={selectedRepository} disabled={Boolean(lockedRepository)} onChange={onRepository} /></div></div><div className="feed-list">{feed.length ? feed.map((item) => kind === 'prs' ? <PullRequestItem key={`${activityRepo(item)}-${item.number}`} item={item} onOpen={() => onOpenUrl(item.url)} /> : <IssueItem key={`${activityRepo(item)}-${item.number}`} item={item} onOpen={() => onOpenUrl(item.url)} />) : <div className="feed-empty"><CircleDot size={21} /><p>No {kind === 'prs' ? 'pull requests' : 'issues'} match these filters</p><span>Activity will appear here after the next refresh.</span></div>}</div></aside>
 }
 
 function PullRequestItem({ item, onOpen }: { item: PullRequest; onOpen: () => void }) {

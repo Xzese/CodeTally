@@ -160,6 +160,10 @@ export async function getActivityRefreshAt(): Promise<string | null> {
   return call<string | null>('get_activity_refresh_at')
 }
 
+export async function getPersonalRefreshAt(): Promise<string | null> {
+  return call<string | null>('get_personal_refresh_at')
+}
+
 export async function syncRepository(repositoryId: number | string): Promise<unknown> {
   return call('sync_repository', { repo_id: repositoryId })
 }
@@ -170,6 +174,9 @@ export async function backfillLoc(repositoryId: number | string): Promise<unknow
 
 export async function syncWorkItems(): Promise<SyncResult> {
   return call('sync_work_items')
+}
+export async function syncPersonalWorkItems(): Promise<SyncResult> {
+  return call('sync_personal_work_items')
 }
 export async function getKanbanPage(request: { kind: import('./types').KanbanKind; repository_ids?: number[]; relationship: import('./types').ActivityRelationship; search: string; show_completed: boolean; offset: number; limit: number }): Promise<import('./types').KanbanPage> {
   return call('get_kanban_page', request)

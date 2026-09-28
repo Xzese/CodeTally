@@ -66,6 +66,13 @@ export async function screenshotCall(command: string, args: Record<string, unkno
     }
     case 'get_kanban_links': return { items: args.item_key === 'github.com:node:PR_1_42' ? [{ kind: 'issue', repository: 'storyforge/planner', number: 105, title: 'Clarify weekly planning view', state: 'OPEN', url: 'https://github.com/storyforge/planner/issues/105' }] : [], partial: false, message: null }
     case 'get_sync_progress': return progress
+    case 'get_personal_refresh_at': return now
+    case 'sync_personal_work_items': {
+      progress = { running: true, phase: 'syncing_personal_work_items', current: 0, total: 0, repository_current: 0, repository_total: 0, message: 'Searching your authored and assigned PRs and issues' }
+      await new Promise((resolve) => window.setTimeout(resolve, 8000))
+      progress = { ...progress, running: false, phase: 'personal_work_items_complete', message: 'Your PRs and issues refreshed' }
+      return { ok: true, message: 'Your PRs and issues refreshed', repositories_synced: 0, pull_requests_synced: 3, issues_synced: 2, snapshots_created: 0, errors: [] }
+    }
     case 'sync_work_items': {
       for (let i = 0; i < 3; i++) {
         progress = { running: true, phase: 'syncing_work_items', current: i, total: 3, repository_current: i, repository_total: 3, repository_name: repositories[i].name_with_owner, message: `Refreshing PRs and issues: repository ${i + 1} of 3` }

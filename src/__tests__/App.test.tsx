@@ -280,6 +280,8 @@ function configureBackend({ dependencies = readyDependencies, syncResult = syncO
         return dashboards[Math.min(dashboardIndex++, dashboards.length - 1)]
       case 'get_activity_refresh_at':
         return cachedDashboard.last_activity_refresh_at ?? null
+      case 'get_personal_refresh_at':
+        return cachedDashboard.last_personal_refresh_at ?? null
       case 'discover_repositories':
         return null
       case 'get_loc_history': {
@@ -405,21 +407,34 @@ describe('dashboard UI', () => {
     expect(normalizeAppSettings({ activity_refresh_minutes: 1440 }).kanban_enabled).toBe(true)
     expect(normalizeAppSettings({ kanban_enabled: false }).kanban_enabled).toBe(false)
   })
-  it('refreshes PRs and issues from the sidebar while Kanban is disabled without loading history', async () => {
+  it('refreshes only personal PRs and issues from the sidebar without loading history', async () => {
     const backend = invokeMock.getMockImplementation()!
-    invokeMock.mockImplementation((command, args) => command === 'sync_work_items' ? Promise.resolve({ ...syncOk, message: 'Activity refresh finished' }) : command === 'get_activity_refresh_at' ? Promise.resolve('2026-09-28T14:30:00Z') : backend(command, args))
+    invokeMock.mockImplementation((command, args) => command === 'sync_personal_work_items' ? Promise.resolve({ ...syncOk, message: 'Personal activity refresh finished' }) : command === 'get_personal_refresh_at' ? Promise.resolve('2026-09-28T14:30:00Z') : backend(command, args))
     const user = await renderDashboard()
     const refresh = screen.getByRole('button', { name: 'Refresh Tickets' })
     await waitFor(() => expect(refresh).toBeEnabled())
     const histories = invokeMock.mock.calls.filter(([command]) => command === 'get_loc_history').length
     await user.click(refresh)
-    await screen.findByText('Activity refresh finished')
-    expect(invokeMock).toHaveBeenCalledWith('sync_work_items', undefined)
-    expect(invokeMock).toHaveBeenCalledWith('get_activity_refresh_at', undefined)
+    await screen.findByText('Personal activity refresh finished')
+    expect(invokeMock).toHaveBeenCalledWith('sync_personal_work_items', undefined)
+    expect(invokeMock).toHaveBeenCalledWith('get_personal_refresh_at', undefined)
+    expect(invokeMock.mock.calls.some(([command]) => command === 'sync_work_items')).toBe(false)
     const titlebar = screen.getByRole('banner')
     await waitFor(() => expect(within(titlebar).getByText('Activities refreshed').closest('span')).toHaveAttribute('title', expect.not.stringContaining('No successful')))
     expect(invokeMock.mock.calls.filter(([command]) => command === 'get_loc_history')).toHaveLength(histories)
     expect(screen.queryByRole('button', { name: /Kanban Board/ })).not.toBeInTheDocument()
+  })
+
+  it('keeps the all-repository ticket refresh in Settings separate from personal Refresh Tickets', async () => {
+    const backend = invokeMock.getMockImplementation()!
+    invokeMock.mockImplementation((command, args) => command === 'sync_work_items' ? Promise.resolve({ ...syncOk, message: 'All tracked tickets refreshed' }) : backend(command, args))
+    const user = await renderDashboard()
+    await user.click(screen.getByRole('button', { name: 'Settings' }))
+    const historyReads = invokeMock.mock.calls.filter(([command]) => command === 'get_loc_history').length
+    await user.click(screen.getByRole('button', { name: 'Refresh All Tickets' }))
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('sync_work_items', undefined))
+    expect(invokeMock.mock.calls.some(([command]) => command === 'sync_personal_work_items')).toBe(false)
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'get_loc_history')).toHaveLength(historyReads)
   })
 
   it('opens an opted-in board and removes it immediately when disabled', async () => {
@@ -467,6 +482,57 @@ describe('dashboard UI', () => {
       expect(screen.getByText('Fix alpha flow')).toBeInTheDocument()
       expect(screen.getByRole('button', { name: /sam\/alpha #12/ })).toBeInTheDocument()
     })
+  })
+
+  it('excludes forks from the repository picker without changing tracking or dashboard totals', async () => {
+    configureBackend({ cachedDashboard: { ...dashboard, repositories: [repoAlpha, { ...repoBeta, is_fork: true }] } })
+    const user = await renderDashboard()
+    const table = screen.getByRole('table')
+    expect(within(table).getByText('alpha')).toBeInTheDocument()
+    expect(within(table).getByText('beta')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '2 tracked' }))
+    const picker = screen.getByRole('dialog', { name: 'Show repositories in table' })
+    await user.click(within(picker).getByRole('checkbox', { name: 'Exclude forks from table' }))
+    expect(within(picker).getByRole('checkbox', { name: 'Exclude forks from table' })).toBeChecked()
+    expect(within(table).getByText('alpha')).toBeInTheDocument()
+    expect(within(table).queryByText('beta')).not.toBeInTheDocument()
+    expect(within(picker).getByText('1 of 2 visible')).toBeInTheDocument()
+    expect(screen.getByText('16,000')).toBeInTheDocument()
+    await user.click(within(picker).getByRole('button', { name: 'Show all' }))
+    expect(within(table).getByText('beta')).toBeInTheDocument()
+    expect(within(picker).getByRole('checkbox', { name: 'Exclude forks from table' })).not.toBeChecked()
+    expect(invokeMock.mock.calls.some(([command]) => command === 'set_app_settings')).toBe(false)
+  })
+
+  it('collapses the activity sidebar in a narrow window and lets it reopen over the dashboard', async () => {
+    const originalWidth = window.innerWidth
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1440 })
+    try {
+      const user = await renderDashboard()
+      const hide = screen.getByRole('button', { name: 'Hide activity sidebar' })
+      expect(hide).toHaveAttribute('aria-expanded', 'true')
+      expect(document.getElementById('activity-sidebar')).toHaveAttribute('aria-hidden', 'false')
+
+      await user.click(hide)
+      expect(document.getElementById('activity-sidebar')).toHaveAttribute('aria-hidden', 'true')
+      await user.click(screen.getByRole('button', { name: 'Show activity sidebar' }))
+      expect(document.getElementById('activity-sidebar')).toHaveAttribute('aria-hidden', 'false')
+
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: 760 })
+      act(() => window.dispatchEvent(new Event('resize')))
+      expect(document.getElementById('activity-sidebar')).toHaveAttribute('aria-hidden', 'true')
+      await user.click(screen.getByRole('button', { name: 'Show activity sidebar' }))
+      expect(document.getElementById('activity-sidebar')).toHaveAttribute('aria-hidden', 'false')
+      expect(document.querySelector('.activity-backdrop')).toBeInTheDocument()
+      act(() => fireEvent.keyDown(window, { key: 'Escape' }))
+      expect(document.getElementById('activity-sidebar')).toHaveAttribute('aria-hidden', 'true')
+
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1440 })
+      act(() => window.dispatchEvent(new Event('resize')))
+      expect(document.getElementById('activity-sidebar')).toHaveAttribute('aria-hidden', 'false')
+    } finally {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth })
+    }
   })
 
   it('keeps the settings retry available when an empty dashboard opens Settings after a read failure', async () => {

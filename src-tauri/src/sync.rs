@@ -608,7 +608,19 @@ fn record_refresh_timestamps(db: &Database, result: &mut SyncResult, full: bool)
 
 fn finish_work_item_progress(state: &AppState, error: Option<String>) {
     let prior = state.progress();
-    state.set_progress(SyncProgress { running:false, phase:"work_items_complete".into(), error:error.clone(), message:if error.is_some() { "PR and issue refresh finished with errors".into() } else { "PRs and issues refreshed".into() }, ..prior });
+    let personal = prior.phase == "syncing_personal_work_items";
+    state.set_progress(SyncProgress {
+        running:false,
+        phase:if personal { "personal_work_items_complete" } else { "work_items_complete" }.into(),
+        error:error.clone(),
+        message:match (personal, error.is_some()) {
+            (true, true) => "Your PR and issue refresh finished with errors",
+            (true, false) => "Your PRs and issues refreshed",
+            (false, true) => "PR and issue refresh finished with errors",
+            (false, false) => "PRs and issues refreshed",
+        }.into(),
+        ..prior
+    });
 }
 
 pub fn sync_one(state: &AppState, repository_id: i64) -> AppResult<SyncResult> {

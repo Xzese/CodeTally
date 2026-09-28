@@ -163,6 +163,30 @@ pub async fn sync_work_items(app: tauri::AppHandle, state: State<'_, AppState>) 
 }
 
 #[tauri::command(rename_all = "snake_case")]
+pub async fn sync_personal_work_items(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<SyncResult, String> {
+    let state = state.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        let _job = state.job_lock.try_lock().map_err(|_| "Another refresh is running; try again when it finishes.".to_string())?;
+        let result = if crate::screenshot_mode() {
+            state.set_progress(SyncProgress { running:true, phase:"syncing_personal_work_items".into(), message:"Searching your authored and assigned PRs and issues".into(), ..SyncProgress::default() });
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            state.set_progress(SyncProgress { running:false, phase:"personal_work_items_complete".into(), message:"Your PRs and issues refreshed".into(), ..SyncProgress::default() });
+            Ok(SyncResult { ok:true, message:"Your PRs and issues refreshed".into(), pull_requests_synced:3, issues_synced:2, ..SyncResult::default() })
+        } else { sync::sync_personal_work_items(&state).map_err(|error| error.to_string()) };
+        if let Err(error) = &result {
+            let mut progress = state.progress();
+            progress.running = false;
+            progress.phase = "personal_work_items_complete".into();
+            progress.error = Some(error.clone());
+            state.set_progress(progress);
+        }
+        drop(_job);
+        crate::native::refresh_menu(&app, &state);
+        result
+    }).await.map_err(|error| error.to_string())?
+}
+
+#[tauri::command(rename_all = "snake_case")]
 pub fn get_kanban_page(state: State<'_, AppState>, kind: String, repository_ids: Option<Vec<i64>>, repository_id: Option<i64>, relationship: Option<String>, search: Option<String>, show_completed: bool, offset: i64, limit: i64) -> Result<KanbanPage, String> {
     crate::kanban::page(&state.database(), crate::kanban::KanbanQuery { kind, repository_ids, repository_id, relationship:relationship.unwrap_or_else(|| "everyone".into()), search:search.unwrap_or_default(), show_completed, offset, limit }).map_err(|error| error.to_string())
 }
@@ -318,6 +342,11 @@ pub async fn get_dashboard(state: State<'_, AppState>) -> Result<Dashboard, Stri
 #[tauri::command]
 pub fn get_activity_refresh_at(state: State<'_, AppState>) -> Result<Option<String>, String> {
     state.database().metadata(sync::LAST_ACTIVITY_REFRESH_METADATA_KEY).map_err(|error| error.to_string())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn get_personal_refresh_at(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    state.database().metadata(sync::LAST_PERSONAL_REFRESH_METADATA_KEY).map_err(|error| error.to_string())
 }
 
 #[tauri::command(rename_all = "snake_case")]

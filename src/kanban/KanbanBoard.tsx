@@ -1,6 +1,6 @@
 import { GitPullRequest, CircleDot } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
-import { getKanbanLinks, getKanbanPage, getKanbanPreferences, setKanbanPreferences, openExternalUrl, setKanbanMetadata, syncWorkItems } from '../api'
+import { getKanbanLinks, getKanbanPage, getKanbanPreferences, setKanbanPreferences, openExternalUrl, setKanbanMetadata, syncPersonalWorkItems } from '../api'
 import ActivityRepositoryMenu, { activityScopeRepositories } from '../ActivityRepositoryMenu'
 import ActivityInvolvementFilter from '../ActivityInvolvementFilter'
 import type { ActivityRelationship, KanbanItem, KanbanKind, KanbanLinks, KanbanMetadata, KanbanPage, Repository } from '../types'
@@ -167,14 +167,14 @@ export default function KanbanBoard({ repositories, login, relationship: default
   const refresh = async () => {
     setRefreshing(true); setError('')
     let failure = ''
-    try { const result = await syncWorkItems(); if (!result.ok || result.errors.length) failure = [result.message, ...result.errors].join(' ') }
+    try { const result = await syncPersonalWorkItems(); if (!result.ok || result.errors.length) failure = [result.message, ...result.errors].join(' ') }
     catch (reason) { failure = String(reason) }
     finally { await load(); onActivityRefreshed(); if (failure) setError(failure); setRefreshing(false) }
   }
   const item = page?.items.find((row) => row.item_key === selected)
   const draggedItem = page?.items.find((row) => row.item_key === draggedKey)
   return <main className="kanban-main">
-    <div className="page-heading"><div><p className="eyebrow">Local workflow</p><h1>Kanban</h1></div><button className="button primary" title="Refresh PRs and issues from all tracked repositories, regardless of board filters, without scanning lines of code" disabled={syncBusy || refreshing || loading || pending.size > 0} onClick={() => void refresh()}>{refreshing ? 'Refreshing…' : syncBusy ? 'Refresh in progress…' : 'Refresh Tickets'}</button></div>
+    <div className="page-heading"><div><p className="eyebrow">Local workflow</p><h1>Kanban</h1></div><button className="button primary" title="Refresh your authored and assigned PRs and issues in tracked repositories, without scanning lines of code" disabled={syncBusy || refreshing || loading || pending.size > 0} onClick={() => void refresh()}>{refreshing ? 'Refreshing…' : syncBusy ? 'Refresh in progress…' : 'Refresh Tickets'}</button></div>
     <div className="kanban-filters"><div className="kanban-kind-buttons" role="group" aria-label="Ticket types"><button className={kind === 'prs' || kind === 'both' ? 'active' : ''} aria-pressed={kind === 'prs' || kind === 'both'} onClick={() => setKind(kind === 'both' ? 'issues' : kind === 'prs' ? 'none' : kind === 'issues' ? 'both' : 'prs')}><GitPullRequest size={14} aria-hidden="true" /> PRs</button><button className={kind === 'issues' || kind === 'both' ? 'active' : ''} aria-pressed={kind === 'issues' || kind === 'both'} onClick={() => setKind(kind === 'both' ? 'prs' : kind === 'issues' ? 'none' : kind === 'prs' ? 'both' : 'issues')}><CircleDot size={14} aria-hidden="true" /> Issues</button></div>
       <ActivityRepositoryMenu repositories={repositories} login={login} value={scope} disabled={false} onChange={setScope} />
       <ActivityInvolvementFilter id="kanban-involvement-select" value={relationship} onChange={setRelationship} />
