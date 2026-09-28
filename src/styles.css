@@ -652,7 +652,7 @@ body.kanban-drag-active, body.kanban-drag-active * { cursor: grabbing !important
 .activity-as-of { margin: -7px 0 13px; font-size: 10px; color: var(--muted); }
 .feed-tabs button { display: inline-flex; justify-content: center; align-items: center; gap: 6px; }
 .settings-interval-warning { font-size: 11px; color: var(--yellow); max-width: 300px; line-height: 1.5; margin: 8px 0 0; }
-.app-shell .kanban-filters select, .app-shell .kanban-move select, .app-shell .kanban-detail select { background: var(--control-surface); border-color: var(--control-border); color: var(--control-text); box-shadow: var(--control-shadow); border-radius: 6px; font-size: 12px; min-height: 30px; }
+.app-shell .kanban-move select, .app-shell .kanban-detail select { background: var(--control-surface); border-color: var(--control-border); color: var(--control-text); box-shadow: var(--control-shadow); border-radius: 6px; font-size: 12px; min-height: 30px; }
 .app-shell .kanban-filters select option, .app-shell .kanban-move select option, .app-shell .kanban-detail select option { background: var(--panel); color: var(--control-text); }
 .app-shell .topbar-nav-button { min-height: 32px; }
 
