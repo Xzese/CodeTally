@@ -1,7 +1,7 @@
 import { listen } from '@tauri-apps/api/event'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { AreaChart, CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
-import { Activity, AlertCircle, ArrowDown, ArrowLeft, ArrowUp, BarChart3, Check, ChevronDown, ChevronUp, CircleDot, ExternalLink, GitBranch, GitPullRequest, Github, HardDrive, ListFilter, LoaderCircle, PanelRightClose, PanelRightOpen, Settings, Terminal, X, Zap } from 'lucide-react'
+import { AlertCircle, ArrowDown, ArrowLeft, ArrowUp, BarChart3, Check, ChevronDown, ChevronUp, CircleDot, ExternalLink, GitBranch, GitPullRequest, Github, HardDrive, ListFilter, LoaderCircle, PanelRightClose, PanelRightOpen, RefreshCw, Settings, Terminal, X, Zap } from 'lucide-react'
 import { checkDependencies, discoverRepositories, getActivityFeed, getActivityRefreshAt, getPersonalRefreshAt, getAppSettings, getDashboard, getGithubUser, getLocHistory, getSyncProgress, openExternalUrl, setAppSettings, syncActivity, syncGithubData, syncPersonalWorkItems, syncWorkItems } from './api'
 import type { ActivityRelationship, AppSettings, DashboardData, DependencyStatus, FeedKind, Issue, LocSnapshot, PullRequest, Repository, SyncProgress, TimeRange } from './types'
 import { aggregateHistory, filterIssues, filterPullRequests, isDraft, isMerged, sortRepositories, type FeedState } from './model'
@@ -709,7 +709,7 @@ function App() {
           >
             <div className="refresh-timestamps" tabIndex={0} aria-label="Refresh times">
               <div className="refresh-timestamp-list">
-                <span title={latestActivityRefreshAt ? `${activityRefreshDescription} ${exactDate(latestActivityRefreshAt)}` : 'No successful PR and issue refresh has completed.'} aria-label={`Activities refreshed ${latestActivityRefreshAt ? relativeTime(latestActivityRefreshAt) : 'Not recorded'}`}><Activity className="activity-refresh-icon" size={13} aria-hidden="true" /><span className="activity-refresh-label">Activities refreshed</span><strong>{latestActivityRefreshAt ? relativeTime(latestActivityRefreshAt) : 'Not recorded'}</strong></span>
+                <span title={latestActivityRefreshAt ? `${activityRefreshDescription} ${exactDate(latestActivityRefreshAt)}` : 'No successful PR and issue refresh has completed.'} aria-label={`Activities refreshed ${latestActivityRefreshAt ? relativeTime(latestActivityRefreshAt) : 'Not recorded'}`}><RefreshCw className="activity-refresh-icon" size={13} aria-hidden="true" /><span className="activity-refresh-label">Activities refreshed</span><strong>{latestActivityRefreshAt ? relativeTime(latestActivityRefreshAt) : 'Not recorded'}</strong></span>
                 <span title={dashboard.last_full_refresh_at ? exactDate(dashboard.last_full_refresh_at) : 'No successful Repo Refresh or Force Refresh has completed. Partial or failed attempts do not set this time.'}>Last refreshed <strong>{dashboard.last_full_refresh_at ? relativeTime(dashboard.last_full_refresh_at) : 'Not recorded'}</strong></span>
               </div>
               {syncActive && <span className="refresh-running" role="status" aria-label={importing ? 'Importing' : 'Refreshing'}><LoaderCircle size={13} className="spin" aria-hidden="true" /></span>}
