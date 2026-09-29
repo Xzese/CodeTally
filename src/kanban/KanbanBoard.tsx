@@ -206,7 +206,7 @@ export default function KanbanBoard({ repositories, login, relationship: default
     {error && <div role="alert" className="error-banner">{error}</div>}
     {page?.partial && <div role="status" className="kanban-notice">Activity data is partial. {page.errors.join(' ')}</div>}
     {!loading && page && !page.items.length && <p className="kanban-notice">{kind === 'none' ? 'Select PRs or Issues to show work items.' : 'No work items match these filters. Refresh activity to fetch the latest GitHub data.'}</p>}
-    <div className="kanban-column-container"><div className="kanban-columns" role="region" aria-label="Kanban columns">{COLUMNS.filter((column) => completed || column !== 'Done').map((column) => {
+    <div className="kanban-columns" role="region" aria-label="Kanban columns">{COLUMNS.filter((column) => completed || column !== 'Done').map((column) => {
       const cards = cardsIn(column)
       const collapsed = collapsedColumns.has(column)
       const columnId = `kanban-column-${column.toLowerCase().replaceAll(' ', '-')}`
@@ -235,7 +235,7 @@ export default function KanbanBoard({ repositories, login, relationship: default
         </article>)}
         </div>
       </section>
-    })}</div></div>
+    })}</div>
     {draggedItem && dragPosition && <div className="kanban-drag-preview" aria-hidden="true" style={dragPosition}><span className="kanban-drag-preview-source">{draggedItem.kind === 'pr' ? <GitPullRequest size={13} /> : <CircleDot size={13} />}{draggedItem.kind === 'pr' ? 'PR' : 'Issue'} · {draggedItem.repository} #{draggedItem.number}</span><strong>{draggedItem.title}</strong></div>}
     {page && page.items.length < page.total && <button className="button secondary" disabled={loading} onClick={() => void load(true, page.items.length)}>Load more ({page.items.length} of {page.total})</button>}
     {item && <ItemDetails key={item.item_key} item={item} saving={pending.has(item.item_key)} syncBusy={syncBusy} revision={revision} onClose={() => setSelected(null)} onSave={(changes) => save(item, changes)} />}
