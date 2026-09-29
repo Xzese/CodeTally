@@ -323,6 +323,21 @@ export interface KanbanLinks {
   message?: string | null
 }
 
+export interface KanbanDiscussion {
+  comments: Array<{ id: string; author: string | null; body_text: string; created_at: string; updated_at: string; url: string }>
+  comment_count: number
+  comments_has_more: boolean
+  checks: Array<{ id: string; name: string; status: string; details_url: string | null }>
+  check_count: number
+  checks_has_more: boolean
+  commits: { oid: string; headline: string; committed_at: string; author: string | null; url: string }[]
+  commit_count: number
+  commits_has_more: boolean
+  refreshed_at: string | null
+  partial: boolean
+  message: string | null
+}
+
 export interface KanbanPreferences {
   kind: KanbanKind
   repository_scope: string

@@ -6,6 +6,7 @@ pub mod gitops;
 pub mod github;
 pub mod github_sync;
 pub mod kanban;
+pub mod kanban_detail;
 pub mod models;
 pub mod native;
 pub mod sync;
@@ -158,6 +159,7 @@ pub fn run() {
             commands::get_kanban_page,
             commands::set_kanban_metadata,
             commands::get_kanban_links,
+            commands::get_kanban_discussion,
             commands::get_kanban_preferences,
             commands::set_kanban_preferences,
             commands::open_external_url

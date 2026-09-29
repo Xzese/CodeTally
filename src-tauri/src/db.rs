@@ -216,6 +216,36 @@ impl Database {
             tx.execute_batch("ALTER TABLE kanban_links_cache ADD COLUMN next_cursor TEXT; PRAGMA user_version = 3;")?;
             tx.commit()?;
         }
+        if kanban_version < 4 {
+            let tx = conn.transaction()?;
+            tx.execute_batch(r#"
+                CREATE TABLE kanban_discussion_cache (
+                    account_scope TEXT NOT NULL,
+                    item_key TEXT NOT NULL,
+                    comments_json TEXT NOT NULL DEFAULT '[]',
+                    comment_count INTEGER NOT NULL DEFAULT 0,
+                    comments_cursor TEXT,
+                    checks_json TEXT NOT NULL DEFAULT '[]',
+                    check_count INTEGER NOT NULL DEFAULT 0,
+                    checks_cursor TEXT,
+                    checks_commit_oid TEXT,
+                    refreshed_at TEXT,
+                    PRIMARY KEY(account_scope, item_key)
+                );
+                PRAGMA user_version = 4;
+            "#)?;
+            tx.commit()?;
+        }
+        if kanban_version < 5 {
+            let tx = conn.transaction()?;
+            tx.execute_batch("ALTER TABLE kanban_discussion_cache ADD COLUMN commits_json TEXT NOT NULL DEFAULT '[]';
+                              ALTER TABLE kanban_discussion_cache ADD COLUMN commit_count INTEGER NOT NULL DEFAULT 0;
+                              ALTER TABLE kanban_discussion_cache ADD COLUMN commits_cursor TEXT;
+                              ALTER TABLE kanban_discussion_cache ADD COLUMN last_error TEXT;
+                              UPDATE kanban_discussion_cache SET refreshed_at=NULL;
+                              PRAGMA user_version = 5;")?;
+            tx.commit()?;
+        }
         let stored_activity_actor_version: Option<String> = conn.query_row("SELECT value FROM app_metadata WHERE key='activity_actor_fields_version'", [], |row| row.get(0)).optional()?;
         if stored_activity_actor_version.as_deref() != Some(ACTIVITY_ACTOR_FIELDS_VERSION) {
             // Actor fields were added after activity was already cached. Reset

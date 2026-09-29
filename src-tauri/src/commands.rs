@@ -1,5 +1,5 @@
 use crate::error;
-use crate::models::{ActivityFeed, AppInfo, AppSettings, ClassificationConfig, Dashboard, GithubUser, KanbanLinks, KanbanMetadata, KanbanPage, KanbanPreferences, LocHistory, RepositorySummary, SyncProgress, SyncResult};
+use crate::models::{ActivityFeed, AppInfo, AppSettings, ClassificationConfig, Dashboard, GithubUser, KanbanDiscussion, KanbanLinks, KanbanMetadata, KanbanPage, KanbanPreferences, LocHistory, RepositorySummary, SyncProgress, SyncResult};
 use crate::sync::{self, AppState};
 use chrono::Utc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -204,6 +204,20 @@ pub async fn get_kanban_links(state: State<'_, AppState>, item_key: String) -> R
             return crate::kanban::cached_links(&state.database(), &item_key).map_err(|error| error.to_string());
         };
         crate::kanban::load_links(&state.database(), &item_key).map_err(|error| error.to_string())
+    }).await.map_err(|error| error.to_string())?
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn get_kanban_discussion(state: State<'_, AppState>, item_key: String, load_more: Option<String>, force_refresh: bool) -> Result<KanbanDiscussion, String> {
+    let state = state.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        if crate::screenshot_mode() {
+            return crate::kanban_detail::cached(&state.database(), &item_key, Some("Screenshot fixture data only")).map_err(|error| error.to_string());
+        }
+        let Ok(_job) = state.job_lock.try_lock() else {
+            return crate::kanban_detail::cached(&state.database(), &item_key, Some("A refresh is running; showing saved discussion data")).map_err(|error| error.to_string());
+        };
+        crate::kanban_detail::load(&state.database(), &item_key, load_more.as_deref(), force_refresh).map_err(|error| error.to_string())
     }).await.map_err(|error| error.to_string())?
 }
 

@@ -187,6 +187,9 @@ export async function setKanbanMetadata(metadata: Omit<import('./types').KanbanM
 export async function getKanbanLinks(itemKey: string): Promise<import('./types').KanbanLinks> {
   return call('get_kanban_links', { item_key: itemKey })
 }
+export async function getKanbanDiscussion(itemKey: string, loadMore?: 'comments' | 'checks' | 'commits', forceRefresh = false): Promise<import('./types').KanbanDiscussion> {
+  return call('get_kanban_discussion', { item_key: itemKey, load_more: loadMore ?? null, force_refresh: forceRefresh })
+}
 
 export async function getKanbanPreferences(): Promise<import('./types').KanbanPreferences> {
   return call('get_kanban_preferences')

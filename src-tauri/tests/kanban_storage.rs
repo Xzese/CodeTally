@@ -124,6 +124,7 @@ fn kanban_defaults_on_but_explicit_disable_survives_legacy_cache_upgrade() {
     let conn = Connection::open(&path).expect("legacy database connection");
     conn.execute_batch(
         "DROP TABLE kanban_preferences;
+         DROP TABLE kanban_discussion_cache;
          DROP TABLE kanban_links_cache;
          DROP TABLE kanban_activity_status;
          DROP TABLE kanban_account_repositories;

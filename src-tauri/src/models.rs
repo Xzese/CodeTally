@@ -383,6 +383,49 @@ pub struct KanbanLinks {
     pub message: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct KanbanComment {
+    pub id: String,
+    pub author: Option<String>,
+    pub body_text: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct KanbanCheck {
+    pub id: String,
+    pub name: String,
+    pub status: String,
+    pub details_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct KanbanCommit {
+    pub oid: String,
+    pub headline: String,
+    pub committed_at: String,
+    pub author: Option<String>,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct KanbanDiscussion {
+    pub comments: Vec<KanbanComment>,
+    pub comment_count: i64,
+    pub comments_has_more: bool,
+    pub checks: Vec<KanbanCheck>,
+    pub check_count: i64,
+    pub checks_has_more: bool,
+    pub commits: Vec<KanbanCommit>,
+    pub commit_count: i64,
+    pub commits_has_more: bool,
+    pub refreshed_at: Option<String>,
+    pub partial: bool,
+    pub message: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KanbanPreferences {
     pub kind: String,

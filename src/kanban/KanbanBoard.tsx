@@ -1,11 +1,12 @@
-import { GitPullRequest, CircleDot } from 'lucide-react'
+import { GitPullRequest, CircleDot, StickyNote } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
-import { getKanbanLinks, getKanbanPage, getKanbanPreferences, setKanbanPreferences, openExternalUrl, setKanbanMetadata, syncPersonalWorkItems } from '../api'
+import { getKanbanPage, getKanbanPreferences, setKanbanPreferences, openExternalUrl, setKanbanMetadata, syncPersonalWorkItems } from '../api'
 import ActivityRepositoryMenu, { activityScopeRepositories } from '../ActivityRepositoryMenu'
 import ActivityInvolvementFilter from '../ActivityInvolvementFilter'
-import type { ActivityRelationship, KanbanItem, KanbanKind, KanbanLinks, KanbanMetadata, KanbanPage, Repository } from '../types'
+import type { ActivityRelationship, KanbanItem, KanbanKind, KanbanMetadata, KanbanPage, Repository } from '../types'
 import { relativeTime, repositoryId } from '../utils'
-import { COLUMNS, columnFor, isGitHubWorkUrl, type Column } from './model'
+import { COLUMNS, columnFor, isGitHubWorkUrl, sourceStateLabel, type Column } from './model'
+import ItemDetails from './ItemDetails'
 
 export default function KanbanBoard({ repositories, login, relationship: defaultRelationship, revision, onActivityRefreshed, syncBusy }: { repositories: Repository[]; login: string; relationship: ActivityRelationship; onRelationship: (value: ActivityRelationship) => void; onBack: () => void; revision: number; onActivityRefreshed: () => void; syncBusy: boolean }) {
   const [kind, setKind] = useState<KanbanKind>('both')
@@ -207,35 +208,12 @@ export default function KanbanBoard({ repositories, login, relationship: default
             if (nextColumn) void place(card, nextColumn, cardsIn(nextColumn).length)
           }
         }}>
-          <button className="kanban-card-title" onClick={() => setSelected(card.item_key)}>{card.title}</button><span className="small-note">{card.kind === 'pr' ? <GitPullRequest size={13} aria-label="Pull request" /> : <CircleDot size={13} aria-label="Issue" />}{card.kind === 'pr' ? 'PR' : 'Issue'} · {card.repository} #{card.number}</span><div className="kanban-badges">{card.unavailable && <span>Unavailable · cached state</span>}<span>{card.merged_at || card.state.toLowerCase() === 'merged' ? 'Merged' : columnFor(card) === 'Done' ? card.kind === 'pr' ? 'Closed without merge' : card.completion_reason ?? 'Closed' : card.state}{card.is_draft ? ' · Draft' : ''}</span>{card.priority !== 'None' && <span>{card.priority}</span>}{card.ci_state && <span>CI: {card.ci_state}</span>}{card.notes && <span>Local notes</span>}</div><span className="small-note">{card.author ? `@${card.author} · ` : ''}{relativeTime(card.updated_at)}</span>
+          <button className="kanban-card-title" onClick={() => setSelected(card.item_key)}>{card.title}</button><span className="small-note">{card.kind === 'pr' ? <GitPullRequest size={13} aria-label="Pull request" /> : <CircleDot size={13} aria-label="Issue" />}{card.kind === 'pr' ? 'PR' : 'Issue'} · {card.repository} #{card.number}</span><div className="kanban-badges">{card.unavailable && <span>Unavailable · cached state</span>}{(columnFor(card) === 'Done' || card.is_draft) && <span className="kanban-state-badge">{sourceStateLabel(card)}</span>}{card.priority !== 'None' && <span className={`kanban-priority-badge priority-${card.priority.toLowerCase()}`}>{card.priority}</span>}{card.ci_state && <span>CI: {card.ci_state}</span>}{card.notes && <span className="kanban-note-indicator" aria-label="Local notes" title="Local notes"><StickyNote size={12} aria-hidden="true" /></span>}</div><span className="small-note">{card.author ? `@${card.author} · ` : ''}{relativeTime(card.updated_at)}</span>
         </article>)}
       </section>
     })}</div>
     {draggedItem && dragPosition && <div className="kanban-drag-preview" aria-hidden="true" style={dragPosition}><span className="kanban-drag-preview-source">{draggedItem.kind === 'pr' ? <GitPullRequest size={13} /> : <CircleDot size={13} />}{draggedItem.kind === 'pr' ? 'PR' : 'Issue'} · {draggedItem.repository} #{draggedItem.number}</span><strong>{draggedItem.title}</strong></div>}
     {page && page.items.length < page.total && <button className="button secondary" disabled={loading} onClick={() => void load(true, page.items.length)}>Load more ({page.items.length} of {page.total})</button>}
-    {item && <ItemDetails key={item.item_key} item={item} saving={pending.has(item.item_key)} onClose={() => setSelected(null)} onSave={(changes) => void save(item, changes)} />}
+    {item && <ItemDetails key={item.item_key} item={item} saving={pending.has(item.item_key)} revision={revision} onClose={() => setSelected(null)} onSave={(changes) => save(item, changes)} />}
   </main>
-}
-
-function ItemDetails({ item, saving, onClose, onSave }: { item: KanbanItem; saving: boolean; onClose: () => void; onSave: (changes: Partial<KanbanMetadata>) => void }) {
-  const dialog = useRef<HTMLElement>(null)
-  useEffect(() => { const previous = document.activeElement as HTMLElement | null; dialog.current?.focus(); return () => previous?.focus() }, [])
-  const [notes, setNotes] = useState(item.notes)
-  const [priority, setPriority] = useState(item.priority)
-  const [links, setLinks] = useState<KanbanLinks | null>(null)
-  const [error, setError] = useState('')
-  useEffect(() => { let alive = true; void getKanbanLinks(item.item_key).then((result) => { if (alive) setLinks(result) }).catch((reason) => { if (alive) setError(String(reason)) }); return () => { alive = false } }, [item.item_key])
-  useEffect(() => { const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose() }; window.addEventListener('keydown', escape); return () => window.removeEventListener('keydown', escape) }, [onClose])
-  return <div className="kanban-detail-backdrop"><section ref={dialog} tabIndex={-1} onKeyDown={(event) => {
-    if (event.key !== 'Tab') return
-    const targets = dialog.current?.querySelectorAll<HTMLElement>('button:not(:disabled), select:not(:disabled), textarea:not(:disabled)')
-    if (!targets?.length) return
-    const first = targets[0], last = targets[targets.length - 1]
-    if (event.shiftKey && (document.activeElement === first || document.activeElement === dialog.current)) { event.preventDefault(); last.focus() }
-    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus() }
-  }} className="kanban-detail" role="dialog" aria-modal="true" aria-label="Work item details"><button className="button secondary compact" onClick={onClose}>Close details</button><h2>{item.title}</h2>{item.unavailable && <p role="status">Repository unavailable. Showing the last cached state.</p>}<p>{item.repository} #{item.number} · {item.state}{item.completion_reason ? ` · ${item.completion_reason}` : ''}</p><p>Author: {item.author ?? 'Unknown'} · Assignees: {item.assignees.join(', ') || 'None'}</p><button className="button secondary" disabled={!isGitHubWorkUrl(item.url)} title={!isGitHubWorkUrl(item.url) ? 'Invalid GitHub work item URL' : undefined} onClick={() => void openExternalUrl(item.url).catch((reason) => setError(String(reason)))}>Open on GitHub ↗</button>
-    {columnFor(item) !== 'Done' && <div className="kanban-automatic"><p>Column: {columnFor(item)} · {item.manual_column ? 'Local override' : 'Automatic'}</p><button className="button secondary" disabled={saving || item.manual_column === null} onClick={() => onSave({ manual_column: null })}>Reset to automatic</button></div>}
-    <label>Local priority<select value={priority} onChange={(event) => setPriority(event.target.value)}>{['None', 'Low', 'Medium', 'High'].map((value) => <option key={value}>{value}</option>)}</select></label><label>Local notes<textarea maxLength={4000} value={notes} onChange={(event) => setNotes(event.target.value)} /></label><button className="button primary" disabled={saving} onClick={() => onSave({ notes, priority })}>{saving ? 'Saving…' : 'Save local details'}</button>
-    <h3>Explicit closing relationships</h3>{error && <p role="alert">{error}</p>}{links ? <>{links.partial && <p>Linked work is partial. {links.message}</p>}{!links.items.length && <p>No explicit closing relationships found.</p>}{links.items.map((link) => <button className="kanban-link" key={`${link.repository}:${link.kind}:${link.number}`} disabled={!isGitHubWorkUrl(link.url)} title={!isGitHubWorkUrl(link.url) ? 'Invalid GitHub work item URL' : undefined} onClick={() => void openExternalUrl(link.url).catch((reason) => setError(String(reason)))}>{link.repository} #{link.number} · {link.title} ↗</button>)}</> : <p>Loading linked work…</p>}
-  </section></div>
 }

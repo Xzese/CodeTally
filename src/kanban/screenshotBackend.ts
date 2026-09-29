@@ -65,6 +65,24 @@ export async function screenshotCall(command: string, args: Record<string, unkno
       return { item_key: row.item_key, manual_column: row.manual_column, priority: row.priority, notes: row.notes, sort_rank: row.sort_rank, revision: row.revision }
     }
     case 'get_kanban_links': return { items: args.item_key === 'github.com:node:PR_1_42' ? [{ kind: 'issue', repository: 'storyforge/planner', number: 105, title: 'Clarify weekly planning view', state: 'OPEN', url: 'https://github.com/storyforge/planner/issues/105' }] : [], partial: false, message: null }
+    case 'get_kanban_discussion': {
+      const key = String(args.item_key)
+      const ticket = items.find((candidate) => candidate.item_key === key)
+      return {
+        comments: ticket ? [{ id: `comment-${key}`, author: 'alex', body_text: 'The keyboard flow looks good. Please check the narrow window layout too.', created_at: now, updated_at: now, url: `${ticket.url}#issuecomment-101` }] : [],
+        comment_count: ticket ? 1 : 0,
+        comments_has_more: false,
+        checks: ticket?.kind === 'pr' ? ['Frontend checks', 'Desktop checks (Apple Silicon)', 'Desktop checks (Intel)'].map((name, index) => ({ id: `check-${key}-${index}`, name, status: ticket.ci_state === 'failure' && index === 1 ? 'FAILURE' : ticket.ci_state === 'pending' ? 'IN_PROGRESS' : 'SUCCESS', details_url: 'https://github.com/storyforge/planner/actions/runs/101' })) : [],
+        check_count: ticket?.kind === 'pr' ? 3 : 0,
+        checks_has_more: false,
+        commits: ticket?.kind === 'pr' ? [{ oid: 'a1b2c3d4e5f6789012345678901234567890abcd', headline: 'Add keyboard navigation to the planning timeline', committed_at: '2026-09-26T08:10:00Z', author: 'demo', url: 'https://github.com/storyforge/planner/commit/a1b2c3d4e5f6789012345678901234567890abcd' }, { oid: 'f1e2d3c4b5a6987012345678901234567890abcd', headline: 'Improve focus order and small-window layout', committed_at: now, author: 'demo', url: 'https://github.com/storyforge/planner/commit/f1e2d3c4b5a6987012345678901234567890abcd' }] : [],
+        commit_count: ticket?.kind === 'pr' ? 2 : 0,
+        commits_has_more: false,
+        refreshed_at: now,
+        partial: false,
+        message: null
+      }
+    }
     case 'get_sync_progress': return progress
     case 'get_personal_refresh_at': return now
     case 'sync_personal_work_items': {
@@ -82,7 +100,7 @@ export async function screenshotCall(command: string, args: Record<string, unkno
       return { ok: true, message: 'PRs and issues refreshed', repositories_synced: 3, pull_requests_synced: 5, issues_synced: 3, snapshots_created: 0, errors: [] }
     }
     case 'get_app_info': return { name: 'CodeTally', version: '0.1.2', identifier: 'com.samfaid.codetally', repository_url: 'https://github.com/Xzese/CodeTally' }
-    case 'check_for_updates': return { current_version: '0.1.2', latest_version: '0.1.2', release_url: '', update_available: false }
+    case 'check_for_updates': return { current_version: '0.1.2', latest_version: window.location.search.includes('update-available') ? '0.1.8' : '0.1.2', release_url: '', update_available: window.location.search.includes('update-available') }
     case 'get_database_location': return 'file:///private/tmp/codetally-screenshot-fixture.sqlite3'
     case 'open_external_url': return true
     default: throw new Error(`Screenshot fixture does not implement ${command}`)

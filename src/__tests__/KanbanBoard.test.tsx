@@ -170,6 +170,59 @@ describe('local Kanban workflow', () => {
     expect(screen.queryByRole('button', { name: 'Reload board' })).not.toBeInTheDocument()
   })
 
+  it('reads comments and checks, opens GitHub for comments, and saves planning locally', async () => {
+    let cached = item
+    invoke.mockImplementation(async (command, args) => {
+      if (command === 'get_kanban_preferences') return preferences
+      if (command === 'get_kanban_page') return { ...page, items: [cached] }
+      if (command === 'get_kanban_links') return { items: [], partial: false }
+      if (command === 'get_kanban_discussion') return { comments: [{ id: 'comment-1', author: 'alex', body_text: 'Please check the narrow layout.', created_at: item.updated_at, updated_at: item.updated_at, url: `${item.url}#issuecomment-1` }], comment_count: 1, comments_has_more: false, checks: ['Frontend checks', 'Apple Silicon', 'Intel'].map((name, index) => ({ id: `check-${index}`, name, status: 'SUCCESS', details_url: 'https://github.com/sam/repo/actions/runs/1' })), check_count: 3, checks_has_more: false, commits: [{ oid: 'a'.repeat(40), headline: 'Improve focus handling', committed_at: item.updated_at, author: 'sam', url: `https://github.com/sam/repo/commit/${'a'.repeat(40)}` }], commit_count: 1, commits_has_more: false, refreshed_at: item.updated_at, partial: false, message: null }
+      if (command === 'set_kanban_metadata') { cached = { ...cached, ...args, revision: args.expected_revision + 1 }; return cached }
+      if (command === 'open_external_url') return true
+    })
+    render(<KanbanBoard {...props} />)
+    await screen.findByText(item.title)
+    fireEvent.click(screen.getByRole('button', { name: item.title }))
+    const dialog = screen.getByRole('dialog')
+    expect(await within(dialog).findByText('Please check the narrow layout.')).toBeInTheDocument()
+    expect(within(dialog).getByText('Improve focus handling')).toBeInTheDocument()
+    expect(within(dialog).getByText('Checks for latest commit · 3')).toBeInTheDocument()
+    expect(within(dialog.querySelector('.kanban-checks') as HTMLElement).getAllByText('Success')).toHaveLength(3)
+    fireEvent.click(within(dialog).getByRole('button', { name: /Add comment on GitHub/ }))
+    expect(invoke).toHaveBeenCalledWith('open_external_url', { url: item.url })
+    fireEvent.click(within(dialog).getByRole('button', { name: /Refresh activity/ }))
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('get_kanban_discussion', expect.objectContaining({ item_key: item.item_key, force_refresh: true })))
+    fireEvent.click(within(dialog).getByRole('radio', { name: 'High' }))
+    fireEvent.change(within(dialog).getByLabelText('Local notes'), { target: { value: 'My private note' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }))
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('set_kanban_metadata', expect.objectContaining({ priority: 'High', notes: 'My private note' })))
+    expect(invoke.mock.calls.map(([command]) => command)).not.toContain('sync_github_data')
+    expect(invoke.mock.calls.map(([command]) => command)).not.toContain('sync_work_items')
+    await within(dialog).findByText('Saved locally')
+    fireEvent.click(document.querySelector('.kanban-detail-backdrop')!)
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('keeps an unsaved draft visible after a local save failure', async () => {
+    invoke.mockImplementation(async (command) => {
+      if (command === 'get_kanban_preferences') return preferences
+      if (command === 'get_kanban_page') return page
+      if (command === 'get_kanban_links') return { items: [], partial: false }
+      if (command === 'get_kanban_discussion') return { comments: [], comment_count: 0, comments_has_more: false, checks: [], check_count: 0, checks_has_more: false, commits: [], commit_count: 0, commits_has_more: false, refreshed_at: null, partial: true, message: 'Offline' }
+      if (command === 'set_kanban_metadata') throw new Error('Database busy')
+    })
+    render(<KanbanBoard {...props} />)
+    await screen.findByText(item.title)
+    fireEvent.click(screen.getByRole('button', { name: item.title }))
+    const dialog = screen.getByRole('dialog')
+    fireEvent.change(within(dialog).getByLabelText('Local notes'), { target: { value: 'Keep this draft' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }))
+    expect(await within(dialog).findByText(/Could not save these local changes/)).toBeInTheDocument()
+    expect(within(dialog).getByLabelText('Local notes')).toHaveValue('Keep this draft')
+    fireEvent.click(document.querySelector('.kanban-detail-backdrop')!)
+    expect(within(dialog).getByText('Discard unsaved local changes?')).toBeInTheDocument()
+  })
+
   it('rolls back a rejected drag save', async () => {
     let rejectSave!: (reason: Error) => void
     invoke.mockImplementation((command) => command === 'get_kanban_preferences' ? Promise.resolve(preferences) : command === 'get_kanban_page' ? Promise.resolve(page) : new Promise((_resolve, reject) => { rejectSave = reject }))
