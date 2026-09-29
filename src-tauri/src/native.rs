@@ -5,7 +5,7 @@ use chrono::Utc;
 #[cfg(any(test, not(target_os = "macos")))]
 use chrono::{Duration as ChronoDuration, NaiveDate};
 use std::time::{Duration, Instant};
-use tauri::{menu::{Menu, MenuBuilder, SubmenuBuilder}, tray::TrayIconBuilder, AppHandle, Emitter, Manager};
+use tauri::{menu::{Menu, MenuBuilder, MenuItem}, tray::TrayIconBuilder, AppHandle, Emitter, Manager};
 
 const TRAY_ID: &str = "codetally";
 const GITHUB_MENU_PREFIX: &str = "open-github:";
@@ -220,7 +220,7 @@ fn tray_menu(app: &AppHandle, state: Option<&AppState>, metric: MenuBarMetric, h
                     let delta = latest_value - first_value;
                     builder = builder.text("loc-trend-change", format!("Change since {first_date}: {}{} lines", if delta >= 0 { "+" } else { "" }, formatted_lines(delta)));
                 }
-                builder = builder.text("loc-trend-coverage", format!("{} measured days; gaps have no sample", chart.measured_days));
+                builder = builder.text("loc-trend-coverage", format!("{} saved sample days", chart.measured_days));
             } else {
                 builder = builder.text("loc-trend-empty", format!("No LOC samples for {range_label}"));
             }
@@ -241,12 +241,13 @@ fn tray_menu(app: &AppHandle, state: Option<&AppState>, metric: MenuBarMetric, h
             _ => Vec::new(),
         };
         activity_count = tickets.len();
-        for (repository, items) in group_menu_tickets(tickets) {
-            let mut submenu = SubmenuBuilder::new(app, repository);
+        for (index, (repository, items)) in group_menu_tickets(tickets).into_iter().enumerate() {
+            if index > 0 { builder = builder.separator(); }
+            let heading = MenuItem::with_id(app, format!("repo-section-{index}"), repository, false, None::<&str>)?;
+            builder = builder.item(&heading);
             for item in items {
-                submenu = submenu.text(format!("{GITHUB_MENU_PREFIX}{}", item.url), menu_label(item.number, &item.title));
+                builder = builder.text(format!("{GITHUB_MENU_PREFIX}{}", item.url), menu_label(item.number, &item.title));
             }
-            builder = builder.item(&submenu.build()?);
         }
     }
     if matches!(metric, MenuBarMetric::OpenPrs | MenuBarMetric::OpenIssues) {

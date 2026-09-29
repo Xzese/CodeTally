@@ -82,6 +82,17 @@ fn rectangle(pixels: &mut [u8], x: usize, y: usize, width: usize, height: usize,
     }
 }
 
+fn stroke_segment(pixels: &mut [u8], from: (usize, usize), to: (usize, usize)) {
+    let dx = to.0 as i64 - from.0 as i64;
+    let dy = to.1 as i64 - from.1 as i64;
+    let steps = dx.abs().max(dy.abs()).max(1) as usize;
+    for step in 0..=steps {
+        let x = (from.0 as f64 + dx as f64 * step as f64 / steps as f64).round() as usize;
+        let y = (from.1 as f64 + dy as f64 * step as f64 / steps as f64).round() as usize;
+        rectangle(pixels, x.saturating_sub(1), y.saturating_sub(1), 3, 3, [72, 181, 216, 240]);
+    }
+}
+
 fn chart_png(data: &ChartData) -> Option<Vec<u8>> {
     let samples: Vec<_> = data.values.iter().flatten().copied().collect();
     let minimum = *samples.iter().min()?;
@@ -92,29 +103,25 @@ fn chart_png(data: &ChartData) -> Option<Vec<u8>> {
             rectangle(&mut pixels, x, y, 3, 1, [119, 145, 168, 75]);
         }
     }
-    let latest_index = data.values.iter().rposition(Option::is_some);
-    for (index, sample) in data.values.iter().enumerate() {
-        let Some(sample) = sample else {
-            continue;
+    let points: Vec<_> = data.values.iter().enumerate().filter_map(|(index, sample)| {
+        let sample = (*sample)?;
+        let x = 12 + (index as f64 * (WIDTH - 24) as f64 / (data.values.len() - 1) as f64).round() as usize;
+        // Scale to the observed range so small changes remain visible.
+        let y = if minimum == maximum { 72 } else {
+            118 - (((sample - minimum) as f64 / (maximum - minimum) as f64) * 96.0).round() as usize
         };
-        // Scale to the measured range so small LOC changes remain visible. Gaps
-        // stay blank: no sample must not be represented as a zero or refresh.
-        let height = if minimum == maximum {
-            53
-        } else {
-            16 + (((sample - minimum) as f64 / (maximum - minimum) as f64) * 92.0).round() as usize
-        };
-        let step = (WIDTH - 22) as f64 / data.values.len() as f64;
-        let width = (step * 0.62).round().max(3.0) as usize;
-        let x = 11 + (index as f64 * step).round() as usize;
-        let y = 126 - height;
-        let color = if latest_index == Some(index) {
-            [55, 163, 226, 255]
-        } else {
-            [89, 185, 205, 225]
-        };
-        rectangle(&mut pixels, x, y + 2, width, height - 2, color);
-        rectangle(&mut pixels, x + 1, y, width.saturating_sub(2), 2, color);
+        Some((index, x, y))
+    }).collect();
+    for pair in points.windows(2) {
+        let from = pair[0];
+        let to = pair[1];
+        stroke_segment(&mut pixels, (from.1, from.2), (to.1, to.2));
+    }
+    for (index, (_, x, y)) in points.iter().enumerate() {
+        let latest = index + 1 == points.len();
+        let radius = if latest { 4 } else { 3 };
+        rectangle(&mut pixels, x.saturating_sub(radius), y.saturating_sub(radius), radius * 2 + 1, radius * 2 + 1,
+            if latest { [55, 163, 226, 255] } else { [89, 185, 205, 245] });
     }
     let mut output = Vec::new();
     {
