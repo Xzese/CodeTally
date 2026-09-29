@@ -176,7 +176,7 @@ describe('local Kanban workflow', () => {
       if (command === 'get_kanban_preferences') return preferences
       if (command === 'get_kanban_page') return { ...page, items: [cached] }
       if (command === 'get_kanban_links') return { items: [], partial: false }
-      if (command === 'get_kanban_discussion') return { comments: [{ id: 'comment-1', author: 'alex', body_text: 'Please check the narrow layout.', created_at: item.updated_at, updated_at: item.updated_at, url: `${item.url}#issuecomment-1` }], comment_count: 1, comments_has_more: false, checks: ['Frontend checks', 'Apple Silicon', 'Intel'].map((name, index) => ({ id: `check-${index}`, name, status: 'SUCCESS', details_url: 'https://github.com/sam/repo/actions/runs/1' })), check_count: 3, checks_has_more: false, commits: [{ oid: 'a'.repeat(40), headline: 'Improve focus handling', committed_at: item.updated_at, author: 'sam', url: `https://github.com/sam/repo/commit/${'a'.repeat(40)}` }], commit_count: 1, commits_has_more: false, refreshed_at: item.updated_at, partial: false, message: null }
+      if (command === 'get_kanban_discussion') return { comments: [{ id: 'comment-1', author: 'alex', body_text: 'Please check the narrow layout.\nPreview URL: https://preview.example.test/run.\nView logs ↗', body_markdown: 'Please check the narrow layout.\nPreview URL: https://preview.example.test/run.\n[View logs ↗](https://logs.example.test/run) [Unsafe](javascript:alert(1))', created_at: item.updated_at, updated_at: item.updated_at, url: `${item.url}#issuecomment-1` }], comment_count: 1, comments_has_more: false, checks: ['Frontend checks', 'Apple Silicon', 'Intel'].map((name, index) => ({ id: `check-${index}`, name, status: 'SUCCESS', details_url: 'https://github.com/sam/repo/actions/runs/1' })), check_count: 3, checks_has_more: false, commits: [{ oid: 'a'.repeat(40), headline: 'Improve focus handling', committed_at: item.updated_at, author: 'sam', url: `https://github.com/sam/repo/commit/${'a'.repeat(40)}` }], commit_count: 1, commits_has_more: false, refreshed_at: item.updated_at, partial: false, message: null }
       if (command === 'set_kanban_metadata') { cached = { ...cached, ...args, revision: args.expected_revision + 1 }; return cached }
       if (command === 'open_external_url') return true
     })
@@ -184,7 +184,12 @@ describe('local Kanban workflow', () => {
     await screen.findByText(item.title)
     fireEvent.click(screen.getByRole('button', { name: `Open details for ${item.title}` }))
     const dialog = screen.getByRole('dialog')
-    expect(await within(dialog).findByText('Please check the narrow layout.')).toBeInTheDocument()
+    expect(await within(dialog).findByText(/Please check the narrow layout/)).toBeInTheDocument()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'https://preview.example.test/run' }))
+    expect(invoke).toHaveBeenCalledWith('open_external_url', { url: 'https://preview.example.test/run' })
+    fireEvent.click(within(dialog).getByRole('button', { name: /View logs ↗/ }))
+    expect(invoke).toHaveBeenCalledWith('open_external_url', { url: 'https://logs.example.test/run' })
+    expect(within(dialog).queryByRole('button', { name: 'Unsafe' })).not.toBeInTheDocument()
     expect(within(dialog).getByText('Improve focus handling')).toBeInTheDocument()
     expect(within(dialog).getByText('Checks for latest commit · 3')).toBeInTheDocument()
     expect(within(dialog.querySelector('.kanban-checks') as HTMLElement).getAllByText('Success')).toHaveLength(3)

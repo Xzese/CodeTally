@@ -69,7 +69,7 @@ export async function screenshotCall(command: string, args: Record<string, unkno
       const key = String(args.item_key)
       const ticket = items.find((candidate) => candidate.item_key === key)
       return {
-        comments: ticket ? [{ id: `comment-${key}`, author: 'alex', body_text: 'The keyboard flow looks good. Please check the narrow window layout too.', created_at: now, updated_at: now, url: `${ticket.url}#issuecomment-101` }] : [],
+        comments: ticket ? [{ id: `comment-${key}`, author: 'alex', body_text: key === 'github.com:node:PR_1_42' ? 'The keyboard flow looks good. Preview URL: https://preview.storyforge.example/build-42.\nView deployment logs ↗' : 'The keyboard flow looks good. Please check the narrow window layout too.', body_markdown: key === 'github.com:node:PR_1_42' ? 'The keyboard flow looks good. Preview URL: https://preview.storyforge.example/build-42.\n[View deployment logs ↗](https://logs.storyforge.example/build-42)' : null, created_at: now, updated_at: now, url: `${ticket.url}#issuecomment-101` }] : [],
         comment_count: ticket ? 1 : 0,
         comments_has_more: false,
         checks: ticket?.kind === 'pr' ? ['Frontend checks', 'Desktop checks (Apple Silicon)', 'Desktop checks (Intel)'].map((name, index) => ({ id: `check-${key}-${index}`, name, status: ticket.ci_state === 'failure' && index === 1 ? 'FAILURE' : ticket.ci_state === 'pending' ? 'IN_PROGRESS' : 'SUCCESS', details_url: 'https://github.com/storyforge/planner/actions/runs/101' })) : [],

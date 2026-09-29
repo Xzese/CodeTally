@@ -186,6 +186,7 @@ fn comments_page(response: &Value) -> AppResult<(Vec<KanbanComment>, i64, Option
                 .as_str()
                 .ok_or_else(|| AppError::InvalidArgument("GitHub comment text is missing".into()))?
                 .into(),
+            body_markdown: node["body"].as_str().map(str::to_owned),
             created_at: node["createdAt"]
                 .as_str()
                 .ok_or_else(|| AppError::InvalidArgument("GitHub comment date is missing".into()))?
@@ -391,7 +392,7 @@ pub fn load(
         && !force_refresh
         && previous
             .as_ref()
-            .is_some_and(|row| row.last_error.is_none())
+            .is_some_and(|row| row.last_error.is_none() && row.comments.iter().all(|comment| comment.body_markdown.is_some()))
         && previous
             .as_ref()
             .and_then(|row| row.refreshed_at.as_deref())
@@ -406,7 +407,7 @@ pub fn load(
     let mut successful = 0;
     if load_more.is_none() || load_more == Some("comments") && cache.comments_cursor.is_some() {
         attempted += 1;
-        let query = format!("query($owner:String!,$name:String!,$number:Int!,$before:String){{rateLimit{{cost remaining resetAt}} repository(owner:$owner,name:$name){{item:{}(number:$number){{comments(last:50,before:$before){{totalCount nodes{{id author{{login}} bodyText createdAt updatedAt url}} pageInfo{{hasPreviousPage startCursor}}}}}}}}}}", if kind == "pr" { "pullRequest" } else { "issue" });
+        let query = format!("query($owner:String!,$name:String!,$number:Int!,$before:String){{rateLimit{{cost remaining resetAt}} repository(owner:$owner,name:$name){{item:{}(number:$number){{comments(last:50,before:$before){{totalCount nodes{{id author{{login}} bodyText body createdAt updatedAt url}} pageInfo{{hasPreviousPage startCursor}}}}}}}}}}", if kind == "pr" { "pullRequest" } else { "issue" });
         let before = if load_more == Some("comments") {
             cache.comments_cursor.clone()
         } else {

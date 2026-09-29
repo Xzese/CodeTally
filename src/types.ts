@@ -325,7 +325,7 @@ export interface KanbanLinks {
 }
 
 export interface KanbanDiscussion {
-  comments: Array<{ id: string; author: string | null; body_text: string; created_at: string; updated_at: string; url: string }>
+  comments: Array<{ id: string; author: string | null; body_text: string; body_markdown?: string | null; created_at: string; updated_at: string; url: string }>
   comment_count: number
   comments_has_more: boolean
   checks: Array<{ id: string; name: string; status: string; details_url: string | null }>

@@ -394,6 +394,8 @@ pub struct KanbanComment {
     pub id: String,
     pub author: Option<String>,
     pub body_text: String,
+    #[serde(default)]
+    pub body_markdown: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub url: String,

@@ -91,7 +91,7 @@ fn paginates_read_only_comments_and_checks_then_keeps_cache_offline_and_account_
     )
     .unwrap();
 
-    let comment = |id: &str, number: i64| json!({"id":id,"author":{"login":"alice"},"bodyText":"Plain <script>text</script>","createdAt":"2026-09-28T00:00:00Z","updatedAt":"2026-09-28T00:00:00Z","url":format!("https://github.com/example/repo/pull/7#issuecomment-{number}")});
+    let comment = |id: &str, number: i64| json!({"id":id,"author":{"login":"alice"},"bodyText":"Plain <script>text</script>","body":"Plain <script>text</script> [View logs](https://example.test/logs)","createdAt":"2026-09-28T00:00:00Z","updatedAt":"2026-09-28T00:00:00Z","url":format!("https://github.com/example/repo/pull/7#issuecomment-{number}")});
     let comments = |nodes: Vec<serde_json::Value>, more: bool, cursor: &str| json!({"data":{"rateLimit":{"remaining":5000},"repository":{"item":{"comments":{"totalCount":2,"nodes":nodes,"pageInfo":{"hasPreviousPage":more,"startCursor":cursor}}}}}});
     let check = |id: &str, name: &str, status: &str| json!({"__typename":"CheckRun","id":id,"name":name,"status":"COMPLETED","conclusion":status,"detailsUrl":"https://github.com/example/repo/actions/runs/1"});
     let checks = |nodes: Vec<serde_json::Value>, more: bool, cursor: &str| json!({"data":{"rateLimit":{"remaining":5000},"repository":{"item":{"commits":{"nodes":[{"commit":{"oid":"HEAD_ONE","statusCheckRollup":{"contexts":{"totalCount":2,"nodes":nodes,"pageInfo":{"hasNextPage":more,"endCursor":cursor}}}}}]}}}}});
@@ -182,6 +182,7 @@ esac
         (1, 2, true)
     );
     assert_eq!(first.comments[0].body_text, "Plain <script>text</script>");
+    assert_eq!(first.comments[0].body_markdown.as_deref(), Some("Plain <script>text</script> [View logs](https://example.test/logs)"));
     let calls_after_first = std::fs::read_to_string(&log).unwrap().lines().count();
     assert_eq!(calls_after_first, 2);
     assert_eq!(
@@ -243,6 +244,7 @@ esac
     assert!(calls
         .lines()
         .all(|call| call.starts_with("api graphql ") && call.contains("query=query(")));
+    assert!(calls.contains("bodyText body"), "discussion query must request named link destinations");
     assert!(
         !calls.contains("mutation")
             && !calls.contains("issue comment")
@@ -275,6 +277,23 @@ esac
         "a failed refresh must not make the old success timestamp hide a retry"
     );
     assert_eq!(recovered.check_count, 2);
+
+    let connection = Connection::open(&db_path).unwrap();
+    let old_comments: String = connection.query_row(
+        "SELECT comments_json FROM kanban_discussion_cache WHERE account_scope='github.com:alice' AND item_key=?1",
+        [key],
+        |row| row.get(0),
+    ).unwrap();
+    let mut old_comments: Vec<serde_json::Value> = serde_json::from_str(&old_comments).unwrap();
+    for comment in &mut old_comments { comment.as_object_mut().unwrap().remove("body_markdown"); }
+    connection.execute(
+        "UPDATE kanban_discussion_cache SET comments_json=?1 WHERE account_scope='github.com:alice' AND item_key=?2",
+        params![serde_json::to_string(&old_comments).unwrap(), key],
+    ).unwrap();
+    let calls_before_upgrade = std::fs::read_to_string(&log).unwrap().lines().count();
+    let upgraded = kanban_detail::load(&database, key, None, false).unwrap();
+    assert!(upgraded.comments[0].body_markdown.is_some(), "legacy comments should gain named link destinations when opened");
+    assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), calls_before_upgrade + 2);
 
     database.set_metadata("github_login", "bob").unwrap();
     kanban::remember_repository(&database, &repo.github_id).unwrap();
