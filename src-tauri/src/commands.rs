@@ -1,5 +1,5 @@
 use crate::error;
-use crate::models::{ActivityFeed, AppInfo, AppSettings, ClassificationConfig, Dashboard, GithubUser, LocHistory, RepositorySummary, SyncProgress, SyncResult};
+use crate::models::{ActivityFeed, AppInfo, AppSettings, ClassificationConfig, Dashboard, GithubUser, KanbanDiscussion, KanbanLinks, KanbanMetadata, KanbanPage, KanbanPreferences, LocHistory, RepositorySummary, SyncProgress, SyncResult};
 use crate::sync::{self, AppState};
 use chrono::Utc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,12 +26,18 @@ fn begin_update_install() -> Result<UpdateInstallGuard, String> {
 
 #[tauri::command(rename_all = "snake_case")]
 pub async fn check_dependencies() -> crate::models::DependencyStatus {
+    if crate::screenshot_mode() {
+        return crate::models::DependencyStatus { gh:true,git:true,tokei:true,gh_authenticated:true,missing:Vec::new() };
+    }
     tokio::task::spawn_blocking(crate::github::dependency_status).await.unwrap_or_default()
 }
 
 #[tauri::command(rename_all = "snake_case")]
 pub async fn check_for_updates(app: tauri::AppHandle) -> Result<crate::updates::UpdateCheck, String> {
     let current_version = app.package_info().version.to_string();
+    if crate::screenshot_mode() {
+        return Ok(crate::updates::UpdateCheck { current_version:current_version.clone(),latest_version:current_version,release_url:String::new(),update_available:false });
+    }
     tokio::task::spawn_blocking(move || crate::updates::check_for_updates(&current_version))
         .await
         .map_err(|error| format!("update check failed: {error}"))?
@@ -75,6 +81,9 @@ mod update_install_tests {
 #[tauri::command(rename_all = "snake_case")]
 pub async fn get_github_user(state: State<'_, AppState>) -> Result<GithubUser, String> {
     let state = state.inner().clone();
+    if crate::screenshot_mode() {
+        return state.database().metadata("github_login").map_err(|error| error.to_string())?.map(|login| GithubUser { login }).ok_or_else(|| "Fixture has no GitHub login".into());
+    }
     tokio::task::spawn_blocking(move || {
         let database = state.database();
         match crate::github_sync::guarded(&database, crate::github::current_user) {
@@ -125,6 +134,101 @@ pub async fn sync_activity(app: tauri::AppHandle, state: State<'_, AppState>) ->
         crate::native::refresh_menu(&app, &state);
         result
     }).await.map_err(|error| error.to_string())?
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn sync_work_items(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<SyncResult, String> {
+    let state = state.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        let _job = state.job_lock.try_lock().map_err(|_| "Another refresh is running; try again when it finishes.".to_string())?;
+        let result = if crate::screenshot_mode() {
+            for index in 0..3 {
+                state.set_progress(SyncProgress {running:true,phase:"syncing_work_items".into(),current:index, total:3,repository_current:index,repository_total:3,repository_name:Some(["storyforge/planner","storyforge/mobile","orbit-labs/api"][index as usize].into()),message:format!("Refreshing PRs and issues: repository {} of 3",index+1),..SyncProgress::default()});
+                std::thread::sleep(std::time::Duration::from_secs(5));
+            }
+            state.set_progress(SyncProgress {running:false,phase:"work_items_complete".into(),current:3,total:3,repository_current:3,repository_total:3,message:"PRs and issues refreshed".into(),..SyncProgress::default()});
+            Ok(SyncResult {ok:true,message:"PRs and issues refreshed".into(),repositories_synced:3,activity_repositories_synced:3,pull_requests_synced:5,issues_synced:3,..SyncResult::default()})
+        } else { sync::sync_work_items(&state).map_err(|error| error.to_string()) };
+        if let Err(error) = &result {
+            let mut progress = state.progress();
+            progress.running = false;
+            progress.phase = "work_items_complete".into();
+            progress.error = Some(error.clone());
+            state.set_progress(progress);
+        }
+        drop(_job);
+        crate::native::refresh_menu(&app, &state);
+        result
+    }).await.map_err(|error| error.to_string())?
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn sync_personal_work_items(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<SyncResult, String> {
+    let state = state.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        let _job = state.job_lock.try_lock().map_err(|_| "Another refresh is running; try again when it finishes.".to_string())?;
+        let result = if crate::screenshot_mode() {
+            state.set_progress(SyncProgress { running:true, phase:"syncing_personal_work_items".into(), message:"Searching your authored and assigned PRs and issues".into(), ..SyncProgress::default() });
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            state.set_progress(SyncProgress { running:false, phase:"personal_work_items_complete".into(), message:"Your PRs and issues refreshed".into(), ..SyncProgress::default() });
+            Ok(SyncResult { ok:true, message:"Your PRs and issues refreshed".into(), pull_requests_synced:3, issues_synced:2, ..SyncResult::default() })
+        } else { sync::sync_personal_work_items(&state).map_err(|error| error.to_string()) };
+        if let Err(error) = &result {
+            let mut progress = state.progress();
+            progress.running = false;
+            progress.phase = "personal_work_items_complete".into();
+            progress.error = Some(error.clone());
+            state.set_progress(progress);
+        }
+        drop(_job);
+        crate::native::refresh_menu(&app, &state);
+        result
+    }).await.map_err(|error| error.to_string())?
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn get_kanban_page(state: State<'_, AppState>, kind: String, repository_ids: Option<Vec<i64>>, repository_id: Option<i64>, relationship: Option<String>, search: Option<String>, show_completed: bool, offset: i64, limit: i64) -> Result<KanbanPage, String> {
+    crate::kanban::page(&state.database(), crate::kanban::KanbanQuery { kind, repository_ids, repository_id, relationship:relationship.unwrap_or_else(|| "everyone".into()), search:search.unwrap_or_default(), show_completed, offset, limit }).map_err(|error| error.to_string())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn set_kanban_metadata(state: State<'_, AppState>, item_key: String, manual_column: Option<String>, priority: String, notes: String, sort_rank: i64, expected_revision: i64) -> Result<KanbanMetadata, String> {
+    crate::kanban::save_metadata(&state.database(), KanbanMetadata { item_key, manual_column, priority, notes, sort_rank, revision:0 }, expected_revision).map_err(|error| error.to_string())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn get_kanban_links(state: State<'_, AppState>, item_key: String) -> Result<KanbanLinks, String> {
+    let state = state.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        let Ok(_job) = state.job_lock.try_lock() else {
+            return crate::kanban::cached_links(&state.database(), &item_key).map_err(|error| error.to_string());
+        };
+        crate::kanban::load_links(&state.database(), &item_key).map_err(|error| error.to_string())
+    }).await.map_err(|error| error.to_string())?
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn get_kanban_discussion(state: State<'_, AppState>, item_key: String, load_more: Option<String>, force_refresh: bool) -> Result<KanbanDiscussion, String> {
+    let state = state.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        if crate::screenshot_mode() {
+            return crate::kanban_detail::cached(&state.database(), &item_key, Some("Screenshot fixture data only")).map_err(|error| error.to_string());
+        }
+        let Ok(_job) = state.job_lock.try_lock() else {
+            return crate::kanban_detail::cached(&state.database(), &item_key, Some("A refresh is running; showing saved discussion data")).map_err(|error| error.to_string());
+        };
+        crate::kanban_detail::load(&state.database(), &item_key, load_more.as_deref(), force_refresh).map_err(|error| error.to_string())
+    }).await.map_err(|error| error.to_string())?
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn get_kanban_preferences(state: State<'_, AppState>) -> Result<KanbanPreferences, String> {
+    crate::kanban::preferences(&state.database()).map_err(|error| error.to_string())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn set_kanban_preferences(state: State<'_, AppState>, preferences: KanbanPreferences) -> Result<KanbanPreferences, String> {
+    crate::kanban::save_preferences(&state.database(), preferences).map_err(|error| error.to_string())
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -239,10 +343,24 @@ pub async fn get_dashboard(state: State<'_, AppState>) -> Result<Dashboard, Stri
         let totals = db.totals(&summaries).map_err(|error| error.to_string())?;
         let history = db.history(None).map_err(|error| error.to_string())?;
         let last_sync_at = summaries.iter().filter_map(|repo| repo.last_sync_at.clone()).max();
+        let last_lines_refresh_at = db.metadata(sync::LAST_LOC_REFRESH_METADATA_KEY).map_err(|error| error.to_string())?;
+        let last_full_refresh_at = db.metadata(sync::LAST_FULL_REFRESH_METADATA_KEY).map_err(|error| error.to_string())?;
+        let last_activity_refresh_at = db.metadata(sync::LAST_ACTIVITY_REFRESH_METADATA_KEY).map_err(|error| error.to_string())?;
+        let last_personal_refresh_at = db.metadata(sync::LAST_PERSONAL_REFRESH_METADATA_KEY).map_err(|error| error.to_string())?;
         let user = db.metadata("github_login").map_err(|error| error.to_string())?.map(|login| GithubUser { login });
         let errors = db.metadata("org_discovery_errors").map_err(|error| error.to_string())?.filter(|_| sync::app_settings(&db).map(|settings| settings.include_company_repositories).unwrap_or(false)).map(|value| value.lines().map(str::to_string).collect()).unwrap_or_default();
-        Ok(Dashboard { user, repositories: summaries, totals, history, last_sync_at, errors })
+        Ok(Dashboard { user, repositories: summaries, totals, history, last_sync_at, last_lines_refresh_at, last_full_refresh_at, last_activity_refresh_at, last_personal_refresh_at, errors })
     }).await.map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub fn get_activity_refresh_at(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    state.database().metadata(sync::LAST_ACTIVITY_REFRESH_METADATA_KEY).map_err(|error| error.to_string())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn get_personal_refresh_at(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    state.database().metadata(sync::LAST_PERSONAL_REFRESH_METADATA_KEY).map_err(|error| error.to_string())
 }
 
 #[tauri::command(rename_all = "snake_case")]

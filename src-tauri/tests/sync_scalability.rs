@@ -9,8 +9,9 @@
 use chrono::{Duration, Utc};
 use codetally_lib::db::Database;
 use codetally_lib::github_sync;
-use codetally_lib::models::{Repository, SyncProgress};
+use codetally_lib::models::{AppSettings, PullRequest, Repository, Snapshot, SyncProgress};
 use codetally_lib::sync::{self, AppState};
+use codetally_lib::kanban;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -22,6 +23,31 @@ static GH_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn gh_env_lock() -> &'static Mutex<()> {
     GH_ENV_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+#[test]
+fn failed_link_refresh_retains_the_last_complete_cache() {
+    let root = unique_root("linked-work-offline");
+    let (database, database_path) = seed_database(&root, &[repository("repo-1", "one")]);
+    database.set_metadata("github_login", "me").expect("account");
+    sync::save_app_settings(&database, &AppSettings { kanban_enabled: true, ..AppSettings::default() }).expect("board enabled");
+    kanban::remember_repository(&database, "repo-1").expect("account repository");
+    let repo_id = database.repositories().expect("repositories")[0].id;
+    database.upsert_pull_request(&PullRequest { repository_id: repo_id, number: 7, title: "Fix bug".into(), state: "OPEN".into(), created_at: "2026-01-01T00:00:00Z".into(), updated_at: "2026-01-02T00:00:00Z".into(), url: "https://github.com/me/one/pull/7".into(), ..PullRequest::default() }).expect("PR");
+    let key = kanban::item_key("repo-1", "pr", 7, None);
+    let cached = serde_json::json!([{"kind":"issue","repository":"me/one","number":9,"title":"Linked issue","state":"OPEN","url":"https://github.com/me/one/issues/9"}]);
+    rusqlite::Connection::open(&database_path).expect("database connection").execute(
+        "INSERT INTO kanban_links_cache(account_scope,item_key,links_json,partial,updated_at) VALUES (?1,?2,?3,0,?4)",
+        rusqlite::params!["github.com:me", key, cached.to_string(), "2026-01-01T00:00:00Z"],
+    ).expect("cached links");
+    let fake = FakeGh::new("linked-work-offline", "permanent", 1);
+    let result = fake.with_path(|| kanban::load_links(&database, &key).expect("stale links should remain available"));
+    assert!(result.partial);
+    assert_eq!(result.items.len(), 1);
+    assert_eq!(result.items[0].number, 9);
+    assert_eq!(kanban::cached_links(&database, &key).expect("persistent cache").items.len(), 1);
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_file(database_path);
 }
 
 fn unique_root(label: &str) -> PathBuf {
@@ -87,6 +113,24 @@ fn state(database_path: PathBuf, root: &Path) -> AppState {
         progress: Arc::new(Mutex::new(SyncProgress::default())),
         job_lock: Arc::new(Mutex::new(())),
     }
+}
+
+#[cfg(unix)]
+fn install_command_guard(bin: &Path, name: &str, log: &Path) {
+    let script = bin.join(name);
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' '$0 $*' >> '{}'\nexit 0\n",
+            log.display()
+        ),
+    )
+    .expect("write command guard");
+    let mut permissions = std::fs::metadata(&script)
+        .expect("command guard metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(script, permissions).expect("make command guard executable");
 }
 
 struct FakeGh {
@@ -608,6 +652,7 @@ fn excluded_repositories_are_skipped_by_activity_sync_but_selected_repositories_
     let result = fake.with_path(|| sync::sync_activity(&state).expect("selected repository refresh"));
     assert!(result.ok);
     assert_eq!(result.activity_repositories_synced, 1);
+    assert!(database.metadata(sync::LAST_FULL_REFRESH_METADATA_KEY).expect("broad refresh marker").is_some());
     let calls = fake.calls();
     assert!(calls.lines().any(|call| call.contains("name=one")), "selected repository should reach GitHub: {calls}");
     assert!(!calls.lines().any(|call| call.contains("name=two")), "excluded repository must not reach GitHub: {calls}");
@@ -655,6 +700,8 @@ fn unavailable_repository_is_removed_with_cached_data_and_other_repositories_con
     let mut fake = FakeGh::new("unavailable-repository", "pages", 2);
     let repos = [repository("repo-1", "one"), repository("repo-2", "two")];
     let (database, database_path) = seed_database(&root, &repos);
+    // This test covers the legacy removal policy when the board is explicitly disabled.
+    sync::save_app_settings(&database, &AppSettings { kanban_enabled: false, ..AppSettings::default() }).expect("disable board");
     let sync_state = state(database_path, &root);
     fake.with_path(|| sync::sync_activity(&sync_state).expect("seed cached activity"));
     let stored = database.repositories().unwrap().remove(0);
@@ -719,4 +766,136 @@ fn only_missing_repository_errors_are_classified_as_unavailable() {
         assert!(matches!(github_sync::parse_response(&database, false, body, "gh: Could not resolve to a Repository with the name 'me/one'.").unwrap_err(), AppError::Command { .. }));
     }
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn explicit_work_item_sync_does_not_touch_loc_even_when_all_loc_triggers_are_due() {
+    let root = unique_root("work-items-loc-isolation");
+    let fake = FakeGh::new("work-items-loc-isolation", "pages", 1);
+    let forbidden_log = fake.root.join("git-tokei.log");
+    std::fs::write(&forbidden_log, "").expect("forbidden command log");
+    install_command_guard(&fake.bin, "git", &forbidden_log);
+    install_command_guard(&fake.bin, "tokei", &forbidden_log);
+
+    let (database, database_path) = seed_database(&root, &[]);
+    let pushed_at = "2026-09-10T00:00:00Z";
+    let fetched_pushed_at = "2026-09-01T00:00:00Z";
+    let mut repo = repository("repo-work-items", "work-items");
+    repo.pushed_at = Some(pushed_at.into());
+    repo.last_fetched_pushed_at = Some(fetched_pushed_at.into());
+    repo.local_path = None;
+    repo.loc_backfill_complete = false;
+    let repo_id = database.upsert_repository(&repo).expect("seed repository");
+    let stored = database
+        .repository(repo_id)
+        .expect("repository lookup")
+        .expect("stored repository");
+
+    let old_sweep = "2020-01-01T00:00:00Z";
+    database
+        .set_metadata("github_login", "me")
+        .expect("cached login");
+    database
+        .set_metadata("github_discovered_at", &Utc::now().to_rfc3339())
+        .expect("fresh discovery cache");
+    database
+        .set_metadata(sync::LOC_SWEEP_METADATA_KEY, old_sweep)
+        .expect("overdue LOC sweep");
+    database
+        .set_metadata(sync::LAST_LOC_REFRESH_METADATA_KEY, old_sweep)
+        .expect("previous line refresh");
+    database
+        .set_metadata(sync::LAST_FULL_REFRESH_METADATA_KEY, old_sweep)
+        .expect("previous broad refresh");
+    codetally_lib::kanban::remember_repository(&database, &stored.github_id)
+        .expect("remember tracked repo");
+    let cached_loc = Snapshot {
+        repository_id: repo_id,
+        commit_sha: "existing-loc-sample".into(),
+        commit_date: "2026-09-01T00:00:00Z".into(),
+        snapshot_date: "2026-09-01T00:00:00Z".into(),
+        total_loc: 120,
+        source_loc: 100,
+        test_loc: 20,
+        created_at: "2026-09-01T00:00:00Z".into(),
+        ..Snapshot::default()
+    };
+    database
+        .upsert_snapshot(&cached_loc)
+        .expect("seed LOC snapshot");
+    database
+        .upsert_observation(&cached_loc)
+        .expect("seed LOC observation");
+    let sync_state = state(database_path.clone(), &root);
+
+    let result = fake.with_path(|| sync::sync_work_items(&sync_state).expect("work-item sync"));
+    assert!(
+        result.ok,
+        "activity refresh should succeed: {:?}",
+        result.errors
+    );
+    assert_eq!(result.activity_repositories_synced, 1);
+    assert!(result.pull_requests_synced > 0);
+    assert!(result.issues_synced > 0);
+    assert!(
+        fake.calls().matches("api graphql").count() >= 4,
+        "the activity feeds should refresh: {}",
+        fake.calls()
+    );
+
+    let refreshed = database
+        .repository(repo_id)
+        .expect("repository lookup")
+        .expect("repository remains");
+    assert_eq!(refreshed.pushed_at.as_deref(), Some(pushed_at));
+    assert_eq!(
+        refreshed.last_fetched_pushed_at.as_deref(),
+        Some(fetched_pushed_at)
+    );
+    assert_ne!(
+        refreshed.pushed_at, refreshed.last_fetched_pushed_at,
+        "explicit activity sync must not advance LOC's pushedAt cursor"
+    );
+    assert!(
+        refreshed.local_path.is_none(),
+        "activity sync must leave a missing clone missing"
+    );
+    assert!(
+        !refreshed.loc_backfill_complete,
+        "activity sync must not mark an incomplete LOC backfill complete"
+    );
+    assert_eq!(
+        database
+            .metadata(sync::LOC_SWEEP_METADATA_KEY)
+            .expect("LOC sweep marker")
+            .as_deref(),
+        Some(old_sweep)
+    );
+    assert_eq!(database.metadata(sync::LAST_LOC_REFRESH_METADATA_KEY).expect("line refresh marker").as_deref(), Some(old_sweep));
+    assert_eq!(database.metadata(sync::LAST_FULL_REFRESH_METADATA_KEY).expect("broad refresh marker").as_deref(), Some(old_sweep));
+    assert!(database.metadata(sync::LAST_ACTIVITY_REFRESH_METADATA_KEY).expect("ticket refresh marker").is_some());
+
+    let conn = rusqlite::Connection::open(database.path()).expect("database connection");
+    for (table, expected) in [("code_snapshots", 1), ("loc_observations", 1)] {
+        let count: i64 = conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE repository_id=?1"),
+                [repo_id],
+                |row| row.get(0),
+            )
+            .expect("LOC row count");
+        assert_eq!(
+            count, expected,
+            "work-item sync must preserve cached {table}"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(&forbidden_log).expect("forbidden command log"),
+        "",
+        "explicit activity sync must not invoke git or tokei"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_file(database_path);
 }

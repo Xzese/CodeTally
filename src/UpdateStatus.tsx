@@ -117,7 +117,7 @@ export default function UpdateStatus({ updateCheckInterval = 'daily' }: Props) {
     onKeyDown={(event) => {
       if (event.key === 'Escape') { dismissed.current = true; setOpen(false); setPinned(false); trigger.current?.focus() }
     }}>
-    <button ref={trigger} type="button" className={update?.update_available ? 'button compact update-available' : 'icon-button'}
+    <button ref={trigger} type="button" className="button secondary topbar-nav-button update-available"
       aria-label={update?.update_available ? `Update available: ${update.latest_version}` : 'Updates'}
       title={update?.update_available ? `CodeTally ${update.latest_version} is available` : 'Updates'}
       aria-expanded={open} aria-controls="app-update-panel" onClick={() => {
