@@ -87,7 +87,20 @@ The first import can take time because the app clones each eligible repository i
 npm run tauri:build
 ```
 
-On macOS, the `.app` and `.dmg` are written below `src-tauri/target/release/bundle/`. You can run the app bundle directly or install it from the disk image.
+Local desktop builds from every worktree preserve the finished app, installer and executable in
+the primary checkout’s `artifacts/tauri/native-release/` (or `<target>-release/` for an explicit Rust
+architecture, and `*-debug/` for debug builds). Only the latest successful output
+for each target/profile is retained. Each local build or development session uses
+its own temporary Cargo directory and removes it on success, failure or a normal
+Ctrl-C exit, so simultaneous runs cannot delete one another’s compiler output.
+A forced termination or failed artifact copy can leave output for recovery.
+
+Use `npm run tauri:build`, `npm run tauri:dev`, or `npm run tauri -- build/dev`
+to get this cleanup. The repository-wide `git desktop-build` launcher also works in older branches
+that do not contain the npm wrapper. Direct Cargo/Tauri commands bypass cleanup. Set
+`CODETALLY_KEEP_BUILD_ARTIFACTS=1` to keep compiler caches for faster incremental
+builds; otherwise the next run recompiles dependencies. CI keeps its existing
+output paths so release verification and uploading continue to work.
 
 ### Continuous integration
 
