@@ -689,11 +689,9 @@ function App() {
   return (
     <div className={lightMode ? 'app-shell light' : 'app-shell'}>
       <header className="topbar">
-        <div className={`topbar-navigation${appSettings.kanban_enabled && !isSetup ? ' with-kanban' : ''}`}><div className="brand-mark"><img src={codetallyMark} alt="" aria-hidden="true" /><span>CodeTally</span></div>{appSettings.kanban_enabled && !isSetup && <nav aria-label="Main navigation"><button className="button secondary topbar-nav-button" aria-label={screen === 'kanban' ? 'Back to dashboard' : 'Kanban Board'} onClick={screen === 'kanban' ? backToDashboard : () => setScreen('kanban')}><span className="topbar-nav-label-full">{screen === 'kanban' ? 'Back to dashboard' : 'Kanban Board'}</span><span className="topbar-nav-label-compact" aria-hidden="true">{screen === 'kanban' ? 'Dashboard' : 'Kanban'}</span></button></nav>}</div>
+        <div className="topbar-navigation"><div className="brand-mark"><img src={codetallyMark} alt="" aria-hidden="true" /><span>CodeTally</span></div></div>
         <div className="topbar-status">
-          <div className="topbar-account">
-            <button className="icon-button" title="Settings" onClick={() => setSettingsOpen(true)}><Settings size={17} /></button>
-          </div>
+          {appSettings.kanban_enabled && !isSetup && <nav aria-label="Main navigation"><button className="button secondary topbar-nav-button" aria-label={screen === 'kanban' ? 'Back to dashboard' : 'Kanban Board'} onClick={screen === 'kanban' ? backToDashboard : () => setScreen('kanban')}><span className="topbar-nav-label-full">{screen === 'kanban' ? 'Back to dashboard' : 'Kanban Board'}</span><span className="topbar-nav-label-compact" aria-hidden="true">{screen === 'kanban' ? 'Dashboard' : 'Kanban'}</span></button></nav>}
           <UpdateStatus updateCheckInterval={settingsLoaded ? appSettings.update_check_interval : null} />
           <div className="topbar-refresh-group">
             <div
@@ -723,6 +721,7 @@ function App() {
             </div>}
             </div>
           </div>
+          <button className="icon-button topbar-settings" title="Settings" aria-label="Settings" onClick={() => setSettingsOpen(true)}><Settings size={17} /></button>
           {!isSetup && screen !== 'kanban' && <button className="icon-button feed-toggle" type="button" aria-label={feedOpen ? 'Hide activity sidebar' : 'Show activity sidebar'} aria-controls="activity-sidebar" aria-expanded={feedOpen} title={feedOpen ? 'Hide Live Feed' : 'Show Live Feed'} onClick={toggleFeed}>{feedOpen ? <PanelRightClose size={17} /> : <PanelRightOpen size={17} />}</button>}
         </div>
       </header>

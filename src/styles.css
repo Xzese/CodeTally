@@ -20,7 +20,6 @@ button { color: inherit; }
 .brand-mark img { width: 26px; height: 26px; object-fit: contain; display: block; }
 .light .brand-mark { color: #17253a; }
 .topbar-status { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 12px; }
-.topbar-account { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .topbar-refresh-group { display: inline-flex; align-items: center; gap: 12px; }
 .update-status { position: relative; display: inline-flex; }
 .update-status.active::after { content: ''; position: absolute; z-index: 44; top: 100%; right: 0; width: 100%; height: 12px; }
@@ -109,7 +108,7 @@ button { color: inherit; }
 .activity-sidebar { min-width: 0; transition: opacity .2s ease, visibility 0s; }
 .content-shell.feed-collapsed .activity-sidebar { opacity: 0; visibility: hidden; pointer-events: none; border-left-color: transparent; transition: opacity .2s ease, visibility 0s .28s; }
 .activity-backdrop { display: none; }
-.main-column { min-width: 0; height: 100%; overflow-y: auto; padding: 28px 28px 56px; max-width: 1500px; width: 100%; margin: 0 auto; }
+.main-column { min-width: 0; height: 100%; overflow-y: auto; padding: 28px 14px 56px; max-width: 1500px; width: 100%; margin: 0 auto; }
 .page-heading, .detail-heading { display: flex; align-items: end; justify-content: space-between; gap: 16px; margin-bottom: 22px; }
 .page-heading h1, .detail-heading h1 { margin: 3px 0 0; font-size: 26px; letter-spacing: -.04em; line-height: 1.1; color: #eff5ff; }
 .light .page-heading h1, .light .detail-heading h1 { color: #17253a; }
@@ -594,7 +593,7 @@ td:first-child { padding-left: 18px; }
 
 /* Local work board */
 .kanban-shell { display: block; overflow: auto; }
-.kanban-main { padding: 26px; min-width: 0; width: 100%; }
+.kanban-main { padding: 26px 14px; min-width: 0; width: 100%; }
 .kanban-launch { width: 100%; margin-bottom: 20px; }
 .kanban-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin: 20px 0; }
 .kanban-filters label, .kanban-detail label { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--subtle); }
@@ -713,7 +712,7 @@ body.kanban-drag-active, body.kanban-drag-active * { cursor: grabbing !important
 .kanban-link { display: block; text-align: left; background: transparent; border: 0; color: var(--blue); padding: 10px 0; cursor: pointer; }
 .activity-refresh-error { color: var(--red); font-size: 12px; line-height: 1.5; }
 
-.topbar-navigation { display: flex; align-items: center; gap: 24px; }
+.topbar-navigation { display: flex; align-items: center; flex: 0 0 auto; }
 .topbar-nav-button { border: 0; border-radius: 6px; background: transparent; color: var(--subtle); padding: 8px 10px; font-size: 12px; white-space: nowrap; cursor: pointer; }
 .topbar-nav-label-compact { display: none; }
 .topbar-nav-button:hover, .topbar-nav-button[aria-current=page] { color: var(--blue); background: var(--panel-hover); }
@@ -748,31 +747,26 @@ body.kanban-drag-active, body.kanban-drag-active * { cursor: grabbing !important
 @media (max-width: 480px) { .settings-update-checks { align-items: stretch; } }
 @media (max-width: 420px) { .settings-metric-options { grid-template-columns: repeat(5, minmax(76px, 1fr)); overflow-x: auto; padding-bottom: 5px; } }
 @media (max-width: 999px) {
-  .topbar { flex: 0 0 auto; min-height: 64px; padding: 8px 18px; flex-wrap: wrap; gap: 4px 12px; }
-  .topbar-navigation { flex: 0 0 auto; }
-  .topbar-status { margin-left: auto; min-width: 0; flex-wrap: wrap; justify-content: flex-end; }
-  .topbar-account { order: 0; }
-  .update-status { order: 1; }
-  .topbar-refresh-group { order: 2; }
-  .feed-toggle { order: 3; flex: 0 0 auto; }
   .content-shell:not(.kanban-shell) { position: relative; display: block; }
   .activity-sidebar { position: absolute; z-index: 4; top: 0; right: 0; width: min(380px, calc(100% - 32px)); box-shadow: -14px 0 38px rgba(0, 0, 0, .28); transform: translateX(105%); transition: transform .28s ease, opacity .2s ease, visibility 0s .28s; }
   .content-shell:not(.feed-collapsed) .activity-sidebar { transform: translateX(0); transition: transform .28s ease, opacity .2s ease, visibility 0s; }
   .activity-backdrop { display: block; position: absolute; z-index: 3; inset: 0; width: 100%; border: 0; background: rgba(0, 0, 0, .38); cursor: default; opacity: 0; visibility: hidden; pointer-events: none; transition: opacity .28s ease, visibility 0s .28s; }
   .content-shell:not(.feed-collapsed) .activity-backdrop { opacity: 1; visibility: visible; pointer-events: auto; transition: opacity .28s ease, visibility 0s; }
-  .main-column { padding: 22px 20px 48px; }
+  .main-column { padding: 22px 14px 48px; }
   .sync-progress-panel { margin: 12px 20px 0; }
   .error-banner { margin-left: 20px; margin-right: 20px; }
 }
+@media (max-width: 700px) {
+  .topbar { flex: 0 0 auto; min-height: 64px; padding: 8px 14px; flex-wrap: wrap; gap: 4px 10px; }
+  .topbar-status { margin-left: auto; min-width: 0; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+  .topbar-status nav { order: 0; }
+  .update-status { order: 1; }
+  .topbar-refresh-group { order: 2; }
+  .topbar-settings { order: 3; flex: 0 0 auto; }
+  .feed-toggle { order: 4; flex: 0 0 auto; }
+}
 @media (max-width: 620px) {
-  .topbar { padding: 8px 14px; gap: 3px 6px; }
-  .topbar-navigation { gap: 8px; }
-  .topbar-refresh-group { gap: 6px; }
-  .topbar-account { gap: 8px; }
-  .refresh-timestamps { padding-left: 8px; gap: 4px; font-size: 9px; }
-  .refresh-timestamp-list > span { gap: 5px; }
-  .refresh-label-full { display: none; }
-  .refresh-label-compact { display: inline; }
+  .topbar { gap: 3px 6px; }
   .main-column { padding: 18px 14px 42px; }
   .kanban-main { padding: 18px 14px; }
   .page-heading, .detail-heading, .panel-heading { flex-wrap: wrap; }
@@ -780,22 +774,31 @@ body.kanban-drag-active, body.kanban-drag-active * { cursor: grabbing !important
   .repos-panel .table-scroll { max-width: 100%; }
   .repos-panel table { min-width: 940px; }
 }
-@media (max-width: 540px) {
-  .brand-mark span { display: none; }
-}
-@media (max-width: 500px) {
-  .topbar-nav-label-full { display: none; }
-  .topbar-nav-label-compact { display: inline; }
+@media (max-width: 619px) {
   .update-status .update-available { width: 30px; height: 30px; padding: 0; justify-content: center; }
   .update-status .update-available span { display: none; }
 }
+@media (max-width: 510px) {
+  .brand-mark span { display: none; }
+}
+@media (max-width: 410px) {
+  .topbar-refresh-group { gap: 6px; }
+  .refresh-timestamps { padding-left: 8px; gap: 4px; font-size: 9px; }
+  .refresh-timestamp-list > span { gap: 5px; }
+  .refresh-label-full { display: none; }
+  .refresh-label-compact { display: inline; }
+}
+@media (max-width: 370px) {
+  .topbar-nav-label-full { display: none; }
+  .topbar-nav-label-compact { display: inline; }
+}
 @media (max-width: 374px) {
-  .topbar-navigation.with-kanban .brand-mark { display: none; }
-  .topbar-navigation .topbar-nav-button { padding-inline: 6px; font-size: 11px; }
-  .topbar-account { gap: 4px; }
-  .topbar-account .icon-button { width: 26px; height: 26px; }
+  .topbar:has(.topbar-status nav) .brand-mark { display: none; }
+  .topbar-status { gap: 4px; }
+  .topbar-status .topbar-nav-button { padding-inline: 6px; font-size: 11px; }
+  .topbar-settings { width: 26px; height: 26px; }
   .feed-toggle { width: 26px; height: 26px; }
-  .main-column, .kanban-main { padding: 14px 12px 32px; }
+  .main-column, .kanban-main { padding: 14px 14px 32px; }
   .chart-panel { padding: 14px 14px 0; }
   .settings-drawer { padding-inline: 16px; }
   .kanban-detail-header, .kanban-detail-footer { padding-inline: 16px; }
