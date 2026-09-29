@@ -12,9 +12,10 @@ function readableCheckStatus(value: string): string {
   return value.replaceAll('_', ' ').toLowerCase().replace(/^\w/, (letter) => letter.toUpperCase())
 }
 
-export default function ItemDetails({ item, saving, revision, onClose, onSave }: {
+export default function ItemDetails({ item, saving, syncBusy, revision, onClose, onSave }: {
   item: KanbanItem
   saving: boolean
+  syncBusy: boolean
   revision: number
   onClose: () => void
   onSave: (changes: Partial<KanbanMetadata>) => Promise<boolean>
@@ -22,6 +23,8 @@ export default function ItemDetails({ item, saving, revision, onClose, onSave }:
   const titleId = useId()
   const titleRef = useRef<HTMLHeadingElement>(null)
   const dialog = useRef<HTMLElement>(null)
+  const discussionRef = useRef<KanbanDiscussion | null>(null)
+  const activationClickRef = useRef(false)
   const [notes, setNotes] = useState(item.notes)
   const [priority, setPriority] = useState(item.priority)
   const [links, setLinks] = useState<KanbanLinks | null>(null)
@@ -42,11 +45,30 @@ export default function ItemDetails({ item, saving, revision, onClose, onSave }:
     return () => previous?.focus()
   }, [])
   useEffect(() => {
+    let focusTimer: number | undefined
+    const onBlur = () => { if (focusTimer !== undefined) window.clearTimeout(focusTimer); activationClickRef.current = true }
+    const onFocus = () => { if (focusTimer !== undefined) window.clearTimeout(focusTimer); focusTimer = window.setTimeout(() => { activationClickRef.current = false }, 250) }
+    window.addEventListener('blur', onBlur)
+    window.addEventListener('focus', onFocus)
+    return () => { if (focusTimer !== undefined) window.clearTimeout(focusTimer); window.removeEventListener('blur', onBlur); window.removeEventListener('focus', onFocus) }
+  }, [])
+  useEffect(() => {
+    if (syncBusy && discussionRef.current && !discussionRef.current.partial) return
     let alive = true
-    void getKanbanLinks(item.item_key).then((result) => { if (alive) setLinks(result) }).catch((reason) => { if (alive) setLinksError(String(reason)) })
-    void getKanbanDiscussion(item.item_key).then((result) => { if (alive) setDiscussion(result) }).catch((reason) => { if (alive) setSourceError(String(reason)) })
+    const load = async () => {
+      // Both reads use the same GitHub job lock. Load discussion first so an
+      // uncached ticket does not lose its checks to a simultaneous links read.
+      try {
+        const result = await getKanbanDiscussion(item.item_key)
+        if (alive) { discussionRef.current = result; setDiscussion(result); setSourceError('') }
+      } catch (reason) { if (alive) setSourceError(String(reason)) }
+      if (!alive) return
+      try { const result = await getKanbanLinks(item.item_key); if (alive) { setLinks(result); setLinksError('') } }
+      catch (reason) { if (alive) setLinksError(String(reason)) }
+    }
+    void load()
     return () => { alive = false }
-  }, [item.item_key, revision])
+  }, [item.item_key, revision, syncBusy])
 
   const requestClose = () => {
     if (saving) return
@@ -63,19 +85,19 @@ export default function ItemDetails({ item, saving, revision, onClose, onSave }:
   const loadMore = async (section: 'comments' | 'checks' | 'commits') => {
     setLoadingMore(section)
     setSourceError('')
-    try { setDiscussion(await getKanbanDiscussion(item.item_key, section)) }
+    try { const result = await getKanbanDiscussion(item.item_key, section); discussionRef.current = result; setDiscussion(result) }
     catch (reason) { setSourceError(String(reason)) }
     finally { setLoadingMore(null) }
   }
   const refreshDiscussion = async () => {
     setRefreshingDiscussion(true)
     setSourceError('')
-    try { setDiscussion(await getKanbanDiscussion(item.item_key, undefined, true)) }
+    try { const result = await getKanbanDiscussion(item.item_key, undefined, true); discussionRef.current = result; setDiscussion(result) }
     catch (reason) { setSourceError(String(reason)) }
     finally { setRefreshingDiscussion(false) }
   }
 
-  return <div className="kanban-detail-backdrop" onClick={(event) => { if (event.target === event.currentTarget) requestClose() }}><section ref={dialog} className="kanban-detail" role="dialog" aria-modal="true" aria-labelledby={titleId} onKeyDown={(event) => {
+  return <div className="kanban-detail-backdrop" onClick={(event) => { if (event.target === event.currentTarget && !activationClickRef.current) requestClose() }}><section ref={dialog} className="kanban-detail" role="dialog" aria-modal="true" aria-labelledby={titleId} onKeyDown={(event) => {
     if (event.key === 'Escape') { event.preventDefault(); requestClose(); return }
     if (event.key !== 'Tab') return
     const targets = dialog.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), summary')
@@ -86,11 +108,11 @@ export default function ItemDetails({ item, saving, revision, onClose, onSave }:
   }}>
     <header className="kanban-detail-header">
       <div className="kanban-detail-overline">{item.kind === 'pr' ? <GitPullRequest size={15} aria-hidden="true" /> : <CircleDot size={15} aria-hidden="true" />}<span>{item.kind === 'pr' ? 'Pull request' : 'Issue'} · {item.repository} #{item.number}</span></div>
-      <button className="icon-button" type="button" aria-label="Close details" title="Close details" onClick={requestClose}><X size={18} /></button>
+      <div className="kanban-detail-header-actions"><button className="button secondary compact" type="button" disabled={!githubUrlValid} title={!githubUrlValid ? 'Invalid GitHub work item URL' : undefined} onClick={() => openUrl(item.url)}>Open in GitHub <ExternalLink size={13} aria-hidden="true" /></button><button className="icon-button" type="button" aria-label="Close details" title="Close details" onClick={requestClose}><X size={18} /></button></div>
     </header>
     <div className="kanban-detail-body">
       <h2 id={titleId} ref={titleRef} tabIndex={-1}>{item.title}</h2>
-      <div className="kanban-detail-source-actions"><span className="kanban-source-state">{sourceStateLabel(item)}</span><button className="button secondary compact" type="button" disabled={!githubUrlValid} title={!githubUrlValid ? 'Invalid GitHub work item URL' : undefined} onClick={() => openUrl(item.url)}>Open in GitHub <ExternalLink size={13} aria-hidden="true" /></button></div>
+      <div className="kanban-detail-source-actions"><span className="kanban-source-state">{sourceStateLabel(item)}</span></div>
       {item.unavailable && <p className="kanban-detail-alert" role="status">Repository unavailable. Showing the last cached GitHub state.</p>}
 
       <section className="kanban-detail-section" aria-label="GitHub details">

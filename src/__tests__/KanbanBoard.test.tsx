@@ -94,10 +94,10 @@ describe('local Kanban workflow', () => {
     render(<KanbanBoard {...props} />)
     await screen.findByText('Second work')
     const review = screen.getByRole('region', { name: 'Review column' })
-    Object.defineProperty(within(review).getAllByRole('article')[0], 'getBoundingClientRect', { value: () => ({ top: 0, height: 100 }) })
+    Object.defineProperty(within(review).getAllByRole('button', { name: /^Open details for / })[0], 'getBoundingClientRect', { value: () => ({ top: 0, height: 100 }) })
     hitTest.mockReturnValue(review)
-    beginPointerDrag(within(review).getAllByRole('article')[1])
-    expect(within(review).getAllByRole('article')[1]).not.toHaveClass('kanban-card-dragging')
+    beginPointerDrag(within(review).getAllByRole('button', { name: /^Open details for / })[1])
+    expect(within(review).getAllByRole('button', { name: /^Open details for / })[1]).not.toHaveClass('kanban-card-dragging')
     expect(within(review).queryByRole('status', { name: 'Drop in Review' })).not.toBeInTheDocument()
     movePointer(10, 1000)
     expect(document.body).toHaveClass('kanban-drag-active')
@@ -114,9 +114,9 @@ describe('local Kanban workflow', () => {
     expect(document.body).not.toHaveClass('kanban-drag-active')
     expect(document.querySelector('.kanban-drag-preview')).toBeNull()
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('set_kanban_metadata', expect.objectContaining({ item_key: 'second', manual_column: 'Review', sort_rank: -1024 })))
-    await waitFor(() => expect(within(review).getAllByRole('article')[0]).toHaveTextContent('Second work'))
-    fireEvent.keyDown(within(review).getAllByRole('article')[0], { key: 'ArrowDown', altKey: true })
-    await waitFor(() => expect(within(review).getAllByRole('article')[1]).toHaveTextContent('Second work'))
+    await waitFor(() => expect(within(review).getAllByRole('button', { name: /^Open details for / })[0]).toHaveTextContent('Second work'))
+    fireEvent.keyDown(within(review).getAllByRole('button', { name: /^Open details for / })[0], { key: 'ArrowDown', altKey: true })
+    await waitFor(() => expect(within(review).getAllByRole('button', { name: /^Open details for / })[1]).toHaveTextContent('Second work'))
     expect(screen.queryByText('Move Second work up')).not.toBeInTheDocument()
   })
 
@@ -129,7 +129,7 @@ describe('local Kanban workflow', () => {
     })
     render(<KanbanBoard {...props} />)
     await screen.findByText(item.title)
-    beginPointerDrag(within(screen.getByRole('region', { name: 'Review column' })).getByRole('article'))
+    beginPointerDrag(within(screen.getByRole('region', { name: 'Review column' })).getByRole('button', { name: /^Open details for / }))
     const blocked = screen.getByRole('region', { name: 'Blocked column' })
     hitTest.mockReturnValue(blocked)
     movePointer(100, 100)
@@ -138,7 +138,7 @@ describe('local Kanban workflow', () => {
     await waitFor(() => expect(within(blocked).getByText(item.title)).toBeInTheDocument())
     fireEvent.click(screen.getByRole('button', { name: 'Show completed' }))
     const done = await screen.findByRole('region', { name: 'Done column' })
-    beginPointerDrag(within(blocked).getByRole('article'))
+    beginPointerDrag(within(blocked).getByRole('button', { name: /^Open details for / }))
     hitTest.mockReturnValue(done)
     movePointer(100, 100)
     expect(within(done).queryByRole('status', { name: 'Drop in Done' })).not.toBeInTheDocument()
@@ -158,7 +158,7 @@ describe('local Kanban workflow', () => {
     })
     render(<KanbanBoard {...props} />)
     await screen.findByText(item.title)
-    fireEvent.click(screen.getByRole('button', { name: item.title }))
+    fireEvent.click(screen.getByRole('button', { name: `Open details for ${item.title}` }))
     fireEvent.click(screen.getByRole('button', { name: 'Reset to automatic' }))
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('set_kanban_metadata', expect.objectContaining({ manual_column: null, expected_revision: 0 })))
     expect(within(screen.getByRole('region', { name: 'Review column' })).getByText(item.title)).toBeInTheDocument()
@@ -182,7 +182,7 @@ describe('local Kanban workflow', () => {
     })
     render(<KanbanBoard {...props} />)
     await screen.findByText(item.title)
-    fireEvent.click(screen.getByRole('button', { name: item.title }))
+    fireEvent.click(screen.getByRole('button', { name: `Open details for ${item.title}` }))
     const dialog = screen.getByRole('dialog')
     expect(await within(dialog).findByText('Please check the narrow layout.')).toBeInTheDocument()
     expect(within(dialog).getByText('Improve focus handling')).toBeInTheDocument()
@@ -203,6 +203,36 @@ describe('local Kanban workflow', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 
+  it('opens from the whole card and reloads saved discussion after a refresh without closing details', async () => {
+    let busy = true
+    invoke.mockImplementation(async (command) => {
+      if (command === 'get_kanban_preferences') return preferences
+      if (command === 'get_kanban_page') return page
+      if (command === 'get_kanban_links') return { items: [], partial: false }
+      if (command === 'get_kanban_discussion') return busy
+        ? { comments: [], comment_count: 0, comments_has_more: false, checks: [], check_count: 0, checks_has_more: false, commits: [], commit_count: 0, commits_has_more: false, refreshed_at: null, partial: true, message: 'A refresh is running; showing saved discussion data' }
+        : { comments: [], comment_count: 0, comments_has_more: false, checks: [{ id: 'check-1', name: 'Frontend checks', status: 'SUCCESS', details_url: null }], check_count: 1, checks_has_more: false, commits: [], commit_count: 0, commits_has_more: false, refreshed_at: item.updated_at, partial: false, message: null }
+    })
+    const view = render(<KanbanBoard {...props} syncBusy />)
+    const card = await screen.findByRole('button', { name: `Open details for ${item.title}` })
+    fireEvent.click(within(card).getByText('PR · sam/repo #2'))
+    expect(await screen.findByText('A refresh is running; showing saved discussion data')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Open in GitHub/ })).toBeInTheDocument()
+    fireEvent.blur(window)
+    fireEvent.focus(window)
+    fireEvent.click(document.querySelector('.kanban-detail-backdrop')!)
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+
+    busy = false
+    view.rerender(<KanbanBoard {...props} syncBusy={false} revision={1} />)
+    expect(await screen.findByText('Frontend checks')).toBeInTheDocument()
+    expect(screen.queryByText('A refresh is running; showing saved discussion data')).not.toBeInTheDocument()
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Close details' }))
+    fireEvent.keyDown(screen.getByRole('button', { name: `Open details for ${item.title}` }), { key: 'Enter' })
+    expect(await within(screen.getByRole('dialog')).findByText('Frontend checks')).toBeInTheDocument()
+  })
+
   it('keeps an unsaved draft visible after a local save failure', async () => {
     invoke.mockImplementation(async (command) => {
       if (command === 'get_kanban_preferences') return preferences
@@ -213,7 +243,7 @@ describe('local Kanban workflow', () => {
     })
     render(<KanbanBoard {...props} />)
     await screen.findByText(item.title)
-    fireEvent.click(screen.getByRole('button', { name: item.title }))
+    fireEvent.click(screen.getByRole('button', { name: `Open details for ${item.title}` }))
     const dialog = screen.getByRole('dialog')
     fireEvent.change(within(dialog).getByLabelText('Local notes'), { target: { value: 'Keep this draft' } })
     fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }))
@@ -230,7 +260,7 @@ describe('local Kanban workflow', () => {
     await screen.findByText(item.title)
     const review = screen.getByRole('region', { name: 'Review column' }), blocked = screen.getByRole('region', { name: 'Blocked column' })
     hitTest.mockReturnValue(blocked)
-    beginPointerDrag(within(review).getByRole('article'))
+    beginPointerDrag(within(review).getByRole('button', { name: /^Open details for / }))
     movePointer(100, 100)
     releasePointer(100, 100)
     expect(within(blocked).getByText(item.title)).toBeInTheDocument()

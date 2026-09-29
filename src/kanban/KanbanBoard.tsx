@@ -32,6 +32,8 @@ export default function KanbanBoard({ repositories, login, relationship: default
   const pendingRef = useRef(new Set<string>())
   const generation = useRef(0)
   const ids = JSON.stringify(activityScopeRepositories(scope, repositories, login).map((repo) => Number(repositoryId(repo))).filter(Number.isFinite))
+  const filterKey = JSON.stringify([login, kind, scope, relationship, search, completed])
+  const lastFilterKey = useRef<string | null>(null)
   useEffect(() => {
     let alive = true
     void getKanbanPreferences().then((preferences) => {
@@ -64,7 +66,16 @@ export default function KanbanBoard({ repositories, login, relationship: default
     } catch (reason) { if (token === generation.current) setError(String(reason)) }
     finally { if (token === generation.current) setLoading(false) }
   }, [kind, ids, relationship, search, completed])
-  useEffect(() => { if (!preferencesReady) return; setPage(null); setSelected(null); void load(); return () => { generation.current++ } }, [load, revision, preferencesReady])
+  useEffect(() => {
+    if (!preferencesReady) return
+    if (lastFilterKey.current !== filterKey) {
+      lastFilterKey.current = filterKey
+      setPage(null)
+      setSelected(null)
+    }
+    void load()
+    return () => { generation.current++ }
+  }, [load, revision, preferencesReady, filterKey])
   const save = async (item: KanbanItem, changes: Partial<KanbanMetadata>) => {
     if (pendingRef.current.has(item.item_key)) return false
     pendingRef.current.add(item.item_key); setPending(new Set(pendingRef.current))
@@ -187,7 +198,7 @@ export default function KanbanBoard({ repositories, login, relationship: default
     {error && <div role="alert" className="error-banner">{error}</div>}
     {page?.partial && <div role="status" className="kanban-notice">Activity data is partial. {page.errors.join(' ')}</div>}
     {!loading && page && !page.items.length && <p className="kanban-notice">{kind === 'none' ? 'Select PRs or Issues to show work items.' : 'No work items match these filters. Refresh activity to fetch the latest GitHub data.'}</p>}
-    <div className="kanban-columns">{COLUMNS.filter((column) => completed || column !== 'Done').map((column) => {
+    <div className="kanban-columns" tabIndex={0} role="region" aria-label="Kanban columns, scroll horizontally for more columns">{COLUMNS.filter((column) => completed || column !== 'Done').map((column) => {
       const cards = cardsIn(column)
       const rendered: Array<KanbanItem | null> = [...cards]
       if (dropTarget?.column === column) {
@@ -195,7 +206,8 @@ export default function KanbanBoard({ repositories, login, relationship: default
         rendered.splice(dropTarget.index + (sourceIndex >= 0 && sourceIndex <= dropTarget.index ? 1 : 0), 0, null)
       }
       return <section className="kanban-column" data-kanban-column={column} key={column} aria-label={`${column} column`}>
-        <h2>{column} <small>{cards.length}{page && page.items.length < page.total ? ' loaded' : ''}</small></h2>{rendered.map((card) => card === null ? <div key="drop-placeholder" className="kanban-drop-placeholder" role="status" aria-label={`Drop in ${column}`} /> : <article className={card.item_key === draggedKey ? 'kanban-card kanban-card-dragging' : 'kanban-card'} data-item-key={card.item_key} key={card.item_key} tabIndex={0} aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown Alt+ArrowLeft Alt+ArrowRight" title="Drag to move. With keyboard focus, use Alt and arrow keys to move." onPointerDown={(event) => startPointerDrag(event, card)} onClickCapture={(event) => { if (suppressClickRef.current === card.item_key) { event.preventDefault(); event.stopPropagation(); suppressClickRef.current = null } }} onKeyDown={(event) => {
+        <h2>{column} <small>{cards.length}{page && page.items.length < page.total ? ' loaded' : ''}</small></h2>{rendered.map((card) => card === null ? <div key="drop-placeholder" className="kanban-drop-placeholder" role="status" aria-label={`Drop in ${column}`} /> : <article className={card.item_key === draggedKey ? 'kanban-card kanban-card-dragging' : 'kanban-card'} data-item-key={card.item_key} key={card.item_key} role="button" tabIndex={0} aria-label={`Open details for ${card.title}`} aria-keyshortcuts="Enter Space Alt+ArrowUp Alt+ArrowDown Alt+ArrowLeft Alt+ArrowRight" title="Click to open details or drag to move. With keyboard focus, use Alt and arrow keys to move." onPointerDown={(event) => startPointerDrag(event, card)} onClickCapture={(event) => { if (suppressClickRef.current === card.item_key) { event.preventDefault(); event.stopPropagation(); suppressClickRef.current = null } }} onClick={() => setSelected(card.item_key)} onKeyDown={(event) => {
+          if (!event.altKey && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); setSelected(card.item_key); return }
           if (!event.altKey || ordering || pending.size || column === 'Done') return
           const direction = event.key === 'ArrowUp' ? -1 : event.key === 'ArrowDown' ? 1 : 0
           if (direction) {
@@ -208,12 +220,12 @@ export default function KanbanBoard({ repositories, login, relationship: default
             if (nextColumn) void place(card, nextColumn, cardsIn(nextColumn).length)
           }
         }}>
-          <button className="kanban-card-title" onClick={() => setSelected(card.item_key)}>{card.title}</button><span className="small-note">{card.kind === 'pr' ? <GitPullRequest size={13} aria-label="Pull request" /> : <CircleDot size={13} aria-label="Issue" />}{card.kind === 'pr' ? 'PR' : 'Issue'} · {card.repository} #{card.number}</span><div className="kanban-badges">{card.unavailable && <span>Unavailable · cached state</span>}{(columnFor(card) === 'Done' || card.is_draft) && <span className="kanban-state-badge">{sourceStateLabel(card)}</span>}{card.priority !== 'None' && <span className={`kanban-priority-badge priority-${card.priority.toLowerCase()}`}>{card.priority}</span>}{card.ci_state && <span>CI: {card.ci_state}</span>}{card.notes && <span className="kanban-note-indicator" aria-label="Local notes" title="Local notes"><StickyNote size={12} aria-hidden="true" /></span>}</div><span className="small-note">{card.author ? `@${card.author} · ` : ''}{relativeTime(card.updated_at)}</span>
+          <span className="kanban-card-title">{card.title}</span><span className="small-note">{card.kind === 'pr' ? <GitPullRequest size={13} aria-label="Pull request" /> : <CircleDot size={13} aria-label="Issue" />}{card.kind === 'pr' ? 'PR' : 'Issue'} · {card.repository} #{card.number}</span><div className="kanban-badges">{card.unavailable && <span>Unavailable · cached state</span>}{(columnFor(card) === 'Done' || card.is_draft) && <span className="kanban-state-badge">{sourceStateLabel(card)}</span>}{card.priority !== 'None' && <span className={`kanban-priority-badge priority-${card.priority.toLowerCase()}`}>{card.priority}</span>}{card.ci_state && <span>CI: {card.ci_state}</span>}{card.notes && <span className="kanban-note-indicator" aria-label="Local notes" title="Local notes"><StickyNote size={12} aria-hidden="true" /></span>}</div><span className="small-note">{card.author ? `@${card.author} · ` : ''}{relativeTime(card.updated_at)}</span>
         </article>)}
       </section>
     })}</div>
     {draggedItem && dragPosition && <div className="kanban-drag-preview" aria-hidden="true" style={dragPosition}><span className="kanban-drag-preview-source">{draggedItem.kind === 'pr' ? <GitPullRequest size={13} /> : <CircleDot size={13} />}{draggedItem.kind === 'pr' ? 'PR' : 'Issue'} · {draggedItem.repository} #{draggedItem.number}</span><strong>{draggedItem.title}</strong></div>}
     {page && page.items.length < page.total && <button className="button secondary" disabled={loading} onClick={() => void load(true, page.items.length)}>Load more ({page.items.length} of {page.total})</button>}
-    {item && <ItemDetails key={item.item_key} item={item} saving={pending.has(item.item_key)} revision={revision} onClose={() => setSelected(null)} onSave={(changes) => save(item, changes)} />}
+    {item && <ItemDetails key={item.item_key} item={item} saving={pending.has(item.item_key)} syncBusy={syncBusy} revision={revision} onClose={() => setSelected(null)} onSave={(changes) => save(item, changes)} />}
   </main>
 }
