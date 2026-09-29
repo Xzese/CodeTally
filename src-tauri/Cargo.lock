@@ -377,7 +377,11 @@ version = "0.1.2"
 dependencies = [
  "chrono",
  "ignore",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
  "open",
+ "png 0.17.16",
  "rusqlite",
  "serde",
  "serde_json",

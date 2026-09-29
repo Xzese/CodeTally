@@ -1,9 +1,11 @@
 //! Native lifecycle and scheduling remain active when the dashboard is hidden.
 use crate::models::{AppSettings, DashboardTotals, HistoryPoint, MenuBarMetric};
 use crate::sync::{self, AppState};
-use chrono::{Duration as ChronoDuration, NaiveDate, Utc};
+use chrono::Utc;
+#[cfg(any(test, not(target_os = "macos")))]
+use chrono::{Duration as ChronoDuration, NaiveDate};
 use std::time::{Duration, Instant};
-use tauri::{menu::{Menu, MenuBuilder}, tray::TrayIconBuilder, AppHandle, Emitter, Manager};
+use tauri::{menu::{Menu, MenuBuilder, SubmenuBuilder}, tray::TrayIconBuilder, AppHandle, Emitter, Manager};
 
 const TRAY_ID: &str = "codetally";
 const GITHUB_MENU_PREFIX: &str = "open-github:";
@@ -113,14 +115,36 @@ pub fn show_window(app: &AppHandle) {
     }
 }
 
-fn menu_label(repository: &str, number: i64, title: &str) -> String {
-    let prefix = format!("{repository} #{number} — ");
+fn menu_label(number: i64, title: &str) -> String {
+    let prefix = format!("#{number} — ");
     let remaining = 74usize.saturating_sub(prefix.chars().count());
     let mut shortened: String = title.chars().take(remaining).collect();
     if title.chars().count() > remaining { shortened.push('…'); }
     format!("{prefix}{shortened}")
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MenuTicket {
+    repository: String,
+    number: i64,
+    title: String,
+    url: String,
+}
+
+/// Preserve newest-item ordering for repositories and within each repository.
+fn group_menu_tickets(items: Vec<MenuTicket>) -> Vec<(String, Vec<MenuTicket>)> {
+    let mut groups: Vec<(String, Vec<MenuTicket>)> = Vec::new();
+    for item in items {
+        if let Some((_, tickets)) = groups.iter_mut().find(|(repo, _)| *repo == item.repository) {
+            tickets.push(item);
+        } else {
+            groups.push((item.repository.clone(), vec![item]));
+        }
+    }
+    groups
+}
+
+#[cfg(any(test, not(target_os = "macos")))]
 fn loc_value(point: &HistoryPoint, metric: MenuBarMetric) -> i64 {
     match metric {
         MenuBarMetric::TotalLines => point.total_loc,
@@ -130,8 +154,19 @@ fn loc_value(point: &HistoryPoint, metric: MenuBarMetric) -> i64 {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn formatted_lines(value: i64) -> String {
+    let digits = value.unsigned_abs().to_string();
+    let grouped = digits.chars().rev().enumerate().map(|(index, digit)| {
+        if index > 0 && index % 3 == 0 { format!(",{digit}") } else { digit.to_string() }
+    }).collect::<String>();
+    let number: String = grouped.chars().rev().collect();
+    if value < 0 { format!("-{number}") } else { number }
+}
+
 /// A 30-day chart from saved snapshots. Days before the first sample are left
 /// blank, while gaps after a sample retain its last measured value.
+#[cfg(any(test, not(target_os = "macos")))]
 fn loc_sparkline(history: &[HistoryPoint], metric: MenuBarMetric, today: NaiveDate) -> Option<(String, String)> {
     let mut samples: Vec<_> = history.iter().filter_map(|point| {
         NaiveDate::parse_from_str(&point.snapshot_date, "%Y-%m-%d").ok().map(|date| (date, loc_value(point, metric)))
@@ -165,13 +200,32 @@ fn loc_sparkline(history: &[HistoryPoint], metric: MenuBarMetric, today: NaiveDa
 fn tray_menu(app: &AppHandle, state: Option<&AppState>, metric: MenuBarMetric, history: Option<&[HistoryPoint]>) -> tauri::Result<Menu<tauri::Wry>> {
     let mut builder = MenuBuilder::new(app);
     let mut activity_count = 0;
+    let range = state.and_then(|state| sync::app_settings(&state.database()).ok()).map(|settings| settings.loc_chart_range).unwrap_or_default();
+    let range_label = if cfg!(target_os = "macos") { range.label() } else { "30 days" };
     if matches!(metric, MenuBarMetric::TotalLines | MenuBarMetric::SourceLines | MenuBarMetric::TestLines) {
         let label = match metric {
             MenuBarMetric::TotalLines => "Total lines",
             MenuBarMetric::SourceLines => "Source lines",
             _ => "Test lines",
         };
-        builder = builder.text("loc-trend-label", format!("{label} · last 30 days"));
+        builder = builder.text("loc-trend-label", format!("{label} · {range_label}"));
+        #[cfg(target_os = "macos")]
+        {
+            let chart = history.map(|points| crate::menu_loc_chart::chart_data(points, metric, range, Utc::now().date_naive()));
+            if let Some(chart) = chart.filter(|chart| chart.latest.is_some()) {
+                let (latest_date, latest_value) = chart.latest.expect("filtered to a measured chart");
+                builder = builder.text("loc-trend-graph", "LOC chart")
+                    .text("loc-trend-current", format!("Latest: {} lines · {latest_date}", formatted_lines(latest_value)));
+                if let Some((first_date, first_value)) = chart.first.filter(|first| first.0 != latest_date) {
+                    let delta = latest_value - first_value;
+                    builder = builder.text("loc-trend-change", format!("Change since {first_date}: {}{} lines", if delta >= 0 { "+" } else { "" }, formatted_lines(delta)));
+                }
+                builder = builder.text("loc-trend-coverage", format!("{} measured days; gaps have no sample", chart.measured_days));
+            } else {
+                builder = builder.text("loc-trend-empty", format!("No LOC samples for {range_label}"));
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
         if let Some((graph, last_recorded)) = history.and_then(|points| loc_sparkline(points, metric, Utc::now().date_naive())) {
             builder = builder.text("loc-trend-graph", graph).text("loc-trend-as-of", format!("Last LOC sample: {last_recorded}"));
         } else {
@@ -181,20 +235,18 @@ fn tray_menu(app: &AppHandle, state: Option<&AppState>, metric: MenuBarMetric, h
     }
     if let Some(state) = state {
         let db = state.database();
-        match metric {
-            MenuBarMetric::OpenPrs => {
-                for item in db.pull_requests(None, Some("open"), MENU_ACTIVITY_LIMIT).unwrap_or_default() {
-                    activity_count += 1;
-                    builder = builder.text(format!("{GITHUB_MENU_PREFIX}{}", item.url), menu_label(&item.repository, item.number, &item.title));
-                }
+        let tickets: Vec<MenuTicket> = match metric {
+            MenuBarMetric::OpenPrs => db.pull_requests(None, Some("open"), MENU_ACTIVITY_LIMIT).unwrap_or_default().into_iter().map(|item| MenuTicket { repository: item.repository, number: item.number, title: item.title, url: item.url }).collect(),
+            MenuBarMetric::OpenIssues => db.issues(None, Some("open"), MENU_ACTIVITY_LIMIT).unwrap_or_default().into_iter().map(|item| MenuTicket { repository: item.repository, number: item.number, title: item.title, url: item.url }).collect(),
+            _ => Vec::new(),
+        };
+        activity_count = tickets.len();
+        for (repository, items) in group_menu_tickets(tickets) {
+            let mut submenu = SubmenuBuilder::new(app, repository);
+            for item in items {
+                submenu = submenu.text(format!("{GITHUB_MENU_PREFIX}{}", item.url), menu_label(item.number, &item.title));
             }
-            MenuBarMetric::OpenIssues => {
-                for item in db.issues(None, Some("open"), MENU_ACTIVITY_LIMIT).unwrap_or_default() {
-                    activity_count += 1;
-                    builder = builder.text(format!("{GITHUB_MENU_PREFIX}{}", item.url), menu_label(&item.repository, item.number, &item.title));
-                }
-            }
-            _ => {}
+            builder = builder.item(&submenu.build()?);
         }
     }
     if matches!(metric, MenuBarMetric::OpenPrs | MenuBarMetric::OpenIssues) {
@@ -210,13 +262,19 @@ fn tray_menu(app: &AppHandle, state: Option<&AppState>, metric: MenuBarMetric, h
 }
 
 fn build_metric_tray(app: &AppHandle, state: Option<&AppState>, id: &str, metric: MenuBarMetric, title: &str, tooltip: &str, history: Option<&[HistoryPoint]>) -> tauri::Result<()> {
-    TrayIconBuilder::with_id(id)
+    let tray = TrayIconBuilder::with_id(id)
         .icon(metric_icon(metric))
         .icon_as_template(true)
         .title(title)
         .tooltip(tooltip)
         .menu(&tray_menu(app, state, metric, history)?)
         .build(app)?;
+    #[cfg(target_os = "macos")]
+    if let Some(points) = history.filter(|_| matches!(metric, MenuBarMetric::TotalLines | MenuBarMetric::SourceLines | MenuBarMetric::TestLines)) {
+        let range = state.and_then(|state| sync::app_settings(&state.database()).ok()).map(|settings| settings.loc_chart_range).unwrap_or_default();
+        let chart = crate::menu_loc_chart::chart_data(points, metric, range, Utc::now().date_naive());
+        crate::menu_loc_chart::attach(&tray, &chart);
+    }
     Ok(())
 }
 
@@ -245,7 +303,13 @@ pub fn refresh_menu(app: &AppHandle, state: &AppState) {
     let _ = tray.set_icon_as_template(true);
     let _ = tray.set_title(Some(&titles[0]));
     let _ = tray.set_tooltip(Some(&tooltip));
-    if let Ok(menu) = tray_menu(app, Some(state), metrics[0], Some(&history)) { let _ = tray.set_menu(Some(menu)); }
+    if let Ok(menu) = tray_menu(app, Some(state), metrics[0], Some(&history)) {
+        let _ = tray.set_menu(Some(menu));
+        #[cfg(target_os = "macos")]
+        if matches!(metrics[0], MenuBarMetric::TotalLines | MenuBarMetric::SourceLines | MenuBarMetric::TestLines) {
+            crate::menu_loc_chart::attach(&tray, &crate::menu_loc_chart::chart_data(&history, metrics[0], settings.loc_chart_range, Utc::now().date_naive()));
+        }
+    }
 
     for (metric, id) in METRIC_TRAYS {
         if let Some(index) = metrics.iter().position(|selected| *selected == metric).filter(|index| *index > 0) {
@@ -254,7 +318,13 @@ pub fn refresh_menu(app: &AppHandle, state: &AppState) {
                 let _ = metric_tray.set_icon_as_template(true);
                 let _ = metric_tray.set_title(Some(&titles[index]));
                 let _ = metric_tray.set_tooltip(Some(&tooltip));
-                if let Ok(menu) = tray_menu(app, Some(state), metric, Some(&history)) { let _ = metric_tray.set_menu(Some(menu)); }
+                if let Ok(menu) = tray_menu(app, Some(state), metric, Some(&history)) {
+                    let _ = metric_tray.set_menu(Some(menu));
+                    #[cfg(target_os = "macos")]
+                    if matches!(metric, MenuBarMetric::TotalLines | MenuBarMetric::SourceLines | MenuBarMetric::TestLines) {
+                        crate::menu_loc_chart::attach(&metric_tray, &crate::menu_loc_chart::chart_data(&history, metric, settings.loc_chart_range, Utc::now().date_naive()));
+                    }
+                }
             } else {
                 let _ = build_metric_tray(app, Some(state), id, metric, &titles[index], &tooltip, Some(&history));
             }
@@ -346,7 +416,7 @@ fn refresh_due(elapsed: Duration, interval_minutes: i64) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{hides_dock_icon, loc_sparkline, refresh_due};
+    use super::{group_menu_tickets, hides_dock_icon, loc_sparkline, refresh_due, MenuTicket};
     use crate::models::{AppSettings, HistoryPoint, MenuBarMetric};
     use chrono::NaiveDate;
     use std::time::Duration;
@@ -371,6 +441,20 @@ mod tests {
         assert!(refresh_due(Duration::from_secs(5 * 60), settings.personal_refresh_minutes));
         assert!(!refresh_due(Duration::from_secs(5 * 60), settings.activity_refresh_minutes));
         assert!(refresh_due(Duration::from_secs(24 * 60 * 60), settings.activity_refresh_minutes));
+    }
+
+    #[test]
+    fn ticket_menu_groups_repositories_without_losing_recent_order() {
+        let ticket = |repository: &str, number| MenuTicket {
+            repository: repository.into(), number, title: format!("Ticket {number}"),
+            url: format!("https://github.com/{repository}/issues/{number}"),
+        };
+        let groups = group_menu_tickets(vec![ticket("owner/alpha", 3), ticket("owner/beta", 7), ticket("owner/alpha", 2)]);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].0, "owner/alpha");
+        assert_eq!(groups[0].1.iter().map(|item| item.number).collect::<Vec<_>>(), vec![3, 2]);
+        assert_eq!(groups[1].0, "owner/beta");
+        assert_eq!(groups[1].1[0].number, 7);
     }
 
     #[test]

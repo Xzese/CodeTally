@@ -430,6 +430,7 @@ fn cadence_settings_round_trip_through_persisted_app_metadata() {
         refresh_lines_on_change: false,
         run_in_background: false,
         menu_bar_metric: MenuBarMetric::OpenPrs,
+        loc_chart_range: codetally_lib::models::LocChartRange::ThreeMonths,
         menu_bar_metrics: Vec::new(),
         menu_bar_compact_metrics: Vec::new(),
         show_menu_bar: true,
@@ -446,6 +447,7 @@ fn cadence_settings_round_trip_through_persisted_app_metadata() {
 
     let reopened = Database::new(&path);
     let loaded = sync::app_settings(&reopened).expect("load cadence settings");
+    assert_eq!(loaded.loc_chart_range, codetally_lib::models::LocChartRange::ThreeMonths);
     assert_eq!(loaded.activity_refresh_minutes, 60);
     assert_eq!(loaded.personal_refresh_minutes, 5);
     assert_eq!(loaded.update_check_interval, UpdateCheckInterval::Weekly);
@@ -536,6 +538,7 @@ fn legacy_saved_app_settings_keep_cadence_and_receive_new_defaults() {
     assert!(loaded.run_in_background);
     assert_eq!(loaded.theme_mode, ThemeMode::System);
     assert_eq!(loaded.menu_bar_metric, MenuBarMetric::OpenPrs);
+    assert_eq!(loaded.loc_chart_range, codetally_lib::models::LocChartRange::All);
     assert!(loaded.menu_bar_metrics.is_empty());
     assert!(loaded.menu_bar_compact_metrics.is_empty());
     assert!(loaded.show_menu_bar);

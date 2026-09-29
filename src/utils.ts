@@ -121,6 +121,7 @@ export const inTimeRange = (date: string, range: TimeRange): boolean => {
   if (range === 'ALL') return true
   const now = new Date()
   const start = new Date(now)
+  if (range === '30D') return new Date(date) >= new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - 29))
   if (range === '3M') start.setMonth(now.getMonth() - 3)
   if (range === '1Y') start.setFullYear(now.getFullYear() - 1)
   if (range === '3Y') start.setFullYear(now.getFullYear() - 3)

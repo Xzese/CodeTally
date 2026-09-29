@@ -26,6 +26,12 @@ tokio = { version = "1", features = ["sync", "rt", "macros"] }
 tauri-plugin-updater = "=2.11.0"
 tauri-plugin-autostart = "2.5.1"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSStatusItem", "NSMenu", "NSMenuItem", "NSImage", "NSImageView", "NSView", "NSResponder"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSData", "NSGeometry", "NSObject", "NSString"] }
+png = "0.17.16"
+
 [profile.release]
 codegen-units = 1
 lto = true

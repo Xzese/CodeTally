@@ -14,6 +14,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   include_forks_in_totals: false,
   run_in_background: true,
   menu_bar_metric: 'total_lines',
+  loc_chart_range: 'ALL',
   menu_bar_metrics: ['total_lines'],
   menu_bar_compact_metrics: [],
   show_menu_bar: true,
@@ -44,6 +45,7 @@ export function normalizeAppSettings(settings: Partial<AppSettings>): AppSetting
     update_check_interval: updateCheckInterval,
     menu_bar_metrics: menuMetrics,
     menu_bar_metric: menuMetrics[0],
+    loc_chart_range: ['30D', '3M', '1Y', '3Y', 'ALL'].includes(settings.loc_chart_range ?? '') ? settings.loc_chart_range! : 'ALL',
     menu_bar_compact_metrics: METRIC_ORDER.filter((metric) => settings.menu_bar_compact_metrics?.includes(metric)),
     excluded_repository_ids: settings.excluded_repository_ids ?? []
   }

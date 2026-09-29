@@ -187,6 +187,7 @@ const defaultAppSettings: AppSettings = {
   refresh_lines_on_change: true,
   run_in_background: true,
   menu_bar_metric: 'total_lines' as const,
+  loc_chart_range: 'ALL' as const,
   menu_bar_metrics: ['total_lines'] as MenuBarMetric[],
   menu_bar_compact_metrics: [] as MenuBarMetric[],
   show_menu_bar: true,
@@ -881,6 +882,11 @@ describe('dashboard UI', () => {
     await user.click(screen.getByRole('button', { name: '3M' }))
     expect(screen.getByRole('button', { name: '3M' })).toHaveClass('active')
     expect(screen.getByRole('button', { name: 'ALL' })).not.toHaveClass('active')
+    await waitFor(() => expect(savedSettings().at(-1)).toEqual(expect.objectContaining({ loc_chart_range: '3M' })))
+
+    await user.click(screen.getByRole('button', { name: '30D' }))
+    expect(screen.getByRole('button', { name: '30D' })).toHaveClass('active')
+    await waitFor(() => expect(savedSettings().at(-1)).toEqual(expect.objectContaining({ loc_chart_range: '30D' })))
   })
 
   it('uses Lines labels and sorts repositories by source and test lines', async () => {

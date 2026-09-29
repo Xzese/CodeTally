@@ -8,6 +8,8 @@ pub mod github_sync;
 pub mod kanban;
 pub mod kanban_detail;
 pub mod models;
+#[cfg(target_os = "macos")]
+mod menu_loc_chart;
 pub mod native;
 pub mod sync;
 pub mod updates;

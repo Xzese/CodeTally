@@ -1,7 +1,7 @@
 export type FeedKind = 'prs' | 'issues'
 export type ActivityRelationship = 'everyone' | 'author' | 'assignee' | 'author_or_assignee'
 export type LocMetric = 'total' | 'source' | 'tests'
-export type TimeRange = '3M' | '1Y' | '3Y' | 'ALL'
+export type TimeRange = '30D' | '3M' | '1Y' | '3Y' | 'ALL'
 
 export interface DependencyStatus {
   gh: boolean
@@ -249,6 +249,7 @@ export interface AppSettings {
   update_check_interval: UpdateCheckInterval
   run_in_background: boolean
   menu_bar_metric: MenuBarMetric
+  loc_chart_range: TimeRange
   menu_bar_metrics: MenuBarMetric[]
   menu_bar_compact_metrics: MenuBarMetric[]
   show_menu_bar: boolean

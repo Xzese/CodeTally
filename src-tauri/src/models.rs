@@ -216,6 +216,33 @@ pub enum MenuBarMetric {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub enum LocChartRange {
+    #[serde(rename = "30D")]
+    ThirtyDays,
+    #[serde(rename = "3M")]
+    ThreeMonths,
+    #[serde(rename = "1Y")]
+    OneYear,
+    #[serde(rename = "3Y")]
+    ThreeYears,
+    #[default]
+    #[serde(rename = "ALL")]
+    All,
+}
+
+impl LocChartRange {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ThirtyDays => "30 days",
+            Self::ThreeMonths => "3 months",
+            Self::OneYear => "1 year",
+            Self::ThreeYears => "3 years",
+            Self::All => "all time",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ThemeMode {
     Light,
@@ -261,6 +288,8 @@ pub struct AppSettings {
     pub run_in_background: bool,
     #[serde(default)]
     pub menu_bar_metric: MenuBarMetric,
+    #[serde(default)]
+    pub loc_chart_range: LocChartRange,
     #[serde(default)]
     pub menu_bar_metrics: Vec<MenuBarMetric>,
     #[serde(default)]
@@ -313,6 +342,7 @@ impl Default for AppSettings {
             refresh_lines_on_change: true,
             run_in_background: true,
             menu_bar_metric: MenuBarMetric::default(),
+            loc_chart_range: LocChartRange::default(),
             menu_bar_metrics: Vec::new(),
             menu_bar_compact_metrics: Vec::new(),
             show_menu_bar: true,
