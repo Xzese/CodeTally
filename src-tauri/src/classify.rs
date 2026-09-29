@@ -422,6 +422,7 @@ pub fn parse_date(value: &str) -> Option<NaiveDate> {
 
 pub fn range_start(range: Option<&str>, now: DateTime<Utc>) -> Option<String> {
     let days = match range.unwrap_or("all").to_ascii_lowercase().as_str() {
+        "30d" => Some(30),
         "3m" => Some(92),
         "1y" => Some(366),
         "3y" => Some(366 * 3),

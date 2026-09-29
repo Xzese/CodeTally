@@ -15,11 +15,11 @@ const METRICS: { key: MenuBarMetric; label: string; field: keyof NormalizedMetri
   { key: 'open_issues', label: 'Open issues', field: 'open_issues', suffix: 'issues' }
 ]
 
-export function menuBarTitle(metric: MenuBarMetric, metrics: NormalizedMetrics): string {
+export function menuBarTitle(metric: MenuBarMetric, metrics: NormalizedMetrics, compact = false): string {
   const option = METRICS.find((item) => item.key === metric) ?? METRICS[0]
   const value = metrics[option.field]
   const number = value >= 1_000_000_000 ? `${(value / 1_000_000_000).toFixed(1)}B` : value >= 1_000_000 ? `${(value / 1_000_000).toFixed(1)}M` : value >= 1_000 ? `${(value / 1_000).toFixed(1)}K` : String(value)
-  return `${number} ${option.suffix}`
+  return compact ? number : `${number} ${option.suffix}`
 }
 
 const THEME_OPTIONS: { key: ThemeMode; label: string; icon: typeof Sun }[] = [{ key: 'light', label: 'Light', icon: Sun }, { key: 'dark', label: 'Dark', icon: Moon }, { key: 'system', label: 'Follow system', icon: Monitor }]
@@ -91,11 +91,11 @@ function Interval({ label, value, options, minMinutes = 1, help, onChange }: { l
       inputRef.current?.select()
     })
   }
-  return <div className="settings-row settings-interval-row"><div className="settings-row-label">{label} <span className="settings-row-unit">(min)</span><Help label={label}>{help} Choose Custom for any whole number from {minMinutes} to 1440 minutes. Your change saves when you leave the field or press Enter.</Help></div><div className="settings-interval-control"><div className="settings-interval-options" role="radiogroup" aria-label={label}>{options.map((minutes) => <label key={minutes} className={!custom && value === minutes ? 'selected' : ''}><input type="radio" name={label} aria-label={`${minutes} ${minutes === 1 ? 'minute' : 'minutes'}`} checked={!custom && value === minutes} onChange={() => { setCustom(false); setError(null); setDraft(String(minutes)); if (minutes !== value) onChange(minutes) }} /><span>{minutes}</span></label>)}<div className={`settings-custom-option${custom ? ' selected' : ''}`} onClick={() => { if (!custom) selectCustom() }}><input id={customId} type="radio" name={label} aria-label="Custom" checked={custom} onChange={selectCustom} />{custom ? <input ref={inputRef} className="settings-inline-custom" type="text" inputMode="numeric" aria-label={customLabel} aria-invalid={!!error} aria-describedby={error ? errorId : undefined} value={draft} onClick={(event) => event.stopPropagation()} onChange={(event) => { setDraft(event.target.value); setError(null) }} onBlur={commit} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); commit() } }} /> : <label htmlFor={customId}>Custom</label>}</div></div>{error && <span id={errorId} role="alert" className="settings-interval-error">{error}</span>}</div></div>
+  return <div className="settings-row settings-interval-row"><div className="settings-row-label">{label}<Help label={label}>{help} Choose Custom for any whole number from {minMinutes} to 1440 minutes. Your change saves when you leave the field or press Enter.</Help></div><div className="settings-interval-control"><div className="settings-interval-options" role="radiogroup" aria-label={label}>{options.map((minutes) => <label key={minutes} className={!custom && value === minutes ? 'selected' : ''}><input type="radio" name={label} aria-label={`${minutes} ${minutes === 1 ? 'minute' : 'minutes'}`} checked={!custom && value === minutes} onChange={() => { setCustom(false); setError(null); setDraft(String(minutes)); if (minutes !== value) onChange(minutes) }} /><span>{minutes}</span></label>)}<div className={`settings-custom-option${custom ? ' selected' : ''}`} onClick={() => { if (!custom) selectCustom() }}><input id={customId} type="radio" name={label} aria-label="Custom" checked={custom} onChange={selectCustom} />{custom ? <input ref={inputRef} className="settings-inline-custom" type="text" inputMode="numeric" aria-label={customLabel} aria-invalid={!!error} aria-describedby={error ? errorId : undefined} value={draft} onClick={(event) => event.stopPropagation()} onChange={(event) => { setDraft(event.target.value); setError(null) }} onBlur={commit} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); commit() } }} /> : <label htmlFor={customId}>Custom</label>}</div></div>{error && <span id={errorId} role="alert" className="settings-interval-error">{error}</span>}</div></div>
 }
 
 function UpdateCheckIntervalControl({ value, onChange }: { value: UpdateCheckInterval; onChange: (value: UpdateCheckInterval) => void }) {
-  return <div className="settings-row settings-update-interval-row"><div className="settings-row-label">App update checks<Help label="App update checks">Check for new app versions automatically. Choose Never to check only when you select Check for updates.</Help></div><div className="settings-update-interval-options" role="radiogroup" aria-label="App update checks">{UPDATE_CHECK_OPTIONS.map((option) => <label key={option.key} className={value === option.key ? 'selected' : ''}><input type="radio" name="app-update-check-interval" aria-label={option.label} checked={value === option.key} onChange={() => onChange(option.key)} /><span>{option.label}</span></label>)}</div></div>
+  return <div className="settings-row settings-update-interval-row settings-update-checks"><div className="settings-row-label">Check for Updates<Help label="Check for Updates">Check for new app versions automatically. Choose Never to check only when you select Check for Updates.</Help></div><div className="settings-update-interval-options" role="radiogroup" aria-label="Check for Updates">{UPDATE_CHECK_OPTIONS.map((option) => <label key={option.key} className={value === option.key ? 'selected' : ''}><input type="radio" name="app-update-check-interval" aria-label={option.label} checked={value === option.key} onChange={() => onChange(option.key)} /><span>{option.label}</span></label>)}</div></div>
 }
 
 function OpenAtLoginControl() {
@@ -108,6 +108,10 @@ function OpenAtLoginControl() {
     setLoading(true)
     setError(null)
     try {
+      if (import.meta.env.VITE_CODETALLY_SCREENSHOT_MODE === '1' && !('__TAURI_INTERNALS__' in window)) {
+        setEnabled(false)
+        return
+      }
       setEnabled(await isAutostartEnabled())
     } catch {
       setError('Couldn’t read the login setting.')
@@ -139,9 +143,9 @@ function OpenAtLoginControl() {
   </>
 }
 
-type Props = { settings: AppSettings; loaded: boolean; metrics: NormalizedMetrics; saving: boolean; error: string | null; onChange: (update: (current: AppSettings) => AppSettings) => void; onRetry: () => void; onClose: () => void }
+type Props = { login: string; settings: AppSettings; loaded: boolean; metrics: NormalizedMetrics; saving: boolean; error: string | null; onChange: (update: (current: AppSettings) => AppSettings) => void; onRetry: () => void; onClose: () => void; onForceRefresh: () => void; onRefreshAllTickets: () => void; refreshing: boolean }
 
-export default function SettingsDrawer({ settings, loaded, metrics, saving, error, onChange, onRetry, onClose }: Props) {
+export default function SettingsDrawer({ login, settings, loaded, metrics, saving, error, onChange, onRetry, onClose, onForceRefresh, onRefreshAllTickets, refreshing }: Props) {
   const [hoverMetric, setHoverMetric] = useState<MenuBarMetric | null>(null)
   const [focusMetric, setFocusMetric] = useState<MenuBarMetric | null>(null)
   const drawerRef = useRef<HTMLElement>(null)
@@ -325,10 +329,15 @@ export default function SettingsDrawer({ settings, loaded, metrics, saving, erro
   }
 
   const selectedMetrics = settings.menu_bar_metrics?.length ? settings.menu_bar_metrics : [settings.menu_bar_metric]
+  const compactMetrics = settings.menu_bar_compact_metrics ?? []
   const exploratoryMetric = hoverMetric ?? focusMetric
   const previewMetrics = METRICS.filter((option) => selectedMetrics.includes(option.key) || option.key === exploratoryMetric)
   const toggleMetric = (metric: MenuBarMetric) => {
     if (selectedMetrics.length === 1 && selectedMetrics.includes(metric)) return
+    if (selectedMetrics.includes(metric)) {
+      setHoverMetric((current) => current === metric ? null : current)
+      setFocusMetric((current) => current === metric ? null : current)
+    }
     onChange((current) => {
     const selected = new Set(current.menu_bar_metrics?.length ? current.menu_bar_metrics : [current.menu_bar_metric])
     if (selected.has(metric)) {
@@ -339,6 +348,12 @@ export default function SettingsDrawer({ settings, loaded, metrics, saving, erro
     return { ...current, menu_bar_metrics: next, menu_bar_metric: next[0] }
     })
   }
+  const toggleCompactMetric = (metric: MenuBarMetric) => onChange((current) => {
+    const compact = new Set(current.menu_bar_compact_metrics ?? [])
+    if (compact.has(metric)) compact.delete(metric)
+    else compact.add(metric)
+    return { ...current, menu_bar_compact_metrics: METRICS.filter((option) => compact.has(option.key)).map((option) => option.key) }
+  })
   return <div className="drawer-backdrop" onClick={onClose}><aside ref={drawerRef} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Settings" className="settings-drawer" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => {
     if (event.key === 'Escape') onClose()
     if (event.key === 'Tab') {
@@ -354,16 +369,21 @@ export default function SettingsDrawer({ settings, loaded, metrics, saving, erro
     <section className="settings-section" id="settings-appearance"><SectionHeading title="Appearance & menu bar" help="Choose the metrics you want to see in the macOS menu bar. Hover or focus a metric to preview it. Values come from your saved dashboard data." />
       <div className="settings-theme-options" role="radiogroup" aria-label="Appearance">{THEME_OPTIONS.map((option) => { const Icon = option.icon; return <label key={option.key} className={`settings-theme-option${settings.theme_mode === option.key ? ' selected' : ''}`}><input type="radio" name="appearance" aria-label={option.label} checked={settings.theme_mode === option.key} onChange={() => onChange((current) => ({ ...current, theme_mode: option.key }))} /><Icon size={18} aria-hidden="true" /><span>{option.label}</span></label> })}</div>
       <div className="settings-row settings-menu-visibility"><div className="settings-row-label">Show in menu bar<Help label="Show in menu bar">Show your selected metrics in the macOS menu bar. If you hide them, open CodeTally from Applications or the Dock.</Help></div><input className="mac-switch" role="switch" type="checkbox" aria-label="Show CodeTally in the menu bar" checked={settings.show_menu_bar} onChange={(event) => { const checked = event.target.checked; onChange((current) => ({ ...current, show_menu_bar: checked })) }} /></div>
-      <div className="settings-menu-preview"><div className="settings-menu-preview-strip"><span className="settings-preview-value" aria-label="Menu bar preview">{previewMetrics.map((option, index) => { const Icon = METRIC_ICONS[option.key]; return <span className="settings-preview-metric" key={option.key}>{index > 0 && <span aria-hidden="true"> · </span>}<Icon size={16} aria-hidden="true" />{menuBarTitle(option.key, metrics)}</span> })}</span></div><span className="settings-preview-caption">{exploratoryMetric && !selectedMetrics.includes(exploratoryMetric) ? 'Preview · select to add' : 'Your menu bar'}</span></div>
-      <div className="settings-metric-options" role="group" aria-label="Menu bar metrics">{METRICS.map((option) => { const selected = selectedMetrics.includes(option.key); const Icon = METRIC_ICONS[option.key]; return <label key={option.key} className={`settings-metric-option${selected ? ' selected' : ''}`} onMouseEnter={() => setHoverMetric(option.key)} onMouseLeave={() => setHoverMetric(null)}><input type="checkbox" aria-label={option.label} checked={selected} aria-disabled={selected && selectedMetrics.length === 1} onFocus={() => setFocusMetric(option.key)} onBlur={() => setFocusMetric(null)} onChange={() => toggleMetric(option.key)} /><Icon className="settings-metric-icon" size={18} aria-hidden="true" /><span className="settings-metric-copy"><strong>{option.label}</strong><small>{menuBarTitle(option.key, metrics)}</small></span><span className="settings-metric-indicator" aria-hidden="true">{selected && <Check size={12} />}</span></label> })}</div>
+      <div className="settings-menu-preview"><div className="settings-menu-preview-strip" tabIndex={0} aria-label="Scroll menu bar preview horizontally"><span className="settings-preview-value" aria-label="Menu bar preview">{previewMetrics.map((option) => { const Icon = METRIC_ICONS[option.key]; const fullTitle = menuBarTitle(option.key, metrics); const compact = compactMetrics.includes(option.key); return <span className={`settings-preview-metric${selectedMetrics.includes(option.key) ? '' : ' is-exploratory'}`} key={option.key} aria-label={compact ? `${fullTitle}, compact` : fullTitle} title={fullTitle}><Icon size={13} aria-hidden="true" /><span>{menuBarTitle(option.key, metrics, compact)}</span></span> })}</span></div><span className="settings-preview-caption">{exploratoryMetric && !selectedMetrics.includes(exploratoryMetric) ? 'Preview · select to add' : 'Your menu bar'}</span></div>
+      <div className="settings-metric-options" role="group" aria-label="Menu bar metrics">{METRICS.map((option) => { const selected = selectedMetrics.includes(option.key); const Icon = METRIC_ICONS[option.key]; return <div key={option.key} className="settings-metric-choice" onMouseEnter={() => setHoverMetric(option.key)} onMouseLeave={() => setHoverMetric(null)} onFocusCapture={() => setFocusMetric(option.key)} onBlurCapture={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocusMetric(null) }}><label className="settings-metric-compact-control"><span>Compact</span><input className="mac-switch" role="switch" type="checkbox" aria-label={`Compact ${option.label} in menu bar`} checked={compactMetrics.includes(option.key)} onChange={() => toggleCompactMetric(option.key)} /></label><label className={`settings-metric-option${selected ? ' selected' : ''}`}><input type="checkbox" aria-label={option.label} checked={selected} aria-disabled={selected && selectedMetrics.length === 1} onChange={() => toggleMetric(option.key)} /><Icon className="settings-metric-icon" size={18} aria-hidden="true" /><span className="settings-metric-copy"><strong>{option.label}</strong><small>{menuBarTitle(option.key, metrics)}</small></span><span className="settings-metric-indicator" aria-hidden="true">{selected && <Check size={12} />}</span></label></div> })}</div>
       <p className="settings-metric-hint">Choose the metrics you want to see. Keep at least one selected.</p>
+    </section>
+    <section className="settings-section"><SectionHeading title="Kanban" help="Combine pull requests and issues from your tracked repositories on one board. Manual columns, priorities, and notes stay on this Mac and do not update GitHub." />
+      <div className="settings-row"><label htmlFor="kanban-enabled">Enable Kanban board</label><input id="kanban-enabled" className="mac-switch" role="switch" type="checkbox" checked={settings.kanban_enabled} onChange={(event) => { const checked = event.target.checked; onChange((current) => ({ ...current, kanban_enabled: checked })) }} /></div>
+      <p className="settings-metric-hint">See tracked GitHub pull requests and issues together. Columns, priorities, and notes stay on this computer.</p>
     </section>
     <section className="settings-section" id="settings-refresh"><SectionHeading title="Background & refresh" help="Choose when CodeTally refreshes your GitHub activity and line counts." />
       <OpenAtLoginControl />
       <div className="settings-row"><div className="settings-row-label">Run in background<Help label="Run in background">Keep CodeTally running from the menu bar without a Dock icon.</Help></div><input className="mac-switch" role="switch" type="checkbox" aria-label="Keep running in the background when the window closes" checked={settings.run_in_background} onChange={(event) => { const checked = event.target.checked; onChange((current) => ({ ...current, run_in_background: checked })) }} /></div>
-      <UpdateCheckIntervalControl value={settings.update_check_interval} onChange={(value) => onChange((current) => ({ ...current, update_check_interval: value }))} />
-      <Interval label="Pull requests and issues" value={settings.activity_refresh_minutes} options={[15, 30, 60, 120]} minMinutes={15} help="Choose how often CodeTally refreshes pull requests and issues." onChange={(value) => onChange((current) => ({ ...current, activity_refresh_minutes: value }))} />
-      <Interval label="Lines of Code Refresh" value={settings.lines_refresh_minutes} options={[360, 720, 1440]} help="Choose how often CodeTally updates line counts for changed repositories." onChange={(value) => onChange((current) => ({ ...current, lines_refresh_minutes: value }))} />
+      <div className="settings-row settings-interval-row"><div className="settings-row-label">Repo Refresh<Help label="Repo Refresh">Choose how often CodeTally refreshes repositories, tickets, and line counts. Daily is the default.</Help></div><div className="settings-interval-control"><div className="settings-update-interval-options" role="radiogroup" aria-label="Repo Refresh">{[{ value: 60, label: 'Hourly' }, { value: 1440, label: 'Daily' }, { value: 10080, label: 'Weekly' }, { value: 43200, label: 'Monthly' }].map((option) => <label key={option.value} className={settings.activity_refresh_minutes === option.value ? 'selected' : ''}><input type="radio" name="repo-refresh" aria-label={option.label} checked={settings.activity_refresh_minutes === option.value} onChange={() => onChange((current) => ({ ...current, activity_refresh_minutes: option.value }))} /><span>{option.label}</span></label>)}</div>{settings.activity_refresh_minutes === 60 && <p className="settings-interval-warning" role="status">Hourly repository refreshes can use more GitHub API requests and may reach API limits. Daily is recommended for most repositories.</p>}</div></div>
+      <Interval label="PR & Issue Refresh" value={settings.personal_refresh_minutes} options={[5, 15, 30, 60]} minMinutes={5} help="Refresh pull requests and issues involving you. The default is every 5 minutes. This does not scan lines of code." onChange={(value) => onChange((current) => ({ ...current, personal_refresh_minutes: value }))} />
+      <div className="settings-row"><div className="settings-row-label">Repo Refresh now<Help label="Force Repo Refresh">Refresh tracked repositories, pull requests, issues, and line counts now.</Help></div><button className="button primary" disabled={refreshing || !loaded} onClick={onForceRefresh}>{refreshing ? 'Refreshing…' : 'Force Refresh'}</button></div>
+      <div className="settings-row"><div className="settings-row-label">All tracked tickets<Help label="All tracked tickets">Refresh PRs and issues across every tracked repository without scanning lines of code. This may take longer than the personal Refresh Tickets action.</Help></div><button className="button secondary" disabled={refreshing || !loaded} onClick={onRefreshAllTickets}>Refresh All Tickets</button></div>
       <div className="settings-row"><div className="settings-row-label">Refresh on code changes<Help label="Refresh on code changes">Update line counts when a repository changes.</Help></div><input className="mac-switch" role="switch" type="checkbox" aria-label="Refresh Lines of Code when code changes" checked={settings.refresh_lines_on_change} onChange={(event) => { const checked = event.target.checked; onChange((current) => ({ ...current, refresh_lines_on_change: checked })) }} /></div>
     </section>
     <section className="settings-section repository-selection-block" id="settings-repositories"><SectionHeading title="Repositories" help="Choose which repositories to include. Repositories you leave out won’t appear in the dashboard or refresh, but their saved data stays on this Mac." />
@@ -372,6 +392,7 @@ export default function SettingsDrawer({ settings, loaded, metrics, saving, erro
     </section>
     </fieldset>
     <section className="settings-section" id="settings-storage"><SectionHeading title="Storage & connection" help="Your repository data, history, and preferences are stored on this Mac. CodeTally uses your existing GitHub sign-in and never stores your token." />
+      <div className="settings-row"><span className="settings-row-label">GitHub account</span><span className="settings-account-name">{login || 'Not signed in'}</span></div>
       <span className="setting-label">Data location</span>{databaseLocationLoading ? <div className="setting-value setting-status" role="status"><LoaderCircle size={14} className="spin" /> Loading location…</div> : databaseLocationError ? <div className="settings-error storage-error" role="alert"><AlertCircle size={14} /><span>{databaseLocationError}</span><button className="button secondary compact" type="button" onClick={() => void loadDatabaseLocation()}>Retry</button></div> : databaseLocation ? <a className="setting-value storage-link" href={databaseLocation} title="Show data location in Finder" onClick={handleRevealDatabase}><HardDrive size={14} /><span>{databaseLocation}</span></a> : <div className="setting-value setting-status"><AlertCircle size={14} /> Data location unavailable</div>}{databaseRevealError && <div className="settings-error storage-error" role="alert"><AlertCircle size={14} /><span>{databaseRevealError}</span></div>}
       <details className="settings-connection"><summary>GitHub connection details</summary><div className="github-command-list"><div className="github-command"><code>gh --version</code><span>Check that GitHub CLI is installed.</span></div><div className="github-command"><code>gh auth status</code><span>Check your GitHub sign-in.</span></div><div className="github-command"><code>gh api user --jq .login</code><span>Show the GitHub account in use.</span></div></div></details>
     </section>
@@ -383,9 +404,10 @@ export default function SettingsDrawer({ settings, loaded, metrics, saving, erro
         {appUpdateError && <div className="settings-about-state error" role="alert"><AlertCircle size={14} /><span>{appUpdateError}</span><button className="button secondary compact" type="button" onClick={() => void checkAppUpdate()}>Try again</button></div>}
         {releaseLinkError && <div className="settings-error settings-about-link-error" role="alert"><AlertCircle size={14} /><span>{releaseLinkError}</span></div>}
         <div className="settings-about-links">
-          <button type="button" className="button secondary compact" disabled={appUpdateInstalling || appUpdateLoading} onClick={() => void checkAppUpdate()}>Check for updates</button>
+          <button type="button" className="button secondary compact" disabled={appUpdateInstalling || appUpdateLoading} onClick={() => void checkAppUpdate()}>Check for Updates</button>
           {appInfo.repository_url && <a className="button secondary compact settings-about-link" href={appInfo.repository_url} onClick={(event) => void handleOpenAboutLink(event, appInfo.repository_url)}><Github size={14} /> View on GitHub <ExternalLink size={12} /></a>}
         </div>
+        <UpdateCheckIntervalControl value={settings.update_check_interval} onChange={(value) => onChange((current) => ({ ...current, update_check_interval: value }))} />
         {aboutLinkError && <div className="settings-error settings-about-link-error" role="alert"><AlertCircle size={14} /><span>{aboutLinkError}</span></div>}
         <div className="settings-about-me">
           <h4>About me</h4>
