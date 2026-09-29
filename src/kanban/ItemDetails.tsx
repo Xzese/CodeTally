@@ -107,8 +107,8 @@ export default function ItemDetails({ item, saving, syncBusy, revision, onClose,
     else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus() }
   }}>
     <header className="kanban-detail-header">
-      <div className="kanban-detail-overline">{item.kind === 'pr' ? <GitPullRequest size={15} aria-hidden="true" /> : <CircleDot size={15} aria-hidden="true" />}<span>{item.kind === 'pr' ? 'Pull request' : 'Issue'} · {item.repository} #{item.number}</span></div>
-      <div className="kanban-detail-header-actions"><button className="button secondary compact" type="button" disabled={!githubUrlValid} title={!githubUrlValid ? 'Invalid GitHub work item URL' : undefined} onClick={() => openUrl(item.url)}>Open in GitHub <ExternalLink size={13} aria-hidden="true" /></button><button className="icon-button" type="button" aria-label="Close details" title="Close details" onClick={requestClose}><X size={18} /></button></div>
+      <div className="kanban-detail-overline">{item.kind === 'pr' ? <GitPullRequest size={15} aria-hidden="true" /> : <CircleDot size={15} aria-hidden="true" />}<span>#{item.number} · {item.kind === 'pr' ? <><span className="kanban-detail-kind-full">Pull request</span><span className="kanban-detail-kind-compact">PR</span></> : 'Issue'} · {item.repository}</span></div>
+      <div className="kanban-detail-header-actions"><button className="button secondary compact" type="button" aria-label="Open in GitHub" disabled={!githubUrlValid} title={!githubUrlValid ? 'Invalid GitHub work item URL' : undefined} onClick={() => openUrl(item.url)}><span className="kanban-detail-open-full">Open in GitHub</span><span className="kanban-detail-open-compact">Open</span><ExternalLink size={13} aria-hidden="true" /></button><button className="icon-button" type="button" aria-label="Close details" title="Close details" onClick={requestClose}><X size={18} /></button></div>
     </header>
     <div className="kanban-detail-body">
       <h2 id={titleId} ref={titleRef} tabIndex={-1}>{item.title}</h2>
