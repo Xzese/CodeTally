@@ -1428,6 +1428,11 @@ describe('dashboard UI', () => {
     await waitFor(() => expect(savedSettings()[savedSettings().length - 1]).toEqual(expect.objectContaining({ menu_bar_metric: 'total_lines', menu_bar_metrics: ['total_lines', 'source_lines'] })))
     expect(source).toBeChecked()
     expect(screen.getByText('Your menu bar')).toBeInTheDocument()
+
+    await user.click(source)
+    await waitFor(() => expect(source).not.toBeChecked())
+    expect(preview).not.toHaveTextContent('13.0K source')
+    expect(preview).toHaveTextContent('16.0K lines')
   })
 
   it('restores menu bar metric selections in canonical order and prevents removing the last metric', async () => {
