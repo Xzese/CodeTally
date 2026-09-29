@@ -15,11 +15,11 @@ const METRICS: { key: MenuBarMetric; label: string; field: keyof NormalizedMetri
   { key: 'open_issues', label: 'Open issues', field: 'open_issues', suffix: 'issues' }
 ]
 
-export function menuBarTitle(metric: MenuBarMetric, metrics: NormalizedMetrics): string {
+export function menuBarTitle(metric: MenuBarMetric, metrics: NormalizedMetrics, compact = false): string {
   const option = METRICS.find((item) => item.key === metric) ?? METRICS[0]
   const value = metrics[option.field]
   const number = value >= 1_000_000_000 ? `${(value / 1_000_000_000).toFixed(1)}B` : value >= 1_000_000 ? `${(value / 1_000_000).toFixed(1)}M` : value >= 1_000 ? `${(value / 1_000).toFixed(1)}K` : String(value)
-  return `${number} ${option.suffix}`
+  return compact ? number : `${number} ${option.suffix}`
 }
 
 const THEME_OPTIONS: { key: ThemeMode; label: string; icon: typeof Sun }[] = [{ key: 'light', label: 'Light', icon: Sun }, { key: 'dark', label: 'Dark', icon: Moon }, { key: 'system', label: 'Follow system', icon: Monitor }]
@@ -329,6 +329,7 @@ export default function SettingsDrawer({ login, settings, loaded, metrics, savin
   }
 
   const selectedMetrics = settings.menu_bar_metrics?.length ? settings.menu_bar_metrics : [settings.menu_bar_metric]
+  const compactMetrics = settings.menu_bar_compact_metrics ?? []
   const exploratoryMetric = hoverMetric ?? focusMetric
   const previewMetrics = METRICS.filter((option) => selectedMetrics.includes(option.key) || option.key === exploratoryMetric)
   const toggleMetric = (metric: MenuBarMetric) => {
@@ -343,6 +344,12 @@ export default function SettingsDrawer({ login, settings, loaded, metrics, savin
     return { ...current, menu_bar_metrics: next, menu_bar_metric: next[0] }
     })
   }
+  const toggleCompactMetric = (metric: MenuBarMetric) => onChange((current) => {
+    const compact = new Set(current.menu_bar_compact_metrics ?? [])
+    if (compact.has(metric)) compact.delete(metric)
+    else compact.add(metric)
+    return { ...current, menu_bar_compact_metrics: METRICS.filter((option) => compact.has(option.key)).map((option) => option.key) }
+  })
   return <div className="drawer-backdrop" onClick={onClose}><aside ref={drawerRef} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Settings" className="settings-drawer" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => {
     if (event.key === 'Escape') onClose()
     if (event.key === 'Tab') {
@@ -358,8 +365,8 @@ export default function SettingsDrawer({ login, settings, loaded, metrics, savin
     <section className="settings-section" id="settings-appearance"><SectionHeading title="Appearance & menu bar" help="Choose the metrics you want to see in the macOS menu bar. Hover or focus a metric to preview it. Values come from your saved dashboard data." />
       <div className="settings-theme-options" role="radiogroup" aria-label="Appearance">{THEME_OPTIONS.map((option) => { const Icon = option.icon; return <label key={option.key} className={`settings-theme-option${settings.theme_mode === option.key ? ' selected' : ''}`}><input type="radio" name="appearance" aria-label={option.label} checked={settings.theme_mode === option.key} onChange={() => onChange((current) => ({ ...current, theme_mode: option.key }))} /><Icon size={18} aria-hidden="true" /><span>{option.label}</span></label> })}</div>
       <div className="settings-row settings-menu-visibility"><div className="settings-row-label">Show in menu bar<Help label="Show in menu bar">Show your selected metrics in the macOS menu bar. If you hide them, open CodeTally from Applications or the Dock.</Help></div><input className="mac-switch" role="switch" type="checkbox" aria-label="Show CodeTally in the menu bar" checked={settings.show_menu_bar} onChange={(event) => { const checked = event.target.checked; onChange((current) => ({ ...current, show_menu_bar: checked })) }} /></div>
-      <div className="settings-menu-preview"><div className="settings-menu-preview-strip"><span className="settings-preview-value" aria-label="Menu bar preview">{previewMetrics.map((option) => { const Icon = METRIC_ICONS[option.key]; const title = menuBarTitle(option.key, metrics); const [value, ...label] = title.split(' '); return <span className="settings-preview-metric" key={option.key} aria-label={title} title={title}><Icon size={13} aria-hidden="true" /><span>{value} </span><span className="settings-preview-unit">{label.join(' ')}</span></span> })}</span></div><span className="settings-preview-caption">{exploratoryMetric && !selectedMetrics.includes(exploratoryMetric) ? 'Preview · select to add' : 'Your menu bar'}</span></div>
-      <div className="settings-metric-options" role="group" aria-label="Menu bar metrics">{METRICS.map((option) => { const selected = selectedMetrics.includes(option.key); const Icon = METRIC_ICONS[option.key]; return <label key={option.key} className={`settings-metric-option${selected ? ' selected' : ''}`} onMouseEnter={() => setHoverMetric(option.key)} onMouseLeave={() => setHoverMetric(null)}><input type="checkbox" aria-label={option.label} checked={selected} aria-disabled={selected && selectedMetrics.length === 1} onFocus={() => setFocusMetric(option.key)} onBlur={() => setFocusMetric(null)} onChange={() => toggleMetric(option.key)} /><Icon className="settings-metric-icon" size={18} aria-hidden="true" /><span className="settings-metric-copy"><strong>{option.label}</strong><small>{menuBarTitle(option.key, metrics)}</small></span><span className="settings-metric-indicator" aria-hidden="true">{selected && <Check size={12} />}</span></label> })}</div>
+      <div className="settings-menu-preview"><div className="settings-menu-preview-strip" tabIndex={0} aria-label="Scroll menu bar preview horizontally"><span className="settings-preview-value" aria-label="Menu bar preview">{previewMetrics.map((option) => { const Icon = METRIC_ICONS[option.key]; const fullTitle = menuBarTitle(option.key, metrics); const compact = compactMetrics.includes(option.key); return <span className="settings-preview-metric" key={option.key} aria-label={compact ? `${fullTitle}, compact` : fullTitle} title={fullTitle}><Icon size={13} aria-hidden="true" /><span>{menuBarTitle(option.key, metrics, compact)}</span></span> })}</span></div><span className="settings-preview-caption">{exploratoryMetric && !selectedMetrics.includes(exploratoryMetric) ? 'Preview · select to add' : 'Your menu bar'}</span></div>
+      <div className="settings-metric-options" role="group" aria-label="Menu bar metrics">{METRICS.map((option) => { const selected = selectedMetrics.includes(option.key); const Icon = METRIC_ICONS[option.key]; return <div key={option.key} className="settings-metric-choice" onMouseEnter={() => setHoverMetric(option.key)} onMouseLeave={() => setHoverMetric(null)} onFocusCapture={() => setFocusMetric(option.key)} onBlurCapture={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocusMetric(null) }}><label className="settings-metric-compact-control"><span>Compact</span><input className="mac-switch" role="switch" type="checkbox" aria-label={`Compact ${option.label} in menu bar`} checked={compactMetrics.includes(option.key)} onChange={() => toggleCompactMetric(option.key)} /></label><label className={`settings-metric-option${selected ? ' selected' : ''}`}><input type="checkbox" aria-label={option.label} checked={selected} aria-disabled={selected && selectedMetrics.length === 1} onChange={() => toggleMetric(option.key)} /><Icon className="settings-metric-icon" size={18} aria-hidden="true" /><span className="settings-metric-copy"><strong>{option.label}</strong><small>{menuBarTitle(option.key, metrics)}</small></span><span className="settings-metric-indicator" aria-hidden="true">{selected && <Check size={12} />}</span></label></div> })}</div>
       <p className="settings-metric-hint">Choose the metrics you want to see. Keep at least one selected.</p>
     </section>
     <section className="settings-section"><SectionHeading title="Kanban" help="Combine pull requests and issues from your tracked repositories on one board. Manual columns, priorities, and notes stay on this Mac and do not update GitHub." />

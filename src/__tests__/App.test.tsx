@@ -188,6 +188,7 @@ const defaultAppSettings: AppSettings = {
   run_in_background: true,
   menu_bar_metric: 'total_lines' as const,
   menu_bar_metrics: ['total_lines'] as MenuBarMetric[],
+  menu_bar_compact_metrics: [] as MenuBarMetric[],
   show_menu_bar: true,
   theme_mode: 'system' as ThemeMode,
   include_personal_repositories: true,
@@ -1448,6 +1449,11 @@ describe('dashboard UI', () => {
     await waitFor(() => expect(savedSettings()[savedSettings().length - 1]).toEqual(expect.objectContaining({ menu_bar_metric: 'total_lines', menu_bar_metrics: ['total_lines', 'source_lines', 'test_lines', 'open_issues'] })))
     await user.click(within(metric).getByRole('checkbox', { name: 'Open PRs' }))
     await waitFor(() => expect(savedSettings()[savedSettings().length - 1]).toEqual(expect.objectContaining({ menu_bar_metric: 'total_lines', menu_bar_metrics: ['total_lines', 'source_lines', 'test_lines', 'open_prs', 'open_issues'] })))
+    await user.click(within(metric).getByRole('switch', { name: 'Compact Source lines in menu bar' }))
+    await waitFor(() => expect(savedSettings()[savedSettings().length - 1]).toEqual(expect.objectContaining({ menu_bar_compact_metrics: ['source_lines'] })))
+    const compactPreview = within(screen.getByLabelText('Menu bar preview')).getByLabelText('13.0K source, compact')
+    expect(compactPreview).toHaveTextContent('13.0K')
+    expect(compactPreview).not.toHaveTextContent('source')
 
     await user.click(within(drawer).getByRole('button', { name: 'Close settings' }))
     await user.click(screen.getByRole('button', { name: 'Settings' }))
@@ -1456,6 +1462,7 @@ describe('dashboard UI', () => {
     for (const label of ['Total lines', 'Source lines', 'Test lines', 'Open PRs', 'Open issues']) {
       expect(within(restoredMetric).getByRole('checkbox', { name: label })).toBeChecked()
     }
+    expect(within(restoredMetric).getByRole('switch', { name: 'Compact Source lines in menu bar' })).toBeChecked()
 
     for (const label of ['Source lines', 'Test lines', 'Total lines', 'Open PRs']) {
       const checkbox = within(restoredMetric).getByRole('checkbox', { name: label })

@@ -51,6 +51,17 @@ pub fn menu_titles(metrics: &[MenuBarMetric], totals: &DashboardTotals) -> Vec<S
     metrics.iter().map(|metric| metric_title(*metric, totals)).collect()
 }
 
+pub fn menu_titles_with_compact(metrics: &[MenuBarMetric], compact_metrics: &[MenuBarMetric], totals: &DashboardTotals) -> Vec<String> {
+    metrics.iter().map(|metric| {
+        let title = metric_title(*metric, totals);
+        if compact_metrics.contains(metric) {
+            title.split_once(' ').map_or(title.clone(), |(number, _)| number.to_string())
+        } else {
+            title
+        }
+    }).collect()
+}
+
 /// Transparent monochrome bitmaps are rendered as templates by macOS.
 fn metric_icon(metric: MenuBarMetric) -> tauri::image::Image<'static> {
     let rows: [&str; 16] = match metric {
@@ -223,8 +234,8 @@ pub fn refresh_menu(app: &AppHandle, state: &AppState) {
     let history = if metrics.iter().any(|metric| matches!(metric, MenuBarMetric::TotalLines | MenuBarMetric::SourceLines | MenuBarMetric::TestLines)) {
         db.history(None).unwrap_or_default()
     } else { Vec::new() };
-    let titles = menu_titles(&metrics, &totals);
-    let combined_title = titles.join(" · ");
+    let titles = menu_titles_with_compact(&metrics, &settings.menu_bar_compact_metrics, &totals);
+    let combined_title = menu_titles(&metrics, &totals).join(" · ");
     let tooltip = format!("CodeTally — {combined_title}");
     if app.tray_by_id(TRAY_ID).is_none() {
         let _ = build_metric_tray(app, Some(state), TRAY_ID, metrics[0], &titles[0], &tooltip, Some(&history));

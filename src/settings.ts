@@ -15,6 +15,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   run_in_background: true,
   menu_bar_metric: 'total_lines',
   menu_bar_metrics: ['total_lines'],
+  menu_bar_compact_metrics: [],
   show_menu_bar: true,
   theme_mode: 'system',
   include_personal_repositories: true,
@@ -43,6 +44,7 @@ export function normalizeAppSettings(settings: Partial<AppSettings>): AppSetting
     update_check_interval: updateCheckInterval,
     menu_bar_metrics: menuMetrics,
     menu_bar_metric: menuMetrics[0],
+    menu_bar_compact_metrics: METRIC_ORDER.filter((metric) => settings.menu_bar_compact_metrics?.includes(metric)),
     excluded_repository_ids: settings.excluded_repository_ids ?? []
   }
 }

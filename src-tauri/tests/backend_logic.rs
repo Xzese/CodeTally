@@ -431,6 +431,7 @@ fn cadence_settings_round_trip_through_persisted_app_metadata() {
         run_in_background: false,
         menu_bar_metric: MenuBarMetric::OpenPrs,
         menu_bar_metrics: Vec::new(),
+        menu_bar_compact_metrics: Vec::new(),
         show_menu_bar: true,
         include_forks_in_totals: true,
         include_personal_repositories: false,
@@ -536,6 +537,7 @@ fn legacy_saved_app_settings_keep_cadence_and_receive_new_defaults() {
     assert_eq!(loaded.theme_mode, ThemeMode::System);
     assert_eq!(loaded.menu_bar_metric, MenuBarMetric::OpenPrs);
     assert!(loaded.menu_bar_metrics.is_empty());
+    assert!(loaded.menu_bar_compact_metrics.is_empty());
     assert!(loaded.show_menu_bar);
     assert_eq!(loaded.effective_menu_bar_metrics(), vec![MenuBarMetric::OpenPrs]);
     assert!(!loaded.include_forks_in_totals);
@@ -657,6 +659,11 @@ fn multiple_menu_bar_metrics_round_trip_in_canonical_order_without_duplicates() 
             MenuBarMetric::OpenIssues,
             MenuBarMetric::SourceLines,
         ],
+        menu_bar_compact_metrics: vec![
+            MenuBarMetric::OpenIssues,
+            MenuBarMetric::TotalLines,
+            MenuBarMetric::OpenIssues,
+        ],
         ..AppSettings::default()
     };
     sync::save_app_settings(&database, &settings).expect("save multiple menu bar metrics");
@@ -670,6 +677,7 @@ fn multiple_menu_bar_metrics_round_trip_in_canonical_order_without_duplicates() 
         ]
     );
     assert_eq!(loaded.menu_bar_metric, MenuBarMetric::TotalLines);
+    assert_eq!(loaded.menu_bar_compact_metrics, vec![MenuBarMetric::TotalLines, MenuBarMetric::OpenIssues]);
     assert_eq!(
         loaded.effective_menu_bar_metrics(),
         loaded.menu_bar_metrics.clone()
@@ -725,6 +733,14 @@ fn menu_bar_titles_are_split_so_each_native_item_can_use_an_aligned_icon() {
             &totals,
         ),
         vec!["23 PRs", "12.3K lines"]
+    );
+    assert_eq!(
+        codetally_lib::native::menu_titles_with_compact(
+            &[MenuBarMetric::TotalLines, MenuBarMetric::SourceLines, MenuBarMetric::OpenIssues],
+            &[MenuBarMetric::TotalLines, MenuBarMetric::OpenIssues],
+            &totals,
+        ),
+        vec!["12.3K", "8.8K source", "41"]
     );
 }
 

@@ -250,6 +250,7 @@ export interface AppSettings {
   run_in_background: boolean
   menu_bar_metric: MenuBarMetric
   menu_bar_metrics: MenuBarMetric[]
+  menu_bar_compact_metrics: MenuBarMetric[]
   show_menu_bar: boolean
   personal_refresh_minutes: number
   activity_refresh_minutes: number

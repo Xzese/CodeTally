@@ -263,6 +263,8 @@ pub struct AppSettings {
     pub menu_bar_metric: MenuBarMetric,
     #[serde(default)]
     pub menu_bar_metrics: Vec<MenuBarMetric>,
+    #[serde(default)]
+    pub menu_bar_compact_metrics: Vec<MenuBarMetric>,
     #[serde(default = "default_run_in_background")]
     pub show_menu_bar: bool,
     #[serde(default)]
@@ -289,6 +291,9 @@ impl AppSettings {
     pub fn normalize_menu_bar_metrics(&mut self) {
         self.menu_bar_metrics = self.effective_menu_bar_metrics();
         self.menu_bar_metric = self.menu_bar_metrics[0];
+        self.menu_bar_compact_metrics = [MenuBarMetric::TotalLines, MenuBarMetric::SourceLines,
+            MenuBarMetric::TestLines, MenuBarMetric::OpenPrs, MenuBarMetric::OpenIssues]
+            .into_iter().filter(|metric| self.menu_bar_compact_metrics.contains(metric)).collect();
     }
 }
 
@@ -309,6 +314,7 @@ impl Default for AppSettings {
             run_in_background: true,
             menu_bar_metric: MenuBarMetric::default(),
             menu_bar_metrics: Vec::new(),
+            menu_bar_compact_metrics: Vec::new(),
             show_menu_bar: true,
             include_forks_in_totals: false,
             include_personal_repositories: true,

@@ -7,6 +7,7 @@ import type { ActivityRelationship, AppSettings, DashboardData, DependencyStatus
 import { aggregateHistory, filterIssues, filterPullRequests, isDraft, isMerged, sortRepositories, type FeedState } from './model'
 import { activityRepo, exactDate, formatCompact, formatCount, formatSigned, normalizeDashboard, normalizeLabels, relativeTime, repoActivity, repoBaseline30Available, repoChange, repoChangePercent, repoForks, repoLocAvailable, repoName, repoOpenIssues, repoOpenPrs, repoSource, repoStars, repoTests, repoTotal, repositoryId, repositoryLabel } from './utils'
 import codetallyMark from './assets/codetally-mark.png'
+import codetallyAppIcon from '../src-tauri/icons/icon.png'
 import SettingsDrawer from './SettingsDrawer'
 import KanbanBoard from './kanban/KanbanBoard'
 import UpdateStatus from './UpdateStatus'
@@ -689,7 +690,7 @@ function App() {
   return (
     <div className={lightMode ? 'app-shell light' : 'app-shell'}>
       <header className="topbar">
-        <div className="topbar-navigation"><div className="brand-mark"><img src={codetallyMark} alt="" aria-hidden="true" /><span>CodeTally</span></div></div>
+        <div className="topbar-navigation"><div className="brand-mark"><img src={codetallyAppIcon} alt="" aria-hidden="true" /><span>CodeTally</span></div></div>
         <div className="topbar-status">
           {appSettings.kanban_enabled && !isSetup && <nav aria-label="Main navigation"><button className="button secondary topbar-nav-button" aria-label={screen === 'kanban' ? 'Back to dashboard' : 'Kanban Board'} onClick={screen === 'kanban' ? backToDashboard : () => setScreen('kanban')}><span className="topbar-nav-label-full">{screen === 'kanban' ? 'Back to dashboard' : 'Kanban Board'}</span><span className="topbar-nav-label-compact" aria-hidden="true">{screen === 'kanban' ? 'Dashboard' : 'Kanban'}</span></button></nav>}
           <UpdateStatus updateCheckInterval={settingsLoaded ? appSettings.update_check_interval : null} />
