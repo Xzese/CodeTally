@@ -792,19 +792,8 @@ body.kanban-drag-active, body.kanban-drag-active * { cursor: grabbing !important
 @media (max-width: 395px) {
   .brand-mark span { display: none; }
 }
-@media (max-width: 374px) {
+@media (max-width: 325px) {
   .topbar:has(.topbar-status nav) .brand-mark { display: none; }
-  .topbar-status { gap: 4px; }
-  .topbar-status .topbar-nav-button { padding-inline: 6px; font-size: 11px; }
-  .topbar-settings { width: 26px; height: 26px; }
-  .feed-toggle { width: 26px; height: 26px; }
-  .main-column, .kanban-main { padding: 14px 14px 32px; }
-  .chart-panel { padding: 14px 14px 0; }
-  .settings-drawer { padding-inline: 16px; }
-  .kanban-detail-header, .kanban-detail-footer { padding-inline: 16px; }
-  .kanban-detail-body { padding: 18px 16px 26px; }
-  .setup-wrap { padding: 14px; }
-  .update-actions { flex-wrap: wrap; }
 }
 @media (prefers-reduced-motion: reduce) {
   .content-shell, .activity-sidebar, .activity-backdrop { transition: none !important; }
