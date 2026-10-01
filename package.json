@@ -10,9 +10,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "screenshots": "swift scripts/capture-screenshots.swift",
-    "tauri": "tauri",
-    "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri": "node scripts/tauri-run.mjs",
+    "tauri:dev": "node scripts/tauri-run.mjs dev",
+    "tauri:build": "node scripts/tauri-run.mjs build"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.8.0",
