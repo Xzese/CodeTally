@@ -19,6 +19,8 @@ import sys,json,pathlib
 root=pathlib.Path({root:?})
 args=sys.argv[1:]
 with (root/'calls').open('a') as f: f.write(json.dumps(args)+'\n')
+if args[:2]==['api','user']:
+ print('me'); sys.exit(0)
 if (root/'dataset').exists():
  values=dict(arg.split('=',1) for arg in args if '=' in arg)
  search=values['search']
@@ -51,6 +53,29 @@ impl Drop for Fixture { fn drop(&mut self) { match &self.old_path { Some(path)=>
 fn item(id:&str, repo:&str, number:i64, state:&str) -> Value { json!({"id":id,"repository":{"id":repo},"number":number,"title":"Personal work","state":state,"isDraft":false,"createdAt":"2026-01-01T00:00:00Z","updatedAt":chrono::Utc::now().to_rfc3339(),"closedAt":if state=="OPEN" {None} else {Some("2026-09-01T00:00:00Z")},"mergedAt":if state=="MERGED" {Some("2026-09-01T00:00:00Z")} else {None},"stateReason":"COMPLETED","url":"https://github.com/me/one/issues/1","author":{"login":"me"},"labels":{"nodes":[]},"assignees":{"nodes":[{"login":"me"}]}}) }
 fn page(nodes:Vec<Value>, after:Option<&str>) -> Value { json!({"data":{"search":{"issueCount":nodes.len(),"nodes":nodes,"pageInfo":{"hasNextPage":after.is_some(),"endCursor":after}}}}) }
 fn empty() -> Value { page(vec![],None) }
+
+#[test]
+fn personal_refresh_updates_authoritative_menu_totals_even_without_search_matches() {
+    let _lock=ENV.lock().unwrap(); let f=Fixture::new();
+    let state=codetally_lib::sync::AppState {
+        db_path:f.root.join("db.sqlite"),cache_dir:f.root.join("cache"),
+        progress:std::sync::Arc::new(Mutex::new(Default::default())),
+        job_lock:std::sync::Arc::new(Mutex::new(())),
+    };
+    for (prs,issues) in [(21,17),(0,0)] {
+        f.responses(vec![empty(),empty(),empty(),empty(),json!({"data":{"r0":{"id":"R1","openPRs":{"totalCount":prs},"openIssues":{"totalCount":issues}}}})]);
+        assert!(codetally_lib::sync::sync_personal_work_items(&state).unwrap().ok);
+        let totals=f.db.totals(&f.db.summaries().unwrap()).unwrap();
+        assert_eq!((totals.open_prs,totals.open_issues),(prs,issues));
+        assert!(f.db.pull_requests(None,None,100).unwrap().is_empty());
+    }
+    f.db.set_open_counts(f.repo.id,21,17).unwrap();
+    f.responses(vec![empty(),empty(),empty(),empty(),json!({"data":{"r0":null}})]);
+    let result=codetally_lib::sync::sync_personal_work_items(&state).unwrap();
+    assert!(!result.ok); assert!(result.errors.iter().any(|error|error.contains("Open PR and issue totals")));
+    let totals=f.db.totals(&f.db.summaries().unwrap()).unwrap();
+    assert_eq!((totals.open_prs,totals.open_issues),(21,17));
+}
 
 #[test]
 fn pages_deduplicate_filter_repositories_preserve_states_and_overlap() {

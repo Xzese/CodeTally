@@ -240,6 +240,36 @@ pub struct PersonalSyncReport {
     pub complete: bool,
 }
 
+/// Refresh authoritative totals without walking activity feeds or scanning code.
+/// Personal search results are only a subset of each repository's open work.
+pub(crate) fn sync_open_counts(db: &Database, selected: &[Repository]) -> AppResult<()> {
+    for batch in selected.chunks(50) {
+        let mut definitions = Vec::new();
+        let mut selections = Vec::new();
+        let mut variables = serde_json::Map::new();
+        for (index, repo) in batch.iter().enumerate() {
+            definitions.push(format!("$repo{index}:ID!"));
+            selections.push(format!("r{index}:node(id:$repo{index}){{... on Repository{{id openPRs:pullRequests(states:OPEN){{totalCount}} openIssues:issues(states:OPEN){{totalCount}}}}}}"));
+            variables.insert(format!("repo{index}"), json!(repo.github_id));
+        }
+        let query = format!("query({}){{rateLimit{{cost remaining resetAt}} {}}}", definitions.join(","), selections.join(" "));
+        let response = graphql(db, &query, Value::Object(variables))?;
+        for (index, repo) in batch.iter().enumerate() {
+            let node = &response["data"][format!("r{index}")];
+            if node["id"].as_str() != Some(repo.github_id.as_str()) {
+                return Err(AppError::InvalidArgument(format!("GitHub response missing open totals for {}", repo.name_with_owner)));
+            }
+            let prs = node["openPRs"]["totalCount"].as_i64().filter(|count| *count >= 0);
+            let issues = node["openIssues"]["totalCount"].as_i64().filter(|count| *count >= 0);
+            let (Some(prs), Some(issues)) = (prs, issues) else {
+                return Err(AppError::InvalidArgument(format!("GitHub response missing open totals for {}", repo.name_with_owner)));
+            };
+            db.set_open_counts(repo.id, prs, issues)?;
+        }
+    }
+    Ok(())
+}
+
 #[derive(Serialize, Deserialize)]
 struct PersonalSearchWindow {
     // Inclusive, whole-second bounds match GitHub's documented search precision.

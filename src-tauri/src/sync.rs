@@ -526,8 +526,8 @@ pub fn sync_work_items(state: &AppState) -> AppResult<SyncResult> {
     Ok(result)
 }
 
-/// Fast account-scoped activity update for the personal feed. Repository
-/// discovery and line analysis stay on the independent Repo Refresh schedule.
+/// Frequent activity update for the personal feed and menu bar PR/issue totals.
+/// Repository discovery and line analysis use the Repo Refresh schedule.
 pub fn sync_personal_work_items(state: &AppState) -> AppResult<SyncResult> {
     let db = state.database();
     let mut result = SyncResult { ok: true, message: "Personal PRs and issues refreshed".into(), ..SyncResult::default() };
@@ -582,6 +582,12 @@ pub fn sync_personal_work_items(state: &AppState) -> AppResult<SyncResult> {
             result.ok = false;
             result.errors.push(error.to_string());
         }
+    }
+    // The menu bar uses repository totals, which otherwise remain stale until
+    // the much slower Repo Refresh even while personal search updates the list.
+    if let Err(error) = github_sync::sync_open_counts(&db, &repos) {
+        result.ok = false;
+        result.errors.push(format!("Open PR and issue totals: {error}"));
     }
     if !result.ok { result.message = "Personal PR and issue refresh has partial results".into(); }
     finish_work_item_progress(state, result.errors.first().cloned());
