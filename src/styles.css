@@ -194,7 +194,7 @@ td:first-child { padding-left: 18px; }
 .light .repo-cell strong { color: #20324c; }
 .repo-cell small { color: var(--muted); font-size: 10px; overflow: hidden; display: flex; align-items: center; gap: 6px; width: 100%; }
 .repo-meta-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.repo-cell .repo-visibility { margin-left: 0; }
+.repo-cell .repo-visibility { margin-left: auto; flex: 0 0 auto; }
 .repo-visibility { display: inline-flex; align-items: center; flex: 0 0 auto; border: 1px solid currentColor; border-radius: 4px; padding: 3px 6px; margin-left: 3px; font-size: 10px; font-weight: 500; font-style: normal; line-height: 1.2; letter-spacing: .02em; vertical-align: 1px; background: color-mix(in srgb, currentColor 8%, transparent); }
 .repo-visibility.public { color: var(--green); }
 .repo-visibility.private { color: var(--purple); }
