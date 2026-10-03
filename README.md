@@ -182,6 +182,19 @@ Dashboard polls reuse cached summaries and history while SQLite is unchanged. A 
 
 Activity pages publish their rows, server counts, and pagination checkpoint in one transaction. Unchanged upserts avoid row updates. History is scoped and ordered in SQLite, then aggregated in one pass. Managed Git caches fetch the default branch without tags; an empty cache bootstraps available branches before subsequent fetches become scoped.
 
+GitHub activity refreshes batch the pending open/closed PR and issue feeds into one request per round, with independent cursors and a five-page limit per feed. Completed feeds leave subsequent requests. Successful pages remain durable even if a later request fails or quota runs low. Closed issues use GitHub's [updated-since filter](https://docs.github.com/en/graphql/reference/issues#issuefilters), including the same overlap window used locally; filtered cursors retain their exact bound, while legacy cursors finish with their original unfiltered query.
+
+Discovery requests the authenticated login alongside its existing quota check and lists organizations in pages of 100. Authentication checks remain in place; refreshes skip unrelated tool-version checks.
+
+Synthetic request-count checks through the real `gh` subprocess boundary show:
+
+| Activity workload per repository | Earlier requests | Batched requests |
+| --- | --- | --- |
+| Four single-page feeds | 2 | 1 |
+| Four two-page feeds | 6 | 2 |
+
+These counts exclude discovery and authentication and do not claim the same reduction in GraphQL primary-quota points. Run `cargo test --manifest-path src-tauri/Cargo.toml --test sync_scalability` to verify data correctness, independent pagination, same-timestamp CI/state updates, checkpoint recovery, and the request bounds.
+
 The frontend reuses embedded dashboard history, loads chart code separately, and preserves unchanged records so progress updates can skip inventory rendering. Date and number formatters are shared. The displayed logo uses lossless WebP; its original PNG remains available as the source asset.
 
 Representative local debug-build measurements (synthetic fixtures, not end-to-end latency guarantees):

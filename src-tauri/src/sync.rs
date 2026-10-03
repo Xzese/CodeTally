@@ -104,9 +104,11 @@ impl AppState {
 pub fn discover(state: &AppState) -> AppResult<Vec<Repository>> {
     let db = state.database();
     github_sync::ensure_available(&db)?;
-    github_sync::graphql(&db, "query{rateLimit{remaining resetAt}}", serde_json::json!({}))?;
+    let identity = github_sync::graphql(&db, "query{rateLimit{remaining resetAt} viewer{login}}", serde_json::json!({}))?;
     github_sync::ensure_available(&db)?;
-    let user = github_sync::guarded(&db, github::current_user)?;
+    let login = identity.pointer("/data/viewer/login").and_then(serde_json::Value::as_str).map(str::trim).filter(|login| !login.is_empty())
+        .ok_or_else(|| AppError::InvalidArgument("GitHub did not return the authenticated login".into()))?;
+    let user = crate::models::GithubUser { login: login.to_string() };
     db.set_metadata("github_login", &user.login)?;
     db.set_metadata("org_discovery_errors", "")?;
     let mut discovered = github_sync::guarded(&db, || github::list_repositories(&user.login))?;
@@ -139,7 +141,7 @@ pub fn sync_all(state: &AppState) -> AppResult<SyncResult> {
     let mut result = SyncResult { ok: true, message: "Refresh complete".into(), ..SyncResult::default() };
     state.set_progress(SyncProgress { running: true, phase: "discovering".into(), message: "Discovering repositories".into(), ..SyncProgress::default() });
 
-    if !github::dependency_status().gh_authenticated {
+    if github::auth_status().is_err() {
         result.ok = false;
         result.message = "GitHub CLI is not authenticated".into();
         result.errors.push("Run gh auth login, then refresh CodeTally.".into());
@@ -236,7 +238,7 @@ pub fn sync_activity(state: &AppState) -> AppResult<SyncResult> {
     let mut result = SyncResult { ok: true, message: "Activity refresh complete".into(), ..SyncResult::default() };
     state.set_progress(SyncProgress { running: true, phase: "discovering_activity".into(), message: "Discovering repository activity".into(), ..SyncProgress::default() });
 
-    if !github::dependency_status().gh_authenticated {
+    if github::auth_status().is_err() {
         result.ok = false;
         result.message = "GitHub CLI is not authenticated".into();
         result.errors.push("Run gh auth login, then refresh CodeTally.".into());

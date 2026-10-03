@@ -511,10 +511,11 @@ fn discovery_includes_org_repositories_deduplicates_ids_and_records_partial_org_
     std::fs::write(
         &gh,
         r##"#!/bin/sh
+printf '%s\n' "$*" >> "$(dirname "$0")/../gh.log"
 repo_json='[{"id":"owned-id","name":"portfolio","nameWithOwner":"me/portfolio","url":"https://github.com/me/portfolio","sshUrl":"git@github.com:me/portfolio.git","isPrivate":false,"isFork":false,"isArchived":false,"defaultBranchRef":{"name":"main"},"primaryLanguage":{"name":"Rust"},"createdAt":"2024-01-01T00:00:00Z","updatedAt":"2026-09-01T00:00:00Z","pushedAt":"2026-09-02T00:00:00Z"}]'
 org_json='[{"id":"org-id","name":"shared","nameWithOwner":"org-one/shared","url":"https://github.com/org-one/shared","sshUrl":"git@github.com:org-one/shared.git","isPrivate":true,"isFork":false,"isArchived":false,"defaultBranchRef":{"name":"main"},"primaryLanguage":{"name":"TypeScript"},"createdAt":"2024-01-01T00:00:00Z","updatedAt":"2026-09-01T00:00:00Z","pushedAt":"2026-09-02T00:00:00Z"},{"id":"owned-id","name":"duplicate","nameWithOwner":"org-one/duplicate","url":"https://github.com/org-one/duplicate","sshUrl":"git@github.com:org-one/duplicate.git","isPrivate":false,"isFork":false,"isArchived":false,"defaultBranchRef":{"name":"main"},"primaryLanguage":{"name":"Rust"},"createdAt":"2024-01-01T00:00:00Z","updatedAt":"2026-09-01T00:00:00Z","pushedAt":"2026-09-02T00:00:00Z"}]'
 if [ "$1" = "api" ] && [ "$2" = "user" ]; then printf 'me\n'; exit 0; fi
-if [ "$1" = "api" ] && [ "$2" = "graphql" ]; then printf '{"data":{"rateLimit":{"remaining":5000,"resetAt":"2099-01-01T00:00:00Z"}}}\n'; exit 0; fi
+if [ "$1" = "api" ] && [ "$2" = "graphql" ]; then printf '{"data":{"viewer":{"login":"me"},"rateLimit":{"remaining":5000,"resetAt":"2099-01-01T00:00:00Z"}}}\n'; exit 0; fi
 if [ "$1" = "api" ] && [ "$2" = "--paginate" ]; then printf 'org-one\norg-two\n'; exit 0; fi
 if [ "$1" = "repo" ] && [ "$3" = "me" ]; then printf '%s\n' "$repo_json"; exit 0; fi
 if [ "$1" = "repo" ] && [ "$3" = "org-one" ]; then printf '%s\n' "$org_json"; exit 0; fi
@@ -547,6 +548,10 @@ exit 1
     std::env::set_var("PATH", original_path);
 
     let repositories = discovered.expect("discovery should retain usable owners");
+    let calls = std::fs::read_to_string(root.join("gh.log")).expect("discovery calls");
+    assert!(!calls.lines().any(|call| call.starts_with("api user")), "viewer identity should share the quota request");
+    assert!(calls.contains("user/orgs?per_page=100"), "organization discovery should use full REST pages");
+    assert_eq!(database.metadata("github_login").unwrap().as_deref(), Some("me"));
     let errors = state.database().metadata("org_discovery_errors").expect("org error metadata").unwrap_or_default();
     let names = repositories.iter().map(|repo| repo.name_with_owner.as_str()).collect::<Vec<_>>();
     assert_eq!(repositories.len(), 2);
