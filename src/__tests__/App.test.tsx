@@ -190,6 +190,7 @@ const defaultAppSettings: AppSettings = {
   loc_chart_range: 'ALL' as const,
   menu_bar_metrics: ['total_lines'] as MenuBarMetric[],
   menu_bar_compact_metrics: [] as MenuBarMetric[],
+  menu_bar_combined: false,
   show_menu_bar: true,
   theme_mode: 'system' as ThemeMode,
   include_personal_repositories: true,
@@ -452,11 +453,21 @@ describe('dashboard UI', () => {
     })
     const user = await renderDashboard()
     const navigation = screen.getByRole('navigation', { name: 'Main navigation' })
+    expect(within(navigation).getAllByRole('button')).toHaveLength(2)
+    expect(within(navigation).getByRole('button', { name: 'Overview' })).toHaveAttribute('aria-current', 'page')
+    screen.getByRole('main').scrollTop = 160
     await user.click(within(navigation).getByRole('button', { name: /Kanban Board/ }))
     await screen.findByRole('heading', { name: 'Kanban' })
+    expect(within(navigation).getByRole('button', { name: /Kanban Board/ })).toHaveAttribute('aria-current', 'page')
     expect(screen.getAllByRole('button', { name: 'Back to dashboard' })).toHaveLength(1)
     expect(within(navigation).getByRole('button', { name: 'Back to dashboard' })).toBeInTheDocument()
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('get_kanban_page', expect.objectContaining({ kind: 'prs' })))
+    screen.getByRole('main').scrollTop = 90
+    await user.click(within(navigation).getByRole('button', { name: 'Back to dashboard' }))
+    expect(await screen.findByRole('heading', { name: 'Code at a glance' })).toBeInTheDocument()
+    expect(screen.getByRole('main').scrollTop).toBe(0)
+    await user.click(within(navigation).getByRole('button', { name: /Kanban Board/ }))
+    await screen.findByRole('heading', { name: 'Kanban' })
     await user.click(screen.getByTitle('Settings'))
     await user.click(screen.getByRole('switch', { name: 'Enable Kanban board' }))
     await user.click(screen.getByRole('button', { name: 'Close settings' }))
@@ -476,10 +487,13 @@ describe('dashboard UI', () => {
 
     expect(screen.queryByRole('button', { name: /Kanban Board/ })).not.toBeInTheDocument()
     expect(invokeMock.mock.calls.some(([command]) => String(command).includes('kanban'))).toBe(false)
-    expect(screen.getByText('CodeTally')).toBeInTheDocument()
+    expect(screen.getByRole('img', { name: 'CodeTally' })).toBeInTheDocument()
     expect(screen.getByText('16,000')).toBeInTheDocument()
     expect(screen.getAllByText('Your repositories')).toHaveLength(2)
-    expect(screen.getByRole('heading', { name: 'Total Lines' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Total Lines' })).toBeInTheDocument()
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'get_loc_history')).toHaveLength(0)
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'get_github_user')).toHaveLength(0)
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'check_dependencies')).toHaveLength(0)
     expect(screen.getByRole('heading', { name: 'Repositories' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Recent activity' })).toBeInTheDocument()
     await waitFor(() => {
@@ -633,8 +647,26 @@ describe('dashboard UI', () => {
   })
 
   it('switches between PR and issue feeds and applies state and repository filters', async () => {
+    const closedPr: PullRequest = { ...prs[1], number: 9, title: 'Close unused beta experiment', state: 'CLOSED', merged_at: null, updated_at: '2026-09-08T16:00:00Z' }
+    const nativeMergedPr: PullRequest = { ...prs[1], state: 'MERGED' }
+    let pendingPrFeed: Promise<PullRequest[]> | undefined
+    configureBackend({ activityFeed: (kind) => kind === 'issues' ? issues : pendingPrFeed ?? [prs[0], nativeMergedPr, closedPr] })
     const user = await renderDashboard()
     const sidebar = () => screen.getByRole('heading', { name: 'Recent activity' }).closest('aside') as HTMLElement
+
+    const prFilter = within(sidebar()).getByRole('button', { name: 'Pull requests' })
+    const resizeActivityPane = (width: number, label: string) => {
+      Object.defineProperty(sidebar(), 'clientWidth', { configurable: true, value: width })
+      fireEvent(window, new Event('resize'))
+      expect(prFilter.textContent).toBe(label)
+    }
+    resizeActivityPane(328, 'PRs')
+    resizeActivityPane(500, 'Pull requests')
+    resizeActivityPane(378, 'Pull requests')
+    resizeActivityPane(360, 'PRs')
+    resizeActivityPane(378, 'PRs')
+    resizeActivityPane(390, 'Pull requests')
+    resizeActivityPane(328, 'PRs')
 
     await user.click(within(sidebar()).getByRole('button', { name: 'Issues' }))
     await user.click(within(sidebar()).getByRole('button', { name: 'All' }))
@@ -658,9 +690,44 @@ describe('dashboard UI', () => {
     expect(screen.getByText('Fix alpha flow')).toBeInTheDocument()
     expect(screen.getByText('Refactor beta tests')).toBeInTheDocument()
 
-    await user.click(within(sidebar()).getByRole('button', { name: 'Merged' }))
+    await user.click(within(sidebar()).getByRole('button', { name: 'Closed' }))
     expect(screen.getByText('Refactor beta tests')).toBeInTheDocument()
+    expect(screen.getByText('Close unused beta experiment')).toBeInTheDocument()
     expect(screen.queryByText('Fix alpha flow')).not.toBeInTheDocument()
+
+    await user.click(within(sidebar()).getByRole('button', { name: 'Pull requests and issues' }))
+    expect(await screen.findByText('Fix alpha flow')).toBeInTheDocument()
+    expect(await screen.findByText('Alpha issue')).toBeInTheDocument()
+    await user.click(within(sidebar()).getByRole('button', { name: 'All' }))
+    await waitFor(() => expect(within(sidebar()).getAllByText(/Alpha issue|Beta issue|Fix alpha flow|Refactor beta tests|Close unused beta experiment/)).toHaveLength(5))
+    const titles = Array.from(sidebar().querySelectorAll('.feed-title')).map((element) => element.textContent)
+    expect(titles).toEqual(['Fix alpha flow', 'Close unused beta experiment', 'Alpha issue', 'Refactor beta tests', 'Beta issue'])
+    await user.click(within(sidebar()).getByRole('button', { name: 'Closed' }))
+    expect(await screen.findByText('Refactor beta tests')).toBeInTheDocument()
+    expect(screen.getByText('Close unused beta experiment')).toBeInTheDocument()
+    expect(screen.getByText('Beta issue')).toBeInTheDocument()
+    expect(screen.queryByText('Fix alpha flow')).not.toBeInTheDocument()
+    expect(screen.queryByText('Alpha issue')).not.toBeInTheDocument()
+    await user.click(within(sidebar()).getByRole('button', { name: 'Open' }))
+    await waitFor(() => expect(sidebar().querySelector('.feed-list')).toHaveAttribute('aria-busy', 'false'))
+    const cachedRow = within(sidebar()).getByRole('button', { name: /Fix alpha flow/ })
+    const refresh = deferred<PullRequest[]>()
+    pendingPrFeed = refresh.promise
+    await user.click(within(sidebar()).getByRole('button', { name: 'Pull requests' }))
+    expect(sidebar().querySelector('.feed-list')).toHaveAttribute('aria-busy', 'true')
+    expect(within(sidebar()).getByRole('button', { name: /Fix alpha flow/ })).toBe(cachedRow)
+    expect(within(sidebar()).queryByText('Loading activity…')).not.toBeInTheDocument()
+    refresh.resolve([prs[0], nativeMergedPr, closedPr])
+    await waitFor(() => expect(sidebar().querySelector('.feed-list')).toHaveAttribute('aria-busy', 'false'))
+    expect(within(sidebar()).getByRole('button', { name: /Fix alpha flow/ })).toBe(cachedRow)
+
+    const newScope = deferred<PullRequest[]>()
+    pendingPrFeed = newScope.promise
+    await user.selectOptions(within(sidebar()).getByRole('combobox', { name: 'My involvement' }), 'assignee')
+    expect(within(sidebar()).queryByText('Fix alpha flow')).not.toBeInTheDocument()
+    expect(within(sidebar()).getByText('Loading activity…')).toBeInTheDocument()
+    newScope.resolve([{ ...prs[0], title: 'Assigned alpha task' }])
+    expect(await within(sidebar()).findByText('Assigned alpha task')).toBeInTheDocument()
   })
 
   it('groups activity scopes and sends owner repository ids while retaining the scope across tabs', async () => {
@@ -882,11 +949,11 @@ describe('dashboard UI', () => {
     await user.click(screen.getByRole('button', { name: '3M' }))
     expect(screen.getByRole('button', { name: '3M' })).toHaveClass('active')
     expect(screen.getByRole('button', { name: 'ALL' })).not.toHaveClass('active')
-    await waitFor(() => expect(savedSettings().at(-1)).toEqual(expect.objectContaining({ loc_chart_range: '3M' })))
+    await waitFor(() => expect(savedSettings()[savedSettings().length - 1]).toEqual(expect.objectContaining({ loc_chart_range: '3M' })))
 
     await user.click(screen.getByRole('button', { name: '30D' }))
     expect(screen.getByRole('button', { name: '30D' })).toHaveClass('active')
-    await waitFor(() => expect(savedSettings().at(-1)).toEqual(expect.objectContaining({ loc_chart_range: '30D' })))
+    await waitFor(() => expect(savedSettings()[savedSettings().length - 1]).toEqual(expect.objectContaining({ loc_chart_range: '30D' })))
   })
 
   it('uses Lines labels and sorts repositories by source and test lines', async () => {
@@ -1070,7 +1137,8 @@ describe('dashboard UI', () => {
       expect(within(titlebar).getByText('Activities refreshed')).toBeInTheDocument()
       expect(within(titlebar).queryByText('Line counts')).not.toBeInTheDocument()
       expect(within(titlebar).queryByText('Everything')).not.toBeInTheDocument()
-      expect(within(titlebar).getAllByText('Not recorded')).toHaveLength(2)
+      expect(within(titlebar).getAllByText('—')).toHaveLength(2)
+      expect(within(titlebar).getByLabelText('Repositories refreshed Not recorded')).toBeInTheDocument()
       expect(within(titlebar).getByLabelText(/Repositories refreshed/)).toHaveAttribute('title', 'No successful Repo Refresh or Force Refresh has completed. Partial or failed attempts do not set this time.')
       expect(screen.getByText('Personal activity · As of Not recorded')).toBeInTheDocument()
       await user.click(screen.getByRole('button', { name: 'Settings' }))
@@ -1085,13 +1153,15 @@ describe('dashboard UI', () => {
   })
 
   it('shows only the last successful broad refresh date when idle', async () => {
-    configureBackend({ cachedDashboard: { ...dashboard, last_full_refresh_at: '2026-09-27T10:30:00Z' }, progress: { running: false, phase: 'complete', current: 1, total: 1, repository_name: 'sam/old-repository', message: 'Ready' } })
+    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+    configureBackend({ cachedDashboard: { ...dashboard, last_full_refresh_at: yesterday }, progress: { running: false, phase: 'complete', current: 1, total: 1, repository_name: 'sam/old-repository', message: 'Ready' } })
     await renderDashboard()
+    expect(within(screen.getByRole('banner')).getByLabelText('Repositories refreshed Yesterday')).toHaveTextContent('1d')
     fireEvent.focus(screen.getByLabelText('Refresh times'))
     const details = await screen.findByRole('dialog', { name: 'Last refresh' })
     expect(within(details).getByText('Last refresh')).toBeInTheDocument()
     expect(within(details).getByText('Activities refreshed').parentElement?.querySelector('time')).not.toHaveAttribute('dateTime')
-    expect(within(details).getByText('Repositories refreshed').parentElement?.querySelector('time')).toHaveAttribute('dateTime', '2026-09-27T10:30:00Z')
+    expect(within(details).getByText('Repositories refreshed').parentElement?.querySelector('time')).toHaveAttribute('dateTime', yesterday)
     expect(within(details).queryByText('Ready')).not.toBeInTheDocument()
     expect(within(details).queryByText('sam/old-repository')).not.toBeInTheDocument()
   })
@@ -1243,7 +1313,7 @@ describe('dashboard UI', () => {
     const personalRefresh = screen.getByRole('radiogroup', { name: 'PR & Issue Refresh' })
     expect(within(personalRefresh).getByRole('radio', { name: '5 minutes' })).toBeChecked()
     await user.click(within(personalRefresh).getByRole('radio', { name: '15 minutes' }))
-    await waitFor(() => expect(savedSettings().at(-1)).toEqual(expect.objectContaining({ personal_refresh_minutes: 15, activity_refresh_minutes: 1440 })))
+    await waitFor(() => expect(savedSettings()[savedSettings().length - 1]).toEqual(expect.objectContaining({ personal_refresh_minutes: 15, activity_refresh_minutes: 1440 })))
     const updateChecks = within(await screen.findByRole('region', { name: 'About CodeTally' })).getByRole('radiogroup', { name: 'Check for Updates' })
     const codeChangeRefresh = screen.getByRole('switch', { name: /Refresh Lines of Code when code changes/i })
     await waitFor(() => {
@@ -1405,6 +1475,54 @@ describe('dashboard UI', () => {
     retryWrite.resolve(writes[1].settings)
     await waitFor(() => expect(screen.queryByText('Settings write failed')).not.toBeInTheDocument())
     expect(screen.getByRole('heading', { name: 'Settings' })).toBeInTheDocument()
+  })
+
+  it('saves a combined summary with every backend total and restores the separate menu choices', async () => {
+    configureBackend({ settings: { menu_bar_metrics: ['open_prs', 'open_issues'], loc_chart_range: 'ALL' }, cachedDashboard: { ...dashboard, last_full_refresh_at: '2026-09-27T10:30:00Z', last_personal_refresh_at: '2026-09-28T11:30:00Z', totals: { repositories: 2, total_loc: 16000, source_loc: 13000, test_loc: 3000, loc_change_30d: -900, open_prs: 2, open_issues: 4 } } })
+    const user = userEvent.setup()
+    await renderDashboard()
+    await user.click(screen.getByRole('button', { name: 'Settings' }))
+    await user.click(screen.getByRole('switch', { name: 'Combined menu bar item' }))
+    await waitFor(() => expect(savedSettings()[savedSettings().length - 1]).toEqual(expect.objectContaining({ menu_bar_combined: true, menu_bar_metrics: ['open_prs', 'open_issues'] })))
+    const preview = screen.getByLabelText('Combined menu bar preview')
+    for (const row of ['16,000 total lines', '2 repositories', '13,000 source lines', '3,000 test lines', '-900 lines · 30-day change', '2 open PRs', '4 open issues']) expect(within(preview).getByText(row)).toBeInTheDocument()
+    expect(within(preview).getByText(/^Repositories refreshed /)).toBeInTheDocument()
+    expect(within(preview).getByText(/^Tickets refreshed /)).toBeInTheDocument()
+    expect(within(preview).getByText('Total lines · all time')).toBeInTheDocument()
+    expect(within(preview).getByText('Latest: 16,000 lines · 2026-08-01')).toBeInTheDocument()
+    expect(within(preview).getByText('Change since 2024-01-01: +4,500 lines')).toBeInTheDocument()
+    expect(within(preview).getByText('2 saved sample days')).toBeInTheDocument()
+    expect(within(preview).getByText('Settings…')).toBeInTheDocument()
+    expect(within(preview).getByText('Quit CodeTally')).toBeInTheDocument()
+    expect(screen.queryByRole('group', { name: 'Menu bar metrics' })).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Close settings' }))
+    await user.click(screen.getByRole('button', { name: 'Settings' }))
+    expect(screen.getByRole('switch', { name: 'Combined menu bar item' })).toBeChecked()
+    await user.click(screen.getByRole('switch', { name: 'Combined menu bar item' }))
+    const choices = screen.getByRole('group', { name: 'Menu bar metrics' })
+    expect(within(choices).getByRole('checkbox', { name: 'Open PRs' })).toBeChecked()
+    expect(within(choices).getByRole('checkbox', { name: 'Open issues' })).toBeChecked()
+    await waitFor(() => expect(savedSettings()[savedSettings().length - 1]).toEqual(expect.objectContaining({ menu_bar_combined: false })))
+  })
+
+  it('keeps dashboard sections within Overview and returns from repository details', async () => {
+    const user = userEvent.setup()
+    await renderDashboard()
+    const navigation = screen.getByRole('navigation', { name: 'Main navigation' })
+    expect(within(navigation).getAllByRole('button')).toHaveLength(1)
+    expect(within(screen.getByRole('complementary', { name: 'Application controls' })).getByRole('button', { name: 'Updates' })).toBeEnabled()
+    const topbar = screen.getByRole('banner')
+    expect(within(topbar).queryByRole('button', { name: 'Updates' })).not.toBeInTheDocument()
+    expect(within(topbar).getByLabelText('Refresh times')).toBeInTheDocument()
+    expect(within(topbar).getByRole('button', { name: 'Hide activity sidebar' })).toBeInTheDocument()
+    const sidebar = screen.getByRole('heading', { name: 'Recent activity' }).closest('aside') as HTMLElement
+    await user.click(within(sidebar).getByRole('button', { name: 'Issues' }))
+    await screen.findByRole('button', { name: /sam\/alpha #4/ })
+    await user.click(screen.getByRole('row', { name: /alpha/ }))
+    expect(await screen.findByRole('heading', { name: 'alpha' })).toBeInTheDocument()
+    expect(within(navigation).getByRole('button', { name: 'Overview' })).toHaveAttribute('aria-current', 'page')
+    await user.click(within(navigation).getByRole('button', { name: 'Overview' }))
+    expect(await screen.findByRole('heading', { name: 'Code at a glance' })).toBeInTheDocument()
   })
 
   it('previews menu bar metrics on hover and focus without saving until selected', async () => {
@@ -1860,6 +1978,18 @@ describe('dashboard UI', () => {
       issues: [],
       last_sync_at: null
     }
+    const dashboardAfterImport = structuredClone(dashboard)
+    dashboardAfterImport.repositories = [
+      { ...repoAlpha, total_loc: 14_000, source_loc: 11_000, test_loc: 3_000 },
+      structuredClone(repoBeta)
+    ]
+    dashboardAfterImport.metrics = { ...dashboard.metrics, total_loc: 20_000, source_loc: 16_000, test_loc: 4_000 }
+    const dashboardInDetail = structuredClone(dashboardAfterImport)
+    dashboardInDetail.repositories = [
+      { ...repoAlpha, total_loc: 15_000, source_loc: 12_000, test_loc: 3_000 },
+      structuredClone(repoBeta)
+    ]
+    dashboardInDetail.metrics = { ...dashboard.metrics, total_loc: 21_000, source_loc: 17_000, test_loc: 4_000 }
     const inProgress: SyncProgress = {
       running: true,
       phase: 'backfilling',
@@ -1872,7 +2002,7 @@ describe('dashboard UI', () => {
       repository_name: 'sam/alpha',
       message: 'Analysing alpha snapshots'
     }
-    configureBackend({ dashboardResponses: [emptyDashboard, dashboard, dashboard], syncPromise: sync.promise, progress: inProgress })
+    configureBackend({ dashboardResponses: [emptyDashboard, dashboardAfterImport, dashboardInDetail, structuredClone(dashboardInDetail)], syncPromise: sync.promise, progress: inProgress })
     const user = userEvent.setup()
     render(<App />)
 
@@ -1880,31 +2010,33 @@ describe('dashboard UI', () => {
       await user.click(await screen.findByRole('button', { name: 'Add repositories' }))
       expect(await screen.findByRole('heading', { name: 'Code at a glance' })).toBeInTheDocument()
       expect(screen.getByRole('heading', { name: 'Total Lines' })).toBeInTheDocument()
+      expect(await screen.findByText('20,000')).toBeInTheDocument()
+      const alphaRow = screen.getByRole('row', { name: /alpha/ })
+      expect(within(alphaRow).getByText('14.0k')).toBeInTheDocument()
+      expect(screen.getByRole('status', { name: 'Importing' })).toBeInTheDocument()
       expect(screen.queryByText('No LOC history for this range')).not.toBeInTheDocument()
       fireEvent.focus(screen.getByLabelText('Refresh times'))
       expect(screen.getByText(/Repositories 1 \/ 2/)).toBeInTheDocument()
 
+      expect(invokeMock.mock.calls.filter(([command]) => command === 'sync_github_data')).toHaveLength(1)
       const dashboardCalls = invokeMock.mock.calls.filter(([command]) => command === 'get_dashboard')
       const historyCalls = invokeMock.mock.calls.filter(([command]) => command === 'get_loc_history')
       expect(dashboardCalls.length).toBeGreaterThanOrEqual(2)
-      expect(historyCalls.length).toBeGreaterThanOrEqual(2)
+      expect(historyCalls).toHaveLength(0)
+      expect(invokeMock.mock.calls.filter(([command]) => command === 'discover_repositories')).toHaveLength(0)
 
       const progressPanel = screen.getByText(/Repositories 1 \/ 2/).closest('.sync-progress-panel')
       expect(progressPanel).not.toBeNull()
-      const panelStyle = getComputedStyle(progressPanel as HTMLElement)
-      expect(panelStyle.display).toBe('grid')
-      expect(Number.parseFloat(panelStyle.minHeight)).toBeGreaterThan(0)
-      const status = progressPanel?.querySelector('.sync-progress-heading')
-      const bars = progressPanel?.querySelector('.sync-progress-bars')
-      expect(status).not.toBeNull()
-      expect(bars).not.toBeNull()
-      expect(progressPanel?.firstElementChild).toBe(status)
-      expect(progressPanel?.lastElementChild).toBe(bars)
-      const progressRows = bars?.querySelectorAll('.sync-progress-row') ?? []
-      expect(progressRows.length).toBe(2)
-      expect(within(bars as HTMLElement).getByText('Repository progress')).toBeInTheDocument()
-      expect(within(bars as HTMLElement).getByText('Current line scan')).toBeInTheDocument()
-      expect(within(bars as HTMLElement).getAllByRole('progressbar')).toHaveLength(2)
+      expect(within(progressPanel as HTMLElement).getByRole('progressbar', { name: 'Repository progress' })).toHaveAttribute('aria-valuenow', '1')
+      expect(within(progressPanel as HTMLElement).getByRole('progressbar', { name: 'Current line scan progress' })).toHaveAttribute('aria-valuenow', '3')
+
+      await user.click(alphaRow)
+      expect(await screen.findByRole('heading', { name: 'alpha' })).toBeInTheDocument()
+      await waitFor(() => {
+        expect(invokeMock.mock.calls.filter(([command]) => command === 'get_dashboard').length).toBeGreaterThanOrEqual(3)
+        expect(within(screen.getByRole('main')).getByText('15,000')).toBeInTheDocument()
+      })
+      expect(screen.getByRole('status', { name: 'Importing' })).toBeInTheDocument()
     } finally {
       sync.resolve(syncOk)
     }

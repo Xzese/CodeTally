@@ -1,0 +1,9 @@
+{
+  "productName": "CodeTally Screenshot Fixture",
+  "identifier": "com.samfaid.codetally.screenshots",
+  "plugins": {
+    "updater": {
+      "endpoints": []
+    }
+  }
+}

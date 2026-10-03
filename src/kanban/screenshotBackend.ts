@@ -9,6 +9,14 @@ const repositories = [
   { id: 2, github_id: 'repo-story-mobile', owner: 'storyforge', name: 'mobile', name_with_owner: 'storyforge/mobile', url: 'https://github.com/storyforge/mobile', primary_language: 'TypeScript', is_archived: false, is_fork: false, loc_available: true, total_loc: 24110, source_loc: 19740, test_loc: 4370, open_prs: 1, open_issues: 0 },
   { id: 3, github_id: 'repo-orbit-api', owner: 'orbit-labs', name: 'api', name_with_owner: 'orbit-labs/api', url: 'https://github.com/orbit-labs/api', primary_language: 'Rust', is_archived: false, is_fork: false, loc_available: true, total_loc: 11970, source_loc: 9150, test_loc: 2820, open_prs: 1, open_issues: 1 }
 ]
+const history = repositories.flatMap((repo) => Array.from({ length: 13 }, (_, index) => {
+  const date = new Date(now)
+  date.setUTCMonth(date.getUTCMonth() - (12 - index))
+  const factor = 0.4 + index * 0.05
+  const source = Math.round(repo.source_loc * factor)
+  const tests = Math.round(repo.test_loc * factor)
+  return { repository_id: repo.id, snapshot_date: date.toISOString().slice(0, 10), source_loc: source, test_loc: tests, total_loc: source + tests }
+}))
 const item = (kind: 'pr' | 'issue', repository_id: number, number: number, title: string, state: string, extras: Partial<KanbanItem> = {}): KanbanItem => {
   const repo = repositories[repository_id - 1]
   return { item_key: `github.com:node:${kind.toUpperCase()}_${repository_id}_${number}`, kind, repository_id, repository: repo.name_with_owner, number, title, state, is_draft: false, updated_at: now, url: `${repo.url}/${kind === 'pr' ? 'pull' : 'issues'}/${number}`, author: 'demo', assignees: ['alex'], ci_state: kind === 'pr' ? 'success' : null, closed_at: null, merged_at: null, completion_reason: null, manual_column: null, priority: 'None', notes: '', sort_rank: 0, revision: 0, ...extras }
@@ -33,15 +41,15 @@ export async function screenshotCall(command: string, args: Record<string, unkno
     case 'get_github_user': return { login: 'demo' }
     case 'get_app_settings': return settings
     case 'set_app_settings': settings = args.settings as AppSettings; return settings
-    case 'get_dashboard': return { user: { login: 'demo' }, repositories, totals: { repositories: 3, total_loc: 54500, source_loc: 43690, test_loc: 10810, loc_change_30d: 720, open_prs: 3, open_issues: 2 }, history: [], last_sync_at: now, last_lines_refresh_at: now, last_full_refresh_at: now, last_activity_refresh_at: now, last_personal_refresh_at: now, errors: [] }
+    case 'get_dashboard': return { user: { login: 'demo' }, repositories, totals: { repositories: 3, total_loc: 54500, source_loc: 43690, test_loc: 10810, loc_change_30d: 720, open_prs: 3, open_issues: 2 }, history, last_sync_at: now, last_lines_refresh_at: now, last_full_refresh_at: now, last_activity_refresh_at: now, last_personal_refresh_at: now, errors: [] }
     case 'get_activity_refresh_at': return now
-    case 'get_loc_history': return []
+    case 'get_loc_history': return args.repository_id ? history.filter((point) => point.repository_id === Number(args.repository_id)) : history
     case 'get_repository_selection': return repositories.map((repo) => ({ github_id: repo.github_id, name_with_owner: repo.name_with_owner, owner: repo.owner, group: 'company' }))
     case 'get_activity_feed': {
       const kind = args.kind === 'issues' ? 'issue' : 'pr'
       const scope = Array.isArray(args.repository_ids) ? args.repository_ids as number[] : repositories.map((repo) => repo.id)
       const state = String(args.state ?? 'all').toUpperCase()
-      return { kind: args.kind, items: items.filter((row) => row.kind === kind && scope.includes(row.repository_id) && (!args.repository_id || row.repository_id === args.repository_id) && (state === 'ALL' || (state === 'OPEN' ? row.state === 'OPEN' : row.state === state))).map((row) => ({ ...row, kind: row.kind === 'pr' ? 'pull_request' : 'issue' })) }
+      return { kind: args.kind, items: items.filter((row) => row.kind === kind && scope.includes(row.repository_id) && (!args.repository_id || row.repository_id === args.repository_id) && (state === 'ALL' || (state === 'OPEN' ? row.state === 'OPEN' : state === 'CLOSED' && kind === 'pr' ? row.state === 'CLOSED' || row.state === 'MERGED' : row.state === state))).map((row) => ({ ...row, kind: row.kind === 'pr' ? 'pull_request' : 'issue' })) }
     }
     case 'get_kanban_preferences': return preferences
     case 'set_kanban_preferences': preferences = args.preferences as KanbanPreferences; return preferences

@@ -14,7 +14,7 @@ export function isDraft(pr: PullRequest): boolean {
 export function filterPullRequests(items: PullRequest[], state: FeedState, repository = 'all'): PullRequest[] {
   return items
     .filter((pr) => repository === 'all' || String(pr.repository_id ?? pr.repositoryId ?? '') === repository || activityRepo(pr) === repository)
-    .filter((pr) => state === 'all' || (state === 'merged' ? isMerged(pr) : state === 'open' ? !isMerged(pr) && String(pr.state).toLowerCase() === 'open' : String(pr.state).toLowerCase() === state))
+    .filter((pr) => state === 'all' || (state === 'merged' ? isMerged(pr) : state === 'closed' ? isMerged(pr) || String(pr.state).toLowerCase() === 'closed' : !isMerged(pr) && String(pr.state).toLowerCase() === 'open'))
     .sort((a, b) => new Date(prUpdated(b)).getTime() - new Date(prUpdated(a)).getTime())
 }
 
@@ -65,4 +65,23 @@ export function aggregateHistory(snapshots: LocSnapshot[], repositoryId?: number
       rows.set(date, row)
     })
   return [...rows.values()].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
+}
+
+// IPC creates new objects even when a cache poll returns unchanged values.
+// Reuse those records so unrelated sync-progress updates can skip rendering.
+export function sameFields<T extends object>(left: T, right: T): boolean {
+  if (left === right) return true
+  const keys = Object.keys(left) as Array<keyof T>
+  return keys.length === Object.keys(right).length && keys.every((key) => Object.prototype.hasOwnProperty.call(right, key) && Object.is(left[key], right[key]))
+}
+
+export function reuseUnchangedRecords<T extends object>(previous: T[], next: T[]): T[] {
+  let changed = previous.length !== next.length
+  const records = next.map((record, index) => {
+    const old = previous[index]
+    if (old && sameFields(old, record)) return old
+    changed = true
+    return record
+  })
+  return changed ? records : previous
 }

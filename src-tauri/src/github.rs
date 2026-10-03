@@ -98,7 +98,7 @@ pub fn list_repositories_for_owner(owner: &str) -> AppResult<Vec<Repository>> {
 /// organizations while leaving authentication entirely under gh.
 pub fn list_organizations() -> AppResult<Vec<String>> {
     let output = run("gh", &[
-        "api".into(), "--paginate".into(), "user/orgs".into(), "--jq".into(), ".[].login".into(),
+        "api".into(), "--paginate".into(), "user/orgs?per_page=100".into(), "--jq".into(), ".[].login".into(),
     ])?;
     Ok(String::from_utf8_lossy(&output.stdout)
         .lines()
@@ -108,7 +108,7 @@ pub fn list_organizations() -> AppResult<Vec<String>> {
         .collect())
 }
 
-fn repository_from_json(repo: GithubRepositoryJson) -> Repository {
+pub(crate) fn repository_from_json(repo: GithubRepositoryJson) -> Repository {
     let (owner, name) = repo.name_with_owner.split_once('/').unwrap_or(("", repo.name.as_str()));
     Repository {
         id: 0,

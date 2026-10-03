@@ -269,7 +269,57 @@ flowchart LR
 
 The frontend does not talk to GitHub or SQLite directly. It invokes Rust commands through Tauri, and the backend serializes synchronization jobs so multiple refreshes cannot mutate the cache simultaneously.
 
+## Efficiency and regression checks
+
+Dashboard polls reuse cached summaries and history while SQLite is unchanged. A persistent read-only observer checks `PRAGMA data_version`, so commits from synchronization or another connection invalidate the cache. Growth cutoffs also expire it when a measurement crosses the current, 7-day, 30-day, or 90-day boundary; entries live at most one minute. A write during a rebuild prevents that result from being cached.
+
+Activity pages publish their rows, server counts, and pagination checkpoint in one transaction. Unchanged upserts avoid row updates. History is scoped and ordered in SQLite, then aggregated in one pass. Managed Git caches fetch the default branch without tags; an empty cache bootstraps available branches before subsequent fetches become scoped.
+
+GitHub activity refreshes batch the pending open/closed PR and issue feeds into one request per round, with independent cursors and a five-page limit per feed. Completed feeds leave subsequent requests. Successful pages remain durable even if a later request fails or quota runs low. Closed issues use GitHub's [updated-since filter](https://docs.github.com/en/graphql/reference/issues#issuefilters), including the same overlap window used locally; filtered cursors retain their exact bound, while legacy cursors finish with their original unfiltered query.
+
+Discovery requests the authenticated login, quota and owned repositories together, following pages of 100 before publishing complete metadata. It validates account identity and advancing cursors, and retains cached repositories if a page fails or the 10,000-repository/100-page bound is reached. Organizations are still listed in REST pages of 100. Refreshes authenticate through their data requests rather than a separate `gh auth status` request. Missing authentication or HTTP 401 stops the job, preserves already committed pages, and reports login instructions; repository permission errors remain local to that repository. Initial setup still checks authentication and required tools.
+
+Synthetic request-count checks through the real `gh` subprocess boundary show:
+
+| Activity workload per repository | Earlier requests | Batched requests |
+| --- | --- | --- |
+| Four single-page feeds | 2 | 1 |
+| Four two-page feeds | 6 | 2 |
+
+These counts exclude discovery and authentication and do not claim the same reduction in GraphQL primary-quota points. Run `cargo test --manifest-path src-tauri/Cargo.toml --test sync_scalability` to verify data correctness, independent pagination, same-timestamp CI/state updates, checkpoint recovery, and the request bounds.
+
+Read-only live profiling on 3 October 2026 found another request saved on each refresh by removing the authentication preflight, which took 0.32–1.62 seconds in two samples. Combining identity/quota with owned-repository discovery returned identical metadata for 24 repositories: two requests became one, and elapsed time fell from 2.31 to 1.97 seconds and from 1.77 to 1.39 seconds in two trials. These are small live samples, not latency guarantees.
+
+Cross-repository activity batching was also measured but not adopted. Across three repositories and 101 activity rows, a combined request returned identical data and cost the same 18 GraphQL points as three separate queries. It improved one trial from 8.20 to 4.37 seconds but slowed another from 3.35 to 7.49 seconds. The importer keeps its bounded per-repository batches. A live invalid-cursor probe also confirmed that GitHub nulls the repository response, including otherwise healthy feeds, so the importer retains its conservative checkpoint recovery.
+
+The frontend reuses embedded dashboard history, loads chart code separately, and preserves unchanged records so progress updates can skip inventory rendering. Date and number formatters are shared. The displayed logo uses lossless WebP; its original PNG remains available as the source asset.
+
+Representative local debug-build measurements (synthetic fixtures, not end-to-end latency guarantees):
+
+| Workload | Result |
+| --- | --- |
+| 1,000 repositories, 180,000 historical samples | Full dashboard build about 314 ms |
+| Ten unchanged reads of that dashboard | About 24 microseconds total, excluding IPC cloning and serialization |
+| 100 PR writes | About 172 ms as individual commits; about 3 ms as one activity-page transaction |
+| Initial JavaScript bundle | About 192 KB; chart code loads separately |
+| Logo encoding | 433 KB PNG to 247 KB lossless WebP |
+
+Run `cargo test --manifest-path src-tauri/Cargo.toml --test backend_logic large_portfolio_history -- --nocapture` to repeat the portfolio benchmark. The backend tests also cover cache invalidation, time boundaries, atomic page failure, resumed feeds, and managed Git branch changes. The frontend suite checks visible updates during an ongoing import and repository detail navigation.
+
 ## Development commands
+
+### Fixture screenshot generator (macOS)
+
+```sh
+npm run screenshots:fixtures
+npm run screenshots:fixtures -- --output-dir /tmp/codetally-gallery
+```
+
+The generator builds a separate **CodeTally Screenshot Fixture** app with its own bundle identifier, seeds temporary databases with fictional repositories, tickets, and line history, and captures the real app and native menu bar menus. It covers the overview, repository details, analytics, PR and issue feeds, Kanban, Settings, the combined summary, and each separate metric menu. A JSON manifest lists the generated PNGs.
+
+The fixture app does not read your regular CodeTally database or refresh GitHub. It stops after capture and removes its temporary build and databases on success. If capture fails after building, it prints the retained temporary directory for diagnosis. Cargo dependencies must already be available locally because the build runs offline. The command requires macOS Accessibility and Screen Recording access for the terminal or host app, and checks these before building; see `npm run screenshots:fixtures -- --help`.
+
+In **Settings → Appearance & menu bar**, enable **Combined menu bar item** for one icon containing all seven dashboard metrics and the LOC line chart. Disable it to restore your separate metric selections. A compact icon rail switches between Overview and the optional Kanban page. The dashboard uses four primary metric cards and a source/test/change breakdown; lines of code remain a line chart.
 
 ### README screenshots (macOS)
 

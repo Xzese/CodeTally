@@ -36,7 +36,10 @@ export const prUpdated = (pr: PullRequest): string => pr.updated_at ?? pr.update
 export const issueUpdated = (issue: Issue): string => issue.updated_at ?? issue.updatedAt ?? issue.created_at ?? issue.createdAt ?? ''
 export const activityRepo = (item: PullRequest | Issue): string => item.repository_name ?? item.repositoryName ?? item.repository ?? ''
 
-export const formatCount = (number: number): string => new Intl.NumberFormat('en-US').format(Math.round(number))
+const countFormatter = new Intl.NumberFormat('en-US')
+const dateFormatter = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+
+export const formatCount = (number: number): string => countFormatter.format(Math.round(number))
 export const formatCompact = (number: number): string => {
   const absolute = Math.abs(number)
   if (absolute >= 1_000_000) return `${(number / 1_000_000).toFixed(1)}m`
@@ -45,7 +48,7 @@ export const formatCompact = (number: number): string => {
 }
 export const formatSigned = (number: number, compact = false): string => `${number >= 0 ? '+' : ''}${compact ? formatCompact(number) : formatCount(number)}`
 
-export const relativeTime = (date?: string | null): string => {
+export const relativeTime = (date?: string | null, compact = false): string => {
   if (!date) return '—'
   const time = new Date(date).getTime()
   if (Number.isNaN(time)) return '—'
@@ -56,7 +59,7 @@ export const relativeTime = (date?: string | null): string => {
   const hours = Math.round(minutes / 60)
   if (hours < 24) return `${hours}h`
   const days = Math.round(hours / 24)
-  if (days === 1) return 'Yesterday'
+  if (days === 1) return compact ? '1d' : 'Yesterday'
   if (days < 30) return `${days}d`
   const months = Math.round(days / 30)
   if (months < 12) return `${months}mo`
@@ -67,7 +70,7 @@ export const exactDate = (date?: string | number | null): string => {
   if (!date) return 'Unknown date'
   const parsed = new Date(date)
   if (Number.isNaN(parsed.getTime())) return String(date)
-  return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(parsed)
+  return dateFormatter.format(parsed)
 }
 
 export interface NormalizedMetrics {
@@ -88,7 +91,7 @@ export const normalizeMetrics = (data: DashboardData): NormalizedMetrics => {
     total_loc: source.total_loc ?? source.totalLoc ?? repositories.reduce((sum, repo) => sum + repoTotal(repo), 0),
     source_loc: source.source_loc ?? source.sourceLoc ?? repositories.reduce((sum, repo) => sum + repoSource(repo), 0),
     test_loc: source.test_loc ?? source.testLoc ?? repositories.reduce((sum, repo) => sum + repoTests(repo), 0),
-    loc_30d_change: source.loc_30d_change ?? source.loc30dChange ?? repositories.reduce((sum, repo) => sum + repoChange(repo), 0),
+    loc_30d_change: source.loc_change_30d ?? source.loc_30d_change ?? source.loc30dChange ?? repositories.reduce((sum, repo) => sum + repoChange(repo), 0),
     open_prs: source.open_prs ?? source.openPrs ?? repositories.reduce((sum, repo) => sum + repoOpenPrs(repo), 0),
     open_issues: source.open_issues ?? source.openIssues ?? repositories.reduce((sum, repo) => sum + repoOpenIssues(repo), 0)
   }

@@ -4,8 +4,8 @@ use codetally_lib::classify::{
     classify_tokei_json, is_test_path_with_config, is_tokei_report, month_sample_dates,
     range_start,
 };
-use codetally_lib::db::Database;
-use codetally_lib::gitops::{earliest_commit, scan_worktree_with_config};
+use codetally_lib::db::{DashboardCache, Database};
+use codetally_lib::gitops::{commit_at_or_before, current_commit_optional, earliest_commit, ensure_clone, scan_worktree_with_config};
 use codetally_lib::models::{
     ActivityItem, AppSettings, ClassificationConfig, GithubIssueJson, GithubPullRequestJson,
     DashboardTotals, GithubRepositoryJson, Issue, MenuBarMetric, PullRequest, Repository,
@@ -285,6 +285,32 @@ fn earliest_reachable_git_commit_extends_history_before_later_github_creation_da
     let dates = month_sample_dates(Some(&first_date), end);
     assert_eq!(dates.first().expect("June sample"), "2024-06-30T23:59:59Z");
     assert_eq!(dates.len(), 3);
+    assert!(commit_at_or_before(&root, "main", "2024-06-01T00:00:00Z").unwrap().is_none());
+    for date in &dates {
+        let (sha, sampled_date) = commit_at_or_before(&root, "main", date).unwrap().unwrap();
+        let reference = Command::new("git").current_dir(&root).args(["rev-list", "-n", "1", &format!("--before={date}"), "main"]).output().unwrap();
+        assert_eq!(sha, String::from_utf8_lossy(&reference.stdout).trim());
+        assert!(sampled_date.starts_with(if date.starts_with("2024-06") { "2024-06-29" } else { "2024-07-02" }));
+    }
+    let (database, database_path) = temp_database("backfill-restore");
+    let repo_id = database.upsert_repository(&Repository { url: root.to_string_lossy().into_owned(), ..repository("history", "history") }).unwrap();
+    let state = AppState { db_path: database_path.clone(), cache_dir: root.join("cache"), progress: Arc::new(Mutex::new(SyncProgress::default())), dashboard_cache: Arc::new(Mutex::new(Default::default())), job_lock: Arc::new(Mutex::new(())) };
+    let result = sync::backfill_one(&state, repo_id).unwrap();
+    assert!(result.ok, "backfill errors: {:?}", result.errors);
+    assert_eq!(result.snapshots_created, 2, "monthly samples should scan each SHA once");
+    let cached = state.cache_dir.join("owner/history");
+    let branch = || String::from_utf8(Command::new("git").current_dir(&cached).args(["symbolic-ref", "--short", "HEAD"]).output().unwrap().stdout).unwrap();
+    assert_eq!(branch().trim(), "main");
+    assert_eq!(sync::backfill_one(&state, repo_id).unwrap().snapshots_created, 0, "repeat backfill reuses saved samples");
+    database.set_classification_config(repo_id, &ClassificationConfig::default()).unwrap();
+    let conn = Connection::open(&database_path).unwrap();
+    conn.execute_batch("CREATE TRIGGER fail_sample BEFORE INSERT ON code_snapshots BEGIN SELECT RAISE(ABORT,'forced sample failure'); END;").unwrap();
+    let failed = sync::backfill_one(&state, repo_id).unwrap();
+    assert!(!failed.ok);
+    assert!(failed.errors.iter().any(|e| e.contains("forced sample failure")));
+    assert_eq!(branch().trim(), "main", "early database errors must restore the default branch");
+    drop(conn);
+    remove_database(database_path);
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -302,6 +328,69 @@ fn automatic_loc_cadence_skips_unchanged_repositories_but_scans_pushed_changes()
     let changed_decision = decide_loc_sync(&changed, now, Some(recent_sweep), false);
     assert!(changed_decision.run);
     assert!(!changed_decision.force_fetch);
+}
+
+#[test]
+fn managed_clone_scopes_branches_and_handles_empty_remote_and_default_branch_changes() {
+    let root = std::env::temp_dir().join(format!("codetally-clone-{}-{}", std::process::id(), SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+    std::fs::create_dir_all(&root).unwrap();
+    let git = |path: &std::path::Path, args: &[&str]| {
+        let output = Command::new("git").current_dir(path).args(args).output().unwrap();
+        assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+    let remote = root.join("remote.git");
+    git(&root, &["init", "--bare", "--initial-branch=main", remote.to_str().unwrap()]);
+    let mut repo = Repository { url: format!("file://{}", remote.display()), ..repository("clone", "clone") };
+    let empty_cache = root.join("empty-cache");
+    let cached = ensure_clone(&repo, &empty_cache).unwrap();
+    assert!(current_commit_optional(&cached).unwrap().is_none());
+    let source = root.join("source");
+    git(&root, &["init", "--initial-branch=main", source.to_str().unwrap()]);
+    git(&source, &["config", "user.email", "fixture@example.test"]);
+    git(&source, &["config", "user.name", "Fixture"]);
+    std::fs::write(source.join("main.rs"), "fn main() {}\n").unwrap();
+    git(&source, &["add", "."]);
+    git(&source, &["commit", "-m", "main"]);
+    git(&source, &["remote", "add", "origin", &repo.url]);
+    git(&source, &["push", "origin", "main"]);
+    let main_sha = git(&source, &["rev-parse", "HEAD"]);
+    ensure_clone(&repo, &empty_cache).unwrap();
+    assert_eq!(current_commit_optional(&cached).unwrap().unwrap().0, main_sha, "an empty cache must fetch its first commit");
+    git(&source, &["checkout", "-b", "unused"]);
+    std::fs::write(source.join("unused.rs"), "fn unused() {}\n").unwrap();
+    git(&source, &["add", "."]);
+    git(&source, &["commit", "-m", "unused branch"]);
+    git(&source, &["tag", "unused-tag"]);
+    git(&source, &["push", "origin", "unused", "--tags"]);
+    let unused_sha = git(&source, &["rev-parse", "HEAD"]);
+    let fresh_cache = root.join("fresh-cache");
+    let fresh = ensure_clone(&repo, &fresh_cache).unwrap();
+    let refs = git(&fresh, &["for-each-ref", "--format=%(refname)"]);
+    assert!(!refs.contains("origin/unused"));
+    assert!(!refs.contains("refs/tags/"));
+    git(&source, &["checkout", "main"]);
+    std::fs::write(source.join("main.rs"), "fn main() { println!(\"new\"); }\n").unwrap();
+    git(&source, &["add", "."]);
+    git(&source, &["commit", "-m", "main update"]);
+    git(&source, &["push", "origin", "main"]);
+    let latest_main = git(&source, &["rev-parse", "HEAD"]);
+    ensure_clone(&repo, &fresh_cache).unwrap();
+    assert_eq!(current_commit_optional(&fresh).unwrap().unwrap().0, latest_main);
+    assert!(!git(&fresh, &["for-each-ref", "--format=%(refname)"]).contains("origin/unused"));
+    repo.default_branch = "unused".into();
+    ensure_clone(&repo, &fresh_cache).unwrap();
+    assert_eq!(current_commit_optional(&fresh).unwrap().unwrap().0, unused_sha);
+    assert_eq!(git(&fresh, &["symbolic-ref", "--short", "HEAD"]), "unused");
+    // A fresh clone also follows discovery's branch when remote HEAD still
+    // points at the old default branch.
+    let renamed = ensure_clone(&repo, &root.join("renamed-cache")).unwrap();
+    assert_eq!(current_commit_optional(&renamed).unwrap().unwrap().0, unused_sha);
+    git(&remote, &["config", "receive.denyDeleteCurrent", "ignore"]);
+    git(&source, &["push", "origin", ":main"]);
+    let dangling_head = ensure_clone(&repo, &root.join("dangling-head-cache")).unwrap();
+    assert_eq!(current_commit_optional(&dangling_head).unwrap().unwrap().0, unused_sha, "a deleted remote HEAD must not hide the valid discovered branch");
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -351,6 +440,10 @@ fn cadence_settings_have_expected_defaults_and_validate_supported_intervals() {
     assert_eq!(defaults.menu_bar_metric, MenuBarMetric::TotalLines);
     assert!(defaults.menu_bar_metrics.is_empty());
     assert!(defaults.show_menu_bar);
+    assert!(!defaults.menu_bar_combined);
+    let mut legacy_settings = serde_json::to_value(&defaults).unwrap();
+    legacy_settings.as_object_mut().unwrap().remove("menu_bar_combined");
+    assert!(!serde_json::from_value::<AppSettings>(legacy_settings).unwrap().menu_bar_combined);
     assert_eq!(
         defaults.effective_menu_bar_metrics(),
         vec![MenuBarMetric::TotalLines]
@@ -434,6 +527,7 @@ fn cadence_settings_round_trip_through_persisted_app_metadata() {
         menu_bar_metrics: Vec::new(),
         menu_bar_compact_metrics: Vec::new(),
         show_menu_bar: true,
+        menu_bar_combined: false,
         include_forks_in_totals: true,
         include_personal_repositories: false,
         include_company_repositories: true,
@@ -656,6 +750,7 @@ fn multiple_menu_bar_metrics_round_trip_in_canonical_order_without_duplicates() 
     let (database, path) = temp_database("multiple-menu-bar-metrics");
     let settings = AppSettings {
         menu_bar_metric: MenuBarMetric::OpenPrs,
+        menu_bar_combined: true,
         menu_bar_metrics: vec![
             MenuBarMetric::OpenIssues,
             MenuBarMetric::TotalLines,
@@ -671,6 +766,7 @@ fn multiple_menu_bar_metrics_round_trip_in_canonical_order_without_duplicates() 
     };
     sync::save_app_settings(&database, &settings).expect("save multiple menu bar metrics");
     let loaded = sync::app_settings(&database).expect("load multiple menu bar metrics");
+    assert!(loaded.menu_bar_combined);
     assert_eq!(
         loaded.menu_bar_metrics,
         vec![
@@ -802,10 +898,11 @@ fn discovery_includes_org_repositories_deduplicates_ids_and_records_partial_org_
     std::fs::write(
         &gh,
         r##"#!/bin/sh
+printf '%s\n' "$*" >> "$(dirname "$0")/../gh.log"
 repo_json='[{"id":"owned-id","name":"portfolio","nameWithOwner":"me/portfolio","url":"https://github.com/me/portfolio","sshUrl":"git@github.com:me/portfolio.git","isPrivate":false,"isFork":false,"isArchived":false,"defaultBranchRef":{"name":"main"},"primaryLanguage":{"name":"Rust"},"createdAt":"2024-01-01T00:00:00Z","updatedAt":"2026-09-01T00:00:00Z","pushedAt":"2026-09-02T00:00:00Z"}]'
 org_json='[{"id":"org-id","name":"shared","nameWithOwner":"org-one/shared","url":"https://github.com/org-one/shared","sshUrl":"git@github.com:org-one/shared.git","isPrivate":true,"isFork":false,"isArchived":false,"defaultBranchRef":{"name":"main"},"primaryLanguage":{"name":"TypeScript"},"createdAt":"2024-01-01T00:00:00Z","updatedAt":"2026-09-01T00:00:00Z","pushedAt":"2026-09-02T00:00:00Z"},{"id":"owned-id","name":"duplicate","nameWithOwner":"org-one/duplicate","url":"https://github.com/org-one/duplicate","sshUrl":"git@github.com:org-one/duplicate.git","isPrivate":false,"isFork":false,"isArchived":false,"defaultBranchRef":{"name":"main"},"primaryLanguage":{"name":"Rust"},"createdAt":"2024-01-01T00:00:00Z","updatedAt":"2026-09-01T00:00:00Z","pushedAt":"2026-09-02T00:00:00Z"}]'
 if [ "$1" = "api" ] && [ "$2" = "user" ]; then printf 'me\n'; exit 0; fi
-if [ "$1" = "api" ] && [ "$2" = "graphql" ]; then printf '{"data":{"rateLimit":{"remaining":5000,"resetAt":"2099-01-01T00:00:00Z"}}}\n'; exit 0; fi
+if [ "$1" = "api" ] && [ "$2" = "graphql" ]; then printf '{"data":{"viewer":{"login":"me","repositories":{"nodes":%s,"pageInfo":{"hasNextPage":false,"endCursor":null}}},"rateLimit":{"remaining":5000,"resetAt":"2099-01-01T00:00:00Z"}}}\n' "$repo_json"; exit 0; fi
 if [ "$1" = "api" ] && [ "$2" = "--paginate" ]; then printf 'org-one\norg-two\n'; exit 0; fi
 if [ "$1" = "repo" ] && [ "$3" = "me" ]; then printf '%s\n' "$repo_json"; exit 0; fi
 if [ "$1" = "repo" ] && [ "$3" = "org-one" ]; then printf '%s\n' "$org_json"; exit 0; fi
@@ -827,7 +924,7 @@ exit 1
         db_path: database_path,
         cache_dir: cache_path,
         progress: Arc::new(Mutex::new(SyncProgress::default())),
-        job_lock: Arc::new(Mutex::new(())),
+        dashboard_cache: Arc::new(Mutex::new(Default::default())), job_lock: Arc::new(Mutex::new(())),
     };
 
     let original_path = std::env::var_os("PATH").unwrap_or_default();
@@ -838,6 +935,10 @@ exit 1
     std::env::set_var("PATH", original_path);
 
     let repositories = discovered.expect("discovery should retain usable owners");
+    let calls = std::fs::read_to_string(root.join("gh.log")).expect("discovery calls");
+    assert!(!calls.lines().any(|call| call.starts_with("api user")), "viewer identity should share the quota request");
+    assert!(calls.contains("user/orgs?per_page=100"), "organization discovery should use full REST pages");
+    assert_eq!(database.metadata("github_login").unwrap().as_deref(), Some("me"));
     let errors = state.database().metadata("org_discovery_errors").expect("org error metadata").unwrap_or_default();
     let names = repositories.iter().map(|repo| repo.name_with_owner.as_str()).collect::<Vec<_>>();
     assert_eq!(repositories.len(), 2);
@@ -1466,6 +1567,12 @@ fn activity_feeds_sort_newest_first_and_apply_state_and_repository_filters() {
     assert_eq!(database.pull_requests(Some(repo_a), Some("OPEN"), 10).expect("repo/state PR filter").len(), 1);
     assert!(database.pull_requests(Some(repo_a), Some("MERGED"), 10).expect("repo/state PR filter").is_empty());
 
+    let closed_pr = PullRequest { repository_id: repo_b, number: 3, title: "Closed without merge".into(), state: "CLOSED".into(), updated_at: "2026-09-04T00:00:00Z".into(), ..pr_b.clone() };
+    database.upsert_pull_request(&closed_pr).expect("closed PR");
+    let closed = database.all_activity("prs", None, Some("closed"), 10).expect("closed and merged PRs");
+    assert!(matches!(&closed[..], [ActivityItem::PullRequest(first), ActivityItem::PullRequest(second)] if first.title == "Closed without merge" && second.title == "Newest PR"));
+    assert!(database.all_activity("prs", Some(repo_a), Some("closed"), 10).expect("closed scope").is_empty());
+
     let issue_a = Issue { repository_id: repo_a, repository: "owner/alpha".to_string(), number: 5, title: "Open issue".to_string(), state: "OPEN".to_string(), created_at: "2026-09-01T00:00:00Z".to_string(), updated_at: "2026-09-04T00:00:00Z".to_string(), ..Issue::default() };
     let issue_b = Issue { repository_id: repo_b, repository: "owner/beta".to_string(), number: 6, title: "Closed issue".to_string(), state: "CLOSED".to_string(), created_at: "2026-09-01T00:00:00Z".to_string(), updated_at: "2026-09-05T00:00:00Z".to_string(), ..Issue::default() };
     database.upsert_issue(&issue_a).expect("issue a");
@@ -2025,6 +2132,96 @@ fn history_carries_forward_snapshots_and_totals_exclude_forks_and_archived_repos
     let totals = database.totals(&summaries).expect("summaries totals");
     assert_eq!(totals.repositories, 2);
     assert_eq!(totals.total_loc, 125);
+    // Daily observations take precedence over a monthly sample on that day,
+    // and only eligible repository dates appear in portfolio history.
+    database.upsert_observation(&snapshot(active, "observed", "2026-02-28T10:00:00Z", 140)).unwrap();
+    database.upsert_snapshot(&snapshot(active, "later", "2026-03-01T23:59:59Z", 160)).unwrap();
+    database.upsert_observation(&snapshot(active, "next", "2026-03-03T09:00:00Z", 155)).unwrap();
+    database.upsert_snapshot(&snapshot(fork, "only-fork", "2026-03-02T23:59:59Z", 950)).unwrap();
+    let history = database.history(None).unwrap();
+    assert_eq!(history.iter().map(|p| p.total_loc).collect::<Vec<_>>(), vec![100, 140, 160, 155]);
+    assert_eq!(database.history(Some(fork)).unwrap().last().unwrap().total_loc, 950);
+    assert!(database.history(Some(i64::MAX)).unwrap().is_empty());
+    remove_database(path);
+}
+
+#[test]
+fn large_portfolio_history_and_summaries_preserve_daily_totals() {
+    let (database, path) = temp_database("portfolio-scale");
+    let mut conn = Connection::open(&path).expect("fixture connection");
+    let tx = conn.transaction().expect("fixture transaction");
+    for repo in 1..=1000 {
+        tx.execute("INSERT INTO repositories(id,github_id,owner,name,name_with_owner,url,ssh_url) VALUES (?1,?1,'owner',?1,?1,'','')", [repo]).unwrap();
+        for day in 0..180 {
+            let date = (Utc::now() - Duration::days(180 - day)).format("%Y-%m-%d").to_string();
+            tx.execute("INSERT INTO code_snapshots(repository_id,commit_sha,commit_date,snapshot_date,total_loc,source_loc,test_loc,created_at) VALUES (?1,?2,?2,?2,?3,?3,0,?2)", params![repo,date,100 + day]).unwrap();
+        }
+    }
+    tx.commit().unwrap();
+    let start = std::time::Instant::now();
+    let history = database.history(None).expect("large history");
+    eprintln!("1,000 repos / 180,000 samples: history {:?}", start.elapsed());
+    assert_eq!(history.len(), 180);
+    for (day, point) in history.iter().enumerate() {
+        assert_eq!(point.total_loc, 1000 * (100 + day as i64));
+        assert_eq!(point.source_loc, point.total_loc);
+        assert_eq!(point.test_loc, 0);
+    }
+    let start = std::time::Instant::now();
+    let summaries = database.summaries().expect("large summaries");
+    eprintln!("1,000 repos: summaries {:?}", start.elapsed());
+    assert_eq!(summaries.len(), 1000);
+    assert!(summaries.iter().all(|repo| repo.total_loc == 279 && repo.loc_baseline_90d_available));
+    assert_eq!(database.history(Some(1)).unwrap().last().unwrap().total_loc, 279);
+    let mut cache = DashboardCache::default();
+    let start = std::time::Instant::now();
+    let dashboard = database.dashboard_cached(&mut cache).unwrap();
+    eprintln!("1,000 repos: dashboard build {:?}", start.elapsed());
+    let start = std::time::Instant::now();
+    for _ in 0..10 {
+        let repeated = database.dashboard_cached(&mut cache).unwrap();
+        assert!(Arc::ptr_eq(&dashboard, &repeated));
+        assert_eq!(repeated.totals.total_loc, 279_000);
+    }
+    eprintln!("1,000 repos: ten unchanged dashboard reads {:?}", start.elapsed());
+    drop(cache);
+    drop(conn);
+    remove_database(path);
+}
+
+#[test]
+fn activity_pages_are_atomic_skip_unchanged_rows_and_update_ci_without_timestamp_changes() {
+    let (database, path) = temp_database("activity-page");
+    let id = database.upsert_repository(&repository("page", "page")).unwrap();
+    let prs: Vec<_> = (1..=100).map(|number| PullRequest {
+        repository_id: id, number, title: format!("PR {number}"), state: "OPEN".into(),
+        created_at: "2026-01-01".into(), updated_at: "2026-01-02".into(), ci_state: Some("pending".into()),
+        ..PullRequest::default()
+    }).collect();
+    let issues = vec![Issue { repository_id: id, number: 1, title: "Issue".into(), state: "OPEN".into(), ..Issue::default() }];
+    let unbatched_id = database.upsert_repository(&repository("unbatched", "unbatched")).unwrap();
+    let start = std::time::Instant::now();
+    for pr in &prs { database.upsert_pull_request(&PullRequest { repository_id: unbatched_id, ..pr.clone() }).unwrap(); }
+    eprintln!("100 PRs: individual commits {:?}", start.elapsed());
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch("CREATE TABLE updates(kind TEXT); CREATE TRIGGER track_pr AFTER UPDATE ON pull_requests BEGIN INSERT INTO updates VALUES ('pr'); END; CREATE TRIGGER track_issue AFTER UPDATE ON issues BEGIN INSERT INTO updates VALUES ('issue'); END;").unwrap();
+    let start = std::time::Instant::now();
+    database.apply_activity_page(&prs, &issues, id, 100, 1, "page_cursor", "first").unwrap();
+    eprintln!("100 PRs + issue: transactional page {:?}", start.elapsed());
+    database.apply_activity_page(&prs, &issues, id, 100, 1, "page_cursor", "first").unwrap();
+    assert_eq!(conn.query_row("SELECT count(*) FROM updates", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    let mut changed = prs[0].clone();
+    changed.ci_state = Some("success".into());
+    database.apply_activity_page(&[changed.clone()], &[], id, 100, 1, "page_cursor", "second").unwrap();
+    assert_eq!(conn.query_row("SELECT count(*) FROM updates", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+    assert_eq!(database.pull_requests(Some(id), None, 100).unwrap().iter().find(|pr| pr.number == 1).unwrap().ci_state.as_deref(), Some("success"));
+    changed.title = "must roll back".into();
+    let invalid = Issue { repository_id: id + 9999, ..issues[0].clone() };
+    assert!(database.apply_activity_page(&[changed], &[invalid], id, 0, 0, "page_cursor", "failed").is_err());
+    assert_eq!(database.metadata("page_cursor").unwrap().as_deref(), Some("second"));
+    assert_eq!(database.repository(id).unwrap().unwrap().open_pr_count, 100);
+    assert_eq!(database.pull_requests(Some(id), None, 100).unwrap().iter().find(|pr| pr.number == 1).unwrap().title, "PR 1");
+    drop(conn);
     remove_database(path);
 }
 
@@ -2313,4 +2510,60 @@ fn history_sampling_reuses_counts_for_earlier_sha_and_migrates_without_deleting_
         Some("legacy")
     );
     remove_database(path);
+}
+
+#[test]
+fn dashboard_cache_refreshes_after_commits_and_time_boundaries() {
+    let (database, path) = temp_database("dashboard-cache");
+    let id = database.upsert_repository(&repository("cache", "cache")).unwrap();
+    let boundary = "2026-04-01T12:00:00Z".parse::<DateTime<Utc>>().unwrap();
+    for (days, total) in [(90, 10), (30, 20), (7, 30), (1, 100), (-1, 200)] {
+        let date = (boundary - Duration::days(days)).format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        database.upsert_snapshot(&Snapshot { repository_id: id, commit_sha: format!("sha-{days}"), commit_date: date.clone(), snapshot_date: date, total_loc: total, source_loc: total, ..Snapshot::default() }).unwrap();
+    }
+    let mut cache = DashboardCache::default();
+    let before = database.dashboard_cached_at(&mut cache, boundary - Duration::seconds(1)).unwrap();
+    assert_eq!(before.totals.total_loc, 100);
+    assert_eq!(before.repositories[0].loc_change_7d, 80);
+    assert_eq!(before.repositories[0].loc_change_30d, 90);
+    assert!(!before.repositories[0].loc_baseline_90d_available);
+    // Z sorts after the equivalent +00:00 cutoff in existing SQLite queries.
+    let exact = database.dashboard_cached_at(&mut cache, boundary).unwrap();
+    assert!(!exact.repositories[0].loc_baseline_90d_available);
+    let now = boundary + Duration::seconds(1);
+    let after = database.dashboard_cached_at(&mut cache, now).unwrap();
+    assert_eq!(after.repositories[0].loc_change_7d, 70);
+    assert_eq!(after.repositories[0].loc_change_30d, 80);
+    assert_eq!(after.repositories[0].loc_change_90d, 90);
+    assert!(Arc::ptr_eq(&after, &database.dashboard_cached_at(&mut cache, now).unwrap()));
+    database.set_metadata("github_login", "changed-user").unwrap();
+    database.set_metadata("org_discovery_errors", "retry owner").unwrap();
+    database.apply_activity_page(&[PullRequest { repository_id: id, number: 1, state: "OPEN".into(), updated_at: "2026-04-01".into(), ..PullRequest::default() }], &[], id, 1, 0, "cursor", "partial").unwrap();
+    let committed = database.dashboard_cached_at(&mut cache, now).unwrap();
+    assert_eq!(committed.user.as_ref().unwrap().login, "changed-user");
+    assert_eq!(committed.errors, vec!["retry owner"]);
+    assert_eq!(committed.totals.open_prs, 1);
+    database.mark_sync(id, None).unwrap();
+    assert!(database.dashboard_cached_at(&mut cache, now).unwrap().last_sync_at.is_some());
+    let now = boundary + Duration::days(1) + Duration::seconds(1);
+    let future = database.dashboard_cached_at(&mut cache, now).unwrap();
+    assert_eq!(future.totals.total_loc, 200);
+    // Changes made outside Database must also invalidate the persistent observer.
+    let external = Connection::open(&path).unwrap();
+    external.execute("UPDATE repositories SET name='renamed' WHERE id=?1", [id]).unwrap();
+    assert_eq!(database.dashboard_cached_at(&mut cache, now).unwrap().repositories[0].name, "renamed");
+    database.set_classification_config(id, &ClassificationConfig::default()).unwrap();
+    let invalidated = database.dashboard_cached_at(&mut cache, now).unwrap();
+    assert_eq!(invalidated.totals.total_loc, 0);
+    assert!(invalidated.history.is_empty());
+    assert!(!invalidated.repositories[0].loc_available);
+    external.execute("UPDATE repositories SET is_archived=1 WHERE id=?1", [id]).unwrap();
+    assert!(database.dashboard_cached_at(&mut cache, now).unwrap().repositories.is_empty());
+    // Reusing a cache for another database never carries records across files.
+    let (other, other_path) = temp_database("dashboard-cache-other");
+    assert!(other.dashboard_cached_at(&mut cache, now).unwrap().user.is_none());
+    drop(cache);
+    drop(external);
+    remove_database(path);
+    remove_database(other_path);
 }

@@ -45,6 +45,7 @@ pub async fn check_for_updates(app: tauri::AppHandle) -> Result<crate::updates::
 
 #[tauri::command(rename_all = "snake_case")]
 pub async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
+    if crate::screenshot_mode() { return Err("Updates are disabled in screenshot builds".into()); }
     let _install_guard = begin_update_install()?;
     let update = app
         .updater()
@@ -101,6 +102,7 @@ pub async fn get_github_user(state: State<'_, AppState>) -> Result<GithubUser, S
 
 #[tauri::command(rename_all = "snake_case")]
 pub async fn discover_repositories(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<Vec<RepositorySummary>, String> {
+    if crate::screenshot_mode() { return state.database().summaries().map_err(|error| error.to_string()); }
     let state = state.inner().clone();
     tokio::task::spawn_blocking(move || {
         let _job = state.job_lock.lock().map_err(|_| "sync lock poisoned".to_string())?;
@@ -114,6 +116,7 @@ pub async fn discover_repositories(app: tauri::AppHandle, state: State<'_, AppSt
 
 #[tauri::command(rename_all = "snake_case")]
 pub async fn sync_github_data(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<SyncResult, String> {
+    if crate::screenshot_mode() { return Ok(SyncResult { ok: true, message: "Screenshot data is ready".into(), ..SyncResult::default() }); }
     let state = state.inner().clone();
     tokio::task::spawn_blocking(move || {
         let _job = state.job_lock.lock().map_err(|_| "sync lock poisoned".to_string())?;
@@ -126,6 +129,7 @@ pub async fn sync_github_data(app: tauri::AppHandle, state: State<'_, AppState>)
 
 #[tauri::command(rename_all = "snake_case")]
 pub async fn sync_activity(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<SyncResult, String> {
+    if crate::screenshot_mode() { return Ok(SyncResult { ok: true, message: "Screenshot data is ready".into(), ..SyncResult::default() }); }
     let state = state.inner().clone();
     tokio::task::spawn_blocking(move || {
         let _job = state.job_lock.lock().map_err(|_| "sync lock poisoned".to_string())?;
@@ -293,6 +297,7 @@ pub fn reveal_database(state: State<'_, AppState>) -> Result<bool, String> {
 
 #[tauri::command(rename_all = "snake_case")]
 pub async fn sync_repository(app: tauri::AppHandle, state: State<'_, AppState>, repo_id: i64) -> Result<SyncResult, String> {
+    if crate::screenshot_mode() { return Ok(SyncResult { ok: true, message: "Screenshot data is ready".into(), ..SyncResult::default() }); }
     let state = state.inner().clone();
     tokio::task::spawn_blocking(move || {
         let _job = state.job_lock.lock().map_err(|_| "sync lock poisoned".to_string())?;
@@ -305,6 +310,7 @@ pub async fn sync_repository(app: tauri::AppHandle, state: State<'_, AppState>, 
 
 #[tauri::command(rename_all = "snake_case")]
 pub async fn backfill_loc(app: tauri::AppHandle, state: State<'_, AppState>, repo_id: i64) -> Result<SyncResult, String> {
+    if crate::screenshot_mode() { return Ok(SyncResult { ok: true, message: "Screenshot data is ready".into(), ..SyncResult::default() }); }
     let state = state.inner().clone();
     tokio::task::spawn_blocking(move || {
         let _job = state.job_lock.lock().map_err(|_| "sync lock poisoned".to_string())?;
@@ -338,18 +344,7 @@ pub fn set_repository_classification(app: tauri::AppHandle, state: State<'_, App
 pub async fn get_dashboard(state: State<'_, AppState>) -> Result<Dashboard, String> {
     let state = state.inner().clone();
     tokio::task::spawn_blocking(move || {
-        let db = state.database();
-        let summaries: Vec<RepositorySummary> = db.summaries().map_err(|error| error.to_string())?.into_iter().filter(|repo| !repo.is_archived).collect();
-        let totals = db.totals(&summaries).map_err(|error| error.to_string())?;
-        let history = db.history(None).map_err(|error| error.to_string())?;
-        let last_sync_at = summaries.iter().filter_map(|repo| repo.last_sync_at.clone()).max();
-        let last_lines_refresh_at = db.metadata(sync::LAST_LOC_REFRESH_METADATA_KEY).map_err(|error| error.to_string())?;
-        let last_full_refresh_at = db.metadata(sync::LAST_FULL_REFRESH_METADATA_KEY).map_err(|error| error.to_string())?;
-        let last_activity_refresh_at = db.metadata(sync::LAST_ACTIVITY_REFRESH_METADATA_KEY).map_err(|error| error.to_string())?;
-        let last_personal_refresh_at = db.metadata(sync::LAST_PERSONAL_REFRESH_METADATA_KEY).map_err(|error| error.to_string())?;
-        let user = db.metadata("github_login").map_err(|error| error.to_string())?.map(|login| GithubUser { login });
-        let errors = db.metadata("org_discovery_errors").map_err(|error| error.to_string())?.filter(|_| sync::app_settings(&db).map(|settings| settings.include_company_repositories).unwrap_or(false)).map(|value| value.lines().map(str::to_string).collect()).unwrap_or_default();
-        Ok(Dashboard { user, repositories: summaries, totals, history, last_sync_at, last_lines_refresh_at, last_full_refresh_at, last_activity_refresh_at, last_personal_refresh_at, errors })
+        state.dashboard().map(|dashboard| dashboard.as_ref().clone()).map_err(|error| error.to_string())
     }).await.map_err(|error| error.to_string())?
 }
 

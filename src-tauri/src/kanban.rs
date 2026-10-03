@@ -95,33 +95,47 @@ pub fn store_identity(
 ) -> AppResult<()> {
     let mut conn = db.connect()?;
     let tx = conn.transaction()?;
+    store_identity_on(&tx, repository_id, github_repository_id, kind, number, node_id, reason)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Update identity alongside the activity rows and checkpoint in a caller-owned transaction.
+pub(crate) fn store_identity_on(
+    conn: &rusqlite::Connection,
+    repository_id: i64,
+    github_repository_id: &str,
+    kind: &str,
+    number: i64,
+    node_id: Option<&str>,
+    reason: Option<&str>,
+) -> AppResult<()> {
     match kind {
         "pr" => {
-            tx.execute(
+            conn.execute(
                 "UPDATE pull_requests SET node_id=?1 WHERE repository_id=?2 AND number=?3",
                 params![node_id, repository_id, number],
             )?;
         }
         "issue" => {
-            tx.execute("UPDATE issues SET node_id=?1,completion_reason=?4 WHERE repository_id=?2 AND number=?3", params![node_id, repository_id, number, reason])?;
+            conn.execute("UPDATE issues SET node_id=?1,completion_reason=?4 WHERE repository_id=?2 AND number=?3", params![node_id, repository_id, number, reason])?;
         }
         _ => return Err(AppError::InvalidArgument("Unknown work item kind".into())),
     }
     if node_id.is_some_and(|id| !id.is_empty()) {
         let fallback = item_key(github_repository_id, kind, number, None);
         let stable = item_key(github_repository_id, kind, number, node_id);
-        tx.execute(
+        conn.execute(
             "INSERT OR IGNORE INTO kanban_item_metadata(account_scope,item_key,manual_column,priority,notes,sort_rank,revision,created_at,updated_at)
              SELECT account_scope,?2,manual_column,priority,notes,sort_rank,revision,created_at,updated_at
              FROM kanban_item_metadata WHERE item_key=?1",
             params![fallback, stable],
         )?;
-        tx.execute(
+        conn.execute(
             "DELETE FROM kanban_item_metadata WHERE item_key=?1",
             params![fallback],
         )?;
     }
-    tx.commit()?;
     Ok(())
 }
 

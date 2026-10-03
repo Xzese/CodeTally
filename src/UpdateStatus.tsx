@@ -13,9 +13,9 @@ const CHECK_INTERVALS: Record<Exclude<UpdateCheckInterval, 'never'>, number> = {
 // Split monthly waits so they cannot turn into a rapid polling loop.
 const MAX_TIMER_DELAY = 2_147_483_647
 
-type Props = { updateCheckInterval?: UpdateCheckInterval | null }
+type Props = { updateCheckInterval?: UpdateCheckInterval | null; placement?: 'topbar' | 'rail' }
 
-export default function UpdateStatus({ updateCheckInterval = 'daily' }: Props) {
+export default function UpdateStatus({ updateCheckInterval = 'daily', placement = 'topbar' }: Props) {
   const interval = updateCheckInterval
   const [update, setUpdate] = useState<AppUpdate | null>(null)
   const [checking, setChecking] = useState(false)
@@ -102,9 +102,9 @@ export default function UpdateStatus({ updateCheckInterval = 'daily' }: Props) {
     }
   }
 
-  if (!update?.update_available) return null
+  if (placement !== 'rail' && !update?.update_available) return null
 
-  return <div className={open ? 'update-status active' : 'update-status'} ref={container}
+  return <div className={`update-status${placement === 'rail' ? ' rail-update' : ''}${open ? ' active' : ''}`} ref={container}
     onMouseEnter={() => { dismissed.current = false; setOpen(true) }}
     onMouseLeave={() => { dismissed.current = false; if (!pinned && !container.current?.contains(document.activeElement)) setOpen(false) }}
     onFocusCapture={() => { if (!dismissed.current) setOpen(true) }}
@@ -117,7 +117,8 @@ export default function UpdateStatus({ updateCheckInterval = 'daily' }: Props) {
     onKeyDown={(event) => {
       if (event.key === 'Escape') { dismissed.current = true; setOpen(false); setPinned(false); trigger.current?.focus() }
     }}>
-    <button ref={trigger} type="button" className="button secondary topbar-nav-button update-available"
+    <button ref={trigger} type="button" className={`update-trigger${placement === 'topbar' ? ' button secondary topbar-nav-button' : ''}${update?.update_available ? ' update-available' : ''}`}
+      disabled={interval === null}
       aria-label={update?.update_available ? `Update available: ${update.latest_version}` : 'Updates'}
       title={update?.update_available ? `CodeTally ${update.latest_version} is available` : 'Updates'}
       aria-expanded={open} aria-controls="app-update-panel" onClick={() => {
@@ -131,11 +132,11 @@ export default function UpdateStatus({ updateCheckInterval = 'daily' }: Props) {
           setPinned(true)
         }
       }}>
-      <ArrowUpCircle size={17} />{update?.update_available && <span>Update available</span>}
+      {checking ? <LoaderCircle size={17} className="spin" aria-hidden="true" /> : <ArrowUpCircle size={17} aria-hidden="true" />}{placement === 'topbar' && update?.update_available && <span>Update available</span>}
     </button>
     {open && <section className="update-panel" id="app-update-panel" aria-label="Updates">
       <div className="update-heading"><strong>Updates</strong><button type="button" className="icon-button" aria-label="Close updates" onClick={() => { dismissed.current = true; setOpen(false); setPinned(false); trigger.current?.focus() }}><X size={15} /></button></div>
-      {update ? <div className="update-versions" role="status"><p><span>Current version:</span><strong>{update.current_version}</strong></p><p><span>New version:</span><strong className={!checking && !checkFailed && update.update_available ? 'available' : ''}>{checking ? 'Checking…' : checkFailed ? 'Unavailable' : update.update_available ? update.latest_version : 'No update available'}</strong></p></div> : checking ? <p role="status">Checking for updates…</p> : null}
+      {update ? <div className="update-versions" role="status"><p><span>Current version:</span><strong>{update.current_version}</strong></p><p><span>New version:</span><strong className={!checking && !checkFailed && update.update_available ? 'available' : ''}>{checking ? 'Checking…' : checkFailed ? 'Unavailable' : update.update_available ? update.latest_version : 'No update available'}</strong></p></div> : <p role="status">{checking ? 'Checking for updates…' : 'Updates haven’t been checked yet.'}</p>}
       {error && <p role="alert" className="update-error">{error}</p>}
       <div className="update-actions">{update?.update_available && <button type="button" className="button primary" disabled={installing} onClick={() => void installUpdate()}>{installing ? <LoaderCircle size={14} className="spin" /> : <Download size={14} />}{installing ? 'Installing…' : 'Download update'}</button>}<button type="button" className="button" disabled={checking || installing} onClick={() => void check()}>{checking && <LoaderCircle size={14} className="spin" />}{checking ? 'Checking…' : 'Check for updates'}</button></div>
     </section>}

@@ -1,7 +1,7 @@
 use crate::classify::month_sample_dates;
-use crate::db::Database;
+use crate::db::{DashboardCache, Database};
 use crate::error::{AppError, AppResult};
-use crate::gitops::{commit_at_or_before, current_commit, current_commit_optional, earliest_commit, ensure_clone, scan_at_commit_with_config};
+use crate::gitops::{commit_at_or_before_nonempty, current_commit, current_commit_optional, earliest_commit, ensure_clone, scan_at_commit_detached, scan_at_commit_with_config};
 use crate::github;
 use crate::github_sync;
 use crate::models::{AppSettings, Repository, Snapshot, SyncProgress, SyncResult};
@@ -17,6 +17,7 @@ pub struct AppState {
     pub cache_dir: PathBuf,
     pub progress: Arc<Mutex<SyncProgress>>,
     pub job_lock: Arc<Mutex<()>>,
+    pub dashboard_cache: Arc<Mutex<DashboardCache>>,
 }
 
 pub const LOC_SWEEP_METADATA_KEY: &str = "last_loc_sweep_at";
@@ -150,6 +151,11 @@ impl AppState {
         Database::new(&self.db_path)
     }
 
+    pub fn dashboard(&self) -> AppResult<Arc<crate::models::Dashboard>> {
+        let mut cache = self.dashboard_cache.lock().map_err(|_| AppError::InvalidArgument("dashboard cache lock poisoned".into()))?;
+        self.database().dashboard_cached(&mut cache)
+    }
+
     pub fn set_progress(&self, progress: SyncProgress) {
         if let Ok(mut current) = self.progress.lock() {
             *current = progress;
@@ -166,26 +172,24 @@ pub fn discover(state: &AppState) -> AppResult<Vec<Repository>> {
     let settings = app_settings(&db)?;
     if !settings.include_personal_repositories && !settings.include_company_repositories { return db.repositories(); }
     github_sync::ensure_available(&db)?;
-    github_sync::graphql(&db, "query{rateLimit{remaining resetAt}}", serde_json::json!({}))?;
+    let (user, mut discovered) = github_sync::discover_owned(&db, settings.include_personal_repositories)?;
     github_sync::ensure_available(&db)?;
-    let user = github_sync::guarded(&db, github::current_user)?;
     db.set_metadata("github_login", &user.login)?;
     db.set_metadata("org_discovery_errors", "")?;
-    let mut discovered = if app_settings(&db)?.include_personal_repositories { github_sync::guarded(&db, || github::list_repositories(&user.login))? } else { Vec::new() };
     let mut org_errors = Vec::new();
-    if app_settings(&db)?.include_company_repositories {
+    if settings.include_company_repositories {
         match github_sync::guarded(&db, github::list_organizations) {
             Ok(organizations) => {
                 for organization in organizations {
                     if !app_settings(&db)?.include_company_repositories { break; }
                     match github_sync::guarded(&db, || github::list_repositories_for_owner(&organization)) {
                         Ok(repositories) => discovered.extend(repositories),
-                        Err(error @ AppError::RateLimited { .. }) => return Err(error),
+                        Err(error @ (AppError::RateLimited { .. } | AppError::Authentication)) => return Err(error),
                         Err(error) => org_errors.push(format!("{organization}: {error}")),
                     }
                 }
             }
-            Err(error @ AppError::RateLimited { .. }) => return Err(error),
+            Err(error @ (AppError::RateLimited { .. } | AppError::Authentication)) => return Err(error),
             Err(error) => org_errors.push(format!("organization discovery: {error}")),
         }
     }
@@ -193,10 +197,9 @@ pub fn discover(state: &AppState) -> AppResult<Vec<Repository>> {
         db.set_metadata("org_discovery_errors", &org_errors.join("\n"))?;
     }
     let mut seen = BTreeSet::new();
-    for repo in discovered.into_iter().filter(|repo| seen.insert(repo.github_id.clone())) {
-        db.upsert_repository(&repo)?;
-        crate::kanban::remember_repository(&db, &repo.github_id)?;
-    }
+    let discovered: Vec<_> = discovered.into_iter().filter(|repo| seen.insert(repo.github_id.clone())).collect();
+    db.upsert_repositories(&discovered)?;
+    for repo in &discovered { crate::kanban::remember_repository(&db, &repo.github_id)?; }
     if org_errors.is_empty() { db.set_metadata("github_discovered_at", &Utc::now().to_rfc3339())?; }
     db.repositories()
 }
@@ -211,16 +214,12 @@ pub fn sync_all(state: &AppState) -> AppResult<SyncResult> {
     let mut result = SyncResult { ok: true, message: "Refresh complete".into(), ..SyncResult::default() };
     state.set_progress(SyncProgress { running: true, phase: "discovering".into(), message: "Discovering repositories".into(), ..SyncProgress::default() });
 
-    if !github::dependency_status().gh_authenticated {
-        result.ok = false;
-        result.message = "GitHub CLI is not authenticated".into();
-        result.errors.push("Run gh auth login, then refresh CodeTally.".into());
-        finish_progress(state, result.errors.first().cloned());
-        return Ok(result);
-    }
-
     let repos = match discover(state) {
         Ok(repos) => repos,
+        Err(AppError::Authentication) => {
+            result.errors.push(AppError::Authentication.to_string());
+            return Ok(finish_authentication_failure(state, result));
+        }
         Err(error) => {
             result.ok = false;
             result.errors.push(error.to_string());
@@ -259,7 +258,7 @@ pub fn sync_all(state: &AppState) -> AppResult<SyncResult> {
         state.database().set_metadata("github_last_attempted_repository", &repo.id.to_string())?;
         state.set_progress(SyncProgress { running: true, phase: "syncing_repository".into(), current: index as i64, total: repository_total, repository_current: index as i64, repository_total, snapshot_current: 0, snapshot_total: 0, repository_name: Some(repo.name_with_owner.clone()), message: format!("Refreshing activity and line counts for {}", repo.name_with_owner), ..SyncProgress::default() });
         match sync_repo_data(state, &repo, true, true) {
-            Ok((prs, issues, snapshots, repo_errors, loc_completed)) => {
+            Ok(RepoSyncOutcome { prs, issues, snapshots, errors: repo_errors, loc_completed, authentication_failed }) => {
                 if repo_errors.is_empty() {
                     result.repositories_synced += 1;
                     result.activity_repositories_synced += 1;
@@ -272,6 +271,7 @@ pub fn sync_all(state: &AppState) -> AppResult<SyncResult> {
                     result.ok = false;
                     result.errors.extend(repo_errors.into_iter().map(|error| format!("{}: {}", repo.name_with_owner, error)));
                 }
+                if authentication_failed { return Ok(finish_authentication_failure(state, result)); }
             }
             Err(AppError::RepositoryUnavailable) => {
                 if settings.kanban_enabled {
@@ -322,18 +322,13 @@ pub fn sync_activity(state: &AppState) -> AppResult<SyncResult> {
     let mut result = SyncResult { ok: true, message: "PR & issue refresh complete".into(), ..SyncResult::default() };
     state.set_progress(SyncProgress { running: true, phase: "discovering_activity".into(), message: "Discovering repositories".into(), ..SyncProgress::default() });
 
-    if !github::dependency_status().gh_authenticated {
-        result.ok = false;
-        result.message = "GitHub CLI is not authenticated".into();
-        result.errors.push("Run gh auth login, then refresh CodeTally.".into());
-        finish_progress(state, result.errors.first().cloned());
-        return Ok(result);
-    }
-
-    let discovery_cache_minutes = settings.activity_refresh_minutes.max(15).min(60);
-    let cached = state.database().metadata("github_discovered_at")?.and_then(|s| s.parse::<DateTime<Utc>>().ok()).is_some_and(|t| Utc::now() - t < Duration::minutes(discovery_cache_minutes));
+    let cached = state.database().metadata("github_discovered_at")?.and_then(|s| s.parse::<DateTime<Utc>>().ok()).is_some_and(|t| Utc::now() - t < Duration::hours(1));
     let repos = match if cached { state.database().repositories() } else { discover(state) } {
         Ok(repos) => repos,
+        Err(AppError::Authentication) => {
+            result.errors.push(AppError::Authentication.to_string());
+            return Ok(finish_authentication_failure(state, result));
+        }
         Err(error) => {
             result.ok = false;
             result.errors.push(error.to_string());
@@ -382,7 +377,7 @@ pub fn sync_activity(state: &AppState) -> AppResult<SyncResult> {
         }
         state.set_progress(SyncProgress { running: true, phase: if decision.run { "syncing_repository" } else { "syncing_activity" }.into(), current: index as i64, total: repository_total, repository_current: index as i64, repository_total, snapshot_current: 0, snapshot_total: 0, repository_name: Some(repo.name_with_owner.clone()), message: if decision.run { format!("Refreshing PRs, issues, and line counts for {}", repo.name_with_owner) } else { format!("Refreshing PRs and issues for {}", repo.name_with_owner) }, ..SyncProgress::default() });
         match sync_repo_data(state, &repo, decision.run, decision.force_fetch) {
-            Ok((prs, issues, snapshots, repo_errors, loc_completed)) => {
+            Ok(RepoSyncOutcome { prs, issues, snapshots, errors: repo_errors, loc_completed, authentication_failed }) => {
                 if repo_errors.is_empty() {
                     result.repositories_synced += 1;
                     result.activity_repositories_synced += 1;
@@ -397,6 +392,7 @@ pub fn sync_activity(state: &AppState) -> AppResult<SyncResult> {
                     result.ok = false;
                     result.errors.extend(repo_errors.into_iter().map(|error| format!("{}: {}", repo.name_with_owner, error)));
                 }
+                if authentication_failed { return Ok(finish_authentication_failure(state, result)); }
             }
             Err(AppError::RepositoryUnavailable) => {
                 if settings.kanban_enabled {
@@ -468,6 +464,13 @@ pub fn sync_work_items(state: &AppState) -> AppResult<SyncResult> {
             .is_some_and(|t| Utc::now() - t < Duration::minutes(settings.activity_refresh_minutes.clamp(15, 60)));
     let repos = match if cached { db.repositories() } else { discover(state) } {
         Ok(repos) => repos,
+        Err(AppError::Authentication) => {
+            result.ok = false;
+            result.message = "GitHub CLI is not authenticated".into();
+            result.errors.push(AppError::Authentication.to_string());
+            finish_work_item_progress(state, result.errors.last().cloned());
+            return Ok(result);
+        }
         Err(error) => { result.ok = false; result.errors.push(format!("Repository discovery: {error}")); db.repositories()? }
     };
     if let Err(error) = github_sync::ensure_available(&db) {
@@ -512,6 +515,11 @@ pub fn sync_work_items(state: &AppState) -> AppResult<SyncResult> {
                 result.ok = false;
                 result.errors.push(format!("{}: {error}",repo.name_with_owner));
                 crate::kanban::record_activity(&db,&repo.github_id,false,Some(&error.to_string()))?;
+                if matches!(error, AppError::Authentication) {
+                    result.message = "GitHub CLI is not authenticated".into();
+                    finish_work_item_progress(state, result.errors.last().cloned());
+                    return Ok(result);
+                }
             }
         }
         let mut progress = state.progress();
@@ -581,6 +589,11 @@ pub fn sync_personal_work_items(state: &AppState) -> AppResult<SyncResult> {
         Err(error) => {
             result.ok = false;
             result.errors.push(error.to_string());
+            if matches!(error, AppError::Authentication) {
+                result.message = "GitHub CLI is not authenticated".into();
+                finish_work_item_progress(state, result.errors.last().cloned());
+                return Ok(result);
+            }
         }
     }
     // The menu bar uses repository totals, which otherwise remain stale until
@@ -638,7 +651,7 @@ pub fn sync_one(state: &AppState, repository_id: i64) -> AppResult<SyncResult> {
     state.set_progress(SyncProgress { running: true, phase: "syncing_repository".into(), current: 0, total: 1, repository_current: 0, repository_total: 1, repository_name: Some(repo.name_with_owner.clone()), message: format!("Refreshing activity and line counts for {}", repo.name_with_owner), ..SyncProgress::default() });
     let mut result = SyncResult { ok: true, message: "Repository refresh complete".into(), ..SyncResult::default() };
     match sync_repo_data(state, &repo, true, true) {
-        Ok((prs, issues, snapshots, repo_errors, loc_completed)) => {
+        Ok(RepoSyncOutcome { prs, issues, snapshots, errors: repo_errors, loc_completed, authentication_failed }) => {
             if repo_errors.is_empty() {
                 result.repositories_synced = 1;
                 result.activity_repositories_synced = 1;
@@ -651,6 +664,7 @@ pub fn sync_one(state: &AppState, repository_id: i64) -> AppResult<SyncResult> {
                 result.ok = false;
                 result.errors.extend(repo_errors);
             }
+            if authentication_failed { return Ok(finish_authentication_failure(state, result)); }
         }
         Err(error) => {
             result.ok = false;
@@ -697,11 +711,28 @@ pub fn backfill_one(state: &AppState, repository_id: i64) -> AppResult<SyncResul
     Ok(result)
 }
 
-fn sync_repo_data(state: &AppState, repo: &Repository, run_loc: bool, force_fetch: bool) -> AppResult<(i64, i64, i64, Vec<String>, bool)> {
+fn finish_authentication_failure(state: &AppState, mut result: SyncResult) -> SyncResult {
+    result.ok = false;
+    result.message = "GitHub CLI is not authenticated".into();
+    finish_progress(state, result.errors.last().cloned());
+    result
+}
+
+struct RepoSyncOutcome {
+    prs: i64,
+    issues: i64,
+    snapshots: i64,
+    errors: Vec<String>,
+    loc_completed: bool,
+    authentication_failed: bool,
+}
+
+fn sync_repo_data(state: &AppState, repo: &Repository, run_loc: bool, force_fetch: bool) -> AppResult<RepoSyncOutcome> {
     let db = state.database();
     github_sync::ensure_available(&db)?;
     let mut counts = [0, 0];
     let mut errors = Vec::new();
+    let mut authentication_failed = false;
     let activity_fetched = match github_sync::sync_activity_reporting(&db, repo, &mut counts) {
         Ok((_, _, complete)) => {
             if app_settings(&db)?.kanban_enabled { crate::kanban::record_activity(&db, &repo.github_id, complete, None)?; }
@@ -718,6 +749,7 @@ fn sync_repo_data(state: &AppState, repo: &Repository, run_loc: bool, force_fetc
         }
         Err(error) => {
             if app_settings(&db)?.kanban_enabled { crate::kanban::record_activity(&db, &repo.github_id, false, Some(&error.to_string()))?; }
+            authentication_failed = matches!(error, AppError::Authentication);
             errors.push(error.to_string()); false
         }
     };
@@ -735,7 +767,7 @@ fn sync_repo_data(state: &AppState, repo: &Repository, run_loc: bool, force_fetc
     }
     let error_text = if errors.is_empty() { None } else { Some(errors.join("; ")) };
     db.mark_sync(repo.id, error_text.as_deref())?;
-    Ok((counts[0], counts[1], snapshots, errors, loc_completed))
+    Ok(RepoSyncOutcome { prs: counts[0], issues: counts[1], snapshots, errors, loc_completed, authentication_failed })
 }
 
 fn sync_loc(state: &AppState, repo: &Repository, force_fetch: bool) -> AppResult<i64> {
@@ -815,45 +847,49 @@ fn backfill_repo(state: &AppState, repo: &Repository) -> AppResult<i64> {
 }
 
 fn backfill_repo_at_path(state: &AppState, repo: &Repository, path: &Path) -> AppResult<i64> {
-    let history_start = earliest_commit(path, &repo.default_branch)?
-        .map(|(_, date)| date)
-        .or_else(|| repo.created_at.clone());
-    let dates = month_sample_dates(history_start.as_deref(), Utc::now());
-    let prior = state.progress();
-    state.set_progress(SyncProgress { running: true, phase: "backfilling".into(), current: prior.current, total: prior.total, repository_current: prior.repository_current, repository_total: prior.repository_total, snapshot_current: 0, snapshot_total: dates.len() as i64, repository_name: Some(repo.name_with_owner.clone()), message: "Selecting monthly commits".into(), ..SyncProgress::default() });
-    let db = state.database();
-    let config = db.classification_config(repo.id)?;
-    let mut created = 0;
-    let mut errors = Vec::new();
-    for (index, sample_date) in dates.iter().enumerate() {
-        state.set_progress(SyncProgress { running: true, phase: "backfilling".into(), current: prior.current, total: prior.total, repository_current: prior.repository_current, repository_total: prior.repository_total, snapshot_current: index as i64, snapshot_total: dates.len() as i64, repository_name: Some(repo.name_with_owner.clone()), message: format!("Analysing snapshot {}/{}", index + 1, dates.len()), ..SyncProgress::default() });
-        let Some((sha, commit_date)) = commit_at_or_before(path, &repo.default_branch, sample_date)? else {
-            let mut progress = state.progress();
-            progress.snapshot_current = index as i64 + 1;
-            state.set_progress(progress);
-            continue;
-        };
-        if db.has_commit_snapshot(repo.id, &sha)? {
-            db.move_snapshot_date_earlier(repo.id, &sha, sample_date)?;
-            let mut progress = state.progress();
-            progress.snapshot_current = index as i64 + 1;
-            state.set_progress(progress);
-            continue;
-        }
-        match scan_at_commit_with_config(path, &sha, &repo.default_branch, Some(&config)) {
-            Ok(scan) => {
-                let snapshot = Snapshot { id: 0, repository_id: repo.id, commit_sha: sha, commit_date, snapshot_date: sample_date.clone(), total_loc: scan.total_loc, source_loc: scan.source_loc, test_loc: scan.test_loc, created_at: Utc::now().to_rfc3339() };
-                if db.upsert_snapshot(&snapshot)? { created += 1; }
+    let result = (|| {
+        let history_start = earliest_commit(path, &repo.default_branch)?
+            .map(|(_, date)| date)
+            .or_else(|| repo.created_at.clone());
+        let dates = month_sample_dates(history_start.as_deref(), Utc::now());
+        let prior = state.progress();
+        state.set_progress(SyncProgress { running: true, phase: "backfilling".into(), current: prior.current, total: prior.total, repository_current: prior.repository_current, repository_total: prior.repository_total, snapshot_current: 0, snapshot_total: dates.len() as i64, repository_name: Some(repo.name_with_owner.clone()), message: "Selecting monthly commits".into(), ..SyncProgress::default() });
+        let db = state.database();
+        let config = db.classification_config(repo.id)?;
+        let mut created = 0;
+        let mut errors = Vec::new();
+        for (index, sample_date) in dates.iter().enumerate() {
+            state.set_progress(SyncProgress { running: true, phase: "backfilling".into(), current: prior.current, total: prior.total, repository_current: prior.repository_current, repository_total: prior.repository_total, snapshot_current: index as i64, snapshot_total: dates.len() as i64, repository_name: Some(repo.name_with_owner.clone()), message: format!("Analysing snapshot {}/{}", index + 1, dates.len()), ..SyncProgress::default() });
+            let Some((sha, commit_date)) = commit_at_or_before_nonempty(path, &repo.default_branch, sample_date)? else {
+                let mut progress = state.progress();
+                progress.snapshot_current = index as i64 + 1;
+                state.set_progress(progress);
+                continue;
+            };
+            if db.has_commit_snapshot(repo.id, &sha)? {
+                db.move_snapshot_date_earlier(repo.id, &sha, sample_date)?;
+                let mut progress = state.progress();
+                progress.snapshot_current = index as i64 + 1;
+                state.set_progress(progress);
+                continue;
             }
-            Err(error) => errors.push(error.to_string()),
+            match scan_at_commit_detached(path, &sha, Some(&config)) {
+                Ok(scan) => {
+                    let snapshot = Snapshot { id: 0, repository_id: repo.id, commit_sha: sha, commit_date, snapshot_date: sample_date.clone(), total_loc: scan.total_loc, source_loc: scan.source_loc, test_loc: scan.test_loc, created_at: Utc::now().to_rfc3339() };
+                    if db.upsert_snapshot(&snapshot)? { created += 1; }
+                }
+                Err(error) => errors.push(error.to_string()),
+            }
+            let mut progress = state.progress();
+            progress.snapshot_current = index as i64 + 1;
+            state.set_progress(progress);
         }
-        let mut progress = state.progress();
-        progress.snapshot_current = index as i64 + 1;
-        state.set_progress(progress);
-    }
-    if let Err(error) = crate::gitops::checkout_branch(path, &repo.default_branch) { errors.push(error.to_string()); }
-    if let Some(error) = errors.first() { return Err(AppError::Command { program: "tokei".into(), message: error.clone() }); }
-    Ok(created)
+        if let Some(error) = errors.first() { return Err(AppError::Command { program: "tokei".into(), message: error.clone() }); }
+        Ok(created)
+    })();
+    // Restore even when selecting a commit, saving a sample, or scanning fails.
+    let restored = crate::gitops::checkout_branch(path, &repo.default_branch);
+    result.and_then(|created| restored.map(|_| created))
 }
 
 fn finish_progress(state: &AppState, error: Option<String>) {
