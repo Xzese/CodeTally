@@ -94,6 +94,11 @@ function App() {
   const [feedState, setFeedState] = useState<FeedState>('open')
   const [feedRepo, setFeedRepo] = useState('all')
   const [feedRevision, setFeedRevision] = useState(0)
+  const [feedPending, setFeedPending] = useState(false)
+  const overviewRef = useRef<HTMLElement>(null)
+  useLayoutEffect(() => {
+    if (screen === 'dashboard' && overviewRef.current) overviewRef.current.scrollTop = 0
+  }, [screen])
   const [metric, setMetric] = useState<'total' | 'source' | 'tests'>('total')
   const [repoSort, setRepoSort] = useState<RepoSort>('loc')
   const [repoSortDirection, setRepoSortDirection] = useState<'asc' | 'desc'>('desc')
@@ -150,6 +155,7 @@ function App() {
   const startupRef = useRef(false)
   const feedRequestRef = useRef(0)
   const feedLoadingRef = useRef({ prs: false, issues: false })
+  const feedCacheRef = useRef<{ prs?: { query: string; items: PullRequest[] }; issues?: { query: string; items: Issue[] } }>({})
   const lastActiveProgressRef = useRef<SyncProgress | null>(null)
   const cachedRefreshRef = useRef(false)
   const cachedRefreshVersionRef = useRef(0)
@@ -586,8 +592,12 @@ function App() {
     const requestId = ++feedRequestRef.current
     let alive = true
     const kinds: FeedKind[] = feedKind === 'all' ? ['prs', 'issues'] : [feedKind]
+    const query = JSON.stringify([feedState, feedRepo, feedRelationship, feedRepositoryIdsKey, login])
+    const cachedPrs = feedCacheRef.current.prs
+    const cachedIssues = feedCacheRef.current.issues
     for (const kind of kinds) feedLoadingRef.current[kind] = true
-    setDashboard((current) => ({ ...current, ...(kinds.includes('prs') ? { pull_requests: [] } : {}), ...(kinds.includes('issues') ? { issues: [] } : {}) }))
+    setFeedPending(true)
+    setDashboard((current) => ({ ...current, ...(kinds.includes('prs') ? { pull_requests: cachedPrs?.query === query ? cachedPrs.items : [] } : {}), ...(kinds.includes('issues') ? { issues: cachedIssues?.query === query ? cachedIssues.items : [] } : {}) }))
     void Promise.allSettled(kinds.map((kind) => getActivityFeed({ kind, state: feedState, repositoryId: backendRepositoryId(feedRepo), relationship: feedRelationship, ...(groupedFeedScope ? { repositoryIds: JSON.parse(feedRepositoryIdsKey) as number[] } : {}) }))).then((results) => {
       if (!alive || requestId !== feedRequestRef.current) return
       const updates: { pull_requests?: PullRequest[]; issues?: Issue[] } = {}
@@ -595,16 +605,25 @@ function App() {
       results.forEach((result, index) => {
         const kind = kinds[index]
         feedLoadingRef.current[kind] = false
-        if (kind === 'prs') updates.pull_requests = result.status === 'fulfilled' ? result.value as PullRequest[] : []
-        else updates.issues = result.status === 'fulfilled' ? result.value as Issue[] : []
+        if (kind === 'prs') {
+          updates.pull_requests = result.status === 'fulfilled' ? reuseUnchangedRecords(cachedPrs?.items ?? [], result.value as PullRequest[]) : cachedPrs?.query === query ? cachedPrs.items : []
+          if (result.status === 'fulfilled') feedCacheRef.current.prs = { query, items: updates.pull_requests }
+        } else {
+          updates.issues = result.status === 'fulfilled' ? reuseUnchangedRecords(cachedIssues?.items ?? [], result.value as Issue[]) : cachedIssues?.query === query ? cachedIssues.items : []
+          if (result.status === 'fulfilled') feedCacheRef.current.issues = { query, items: updates.issues }
+        }
         if (result.status === 'rejected') errors.push(`Couldn't load ${kind === 'prs' ? 'pull requests' : 'issues'}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`)
       })
       setDashboard((current) => ({ ...current, ...updates }))
+      setFeedPending(false)
       if (errors.length) setError(errors.join(' '))
     })
     return () => {
       alive = false
-      if (requestId === feedRequestRef.current) for (const kind of kinds) feedLoadingRef.current[kind] = false
+      if (requestId === feedRequestRef.current) {
+        for (const kind of kinds) feedLoadingRef.current[kind] = false
+        setFeedPending(false)
+      }
     }
   }, [busy, feedKind, feedRelationship, feedRepo, feedRevision, feedState, groupedFeedScope, feedRepositoryIdsKey, settingsLoaded, login])
 
@@ -707,9 +726,7 @@ function App() {
   const navigate = (destination: string) => {
     if (destination === 'kanban') { setScreen('kanban'); return }
     backToDashboard()
-    requestAnimationFrame(() => {
-      document.querySelector('.page-heading')?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })
-    })
+    if (overviewRef.current) overviewRef.current.scrollTop = 0
   }
   const navItems = [
     { key: 'overview', label: 'Overview', icon: Home, aria: screen === 'kanban' ? 'Back to dashboard' : 'Overview' },
@@ -765,7 +782,7 @@ function App() {
       {busy && !dashboard.repositories.length ? <LoadingScreen /> : isSetup ? <SetupScreen deps={deps} login={login} error={error} importing={importing} importStep={importStep} checking={checkingDependencies} onImport={() => void importRepositories()} onRetry={checkSetupConnection} /> : (
         <div className={screen === 'kanban' && appSettings.kanban_enabled ? 'content-shell kanban-shell' : `content-shell${feedOpen ? '' : ' feed-collapsed'}`}>
           {screen === 'kanban' && appSettings.kanban_enabled ? <KanbanBoard repositories={activeRepositories} login={login} relationship={feedRelationship} onRelationship={handleFeedRelationship} onBack={backToDashboard} onActivityRefreshed={refreshPersonalCache} syncBusy={syncActive} revision={feedRevision} /> : screen === 'dashboard' ? (
-            <main className="main-column">
+            <main ref={overviewRef} className="main-column overview-column">
               {deps.gh && !dependenciesAuthenticated(deps) && <GitHubConnection deps={deps} login={login} compact checking={checkingDependencies} onRetry={checkSetupConnection} />}
               {activeRepositories.length === 0 ? <EmptySelectionState onOpenSettings={() => setSettingsOpen(true)} /> : <>
                 <div className="page-heading"><div><p className="eyebrow">Your repositories</p><h1>Code at a glance</h1><p className="page-subtitle">Here’s what’s happening across your code.</p></div><span className="overview-period"><CircleDot size={12} /> Local overview</span></div>
@@ -778,7 +795,7 @@ function App() {
             <RepositoryDetails repo={selectedRepo} history={visibleHistory} historyLoading={detailLoading} metric={metric} range={range} onMetric={setMetric} onRange={setRange} onBack={backToDashboard} pullRequests={detailPrs} issues={detailIssues} onOpenUrl={handleOpenUrl} />
           ) : null}
           {screen !== 'kanban' && narrowFeed && <button className="activity-backdrop" type="button" aria-label="Close activity sidebar" aria-hidden={!feedOpen} tabIndex={feedOpen ? 0 : -1} onClick={() => setNarrowFeedOpen(false)} />}
-          {screen !== 'kanban' && <ActivitySidebar hidden={!feedOpen} asOf={feedRelationship === 'everyone' ? dashboard.last_activity_refresh_at : dashboard.last_personal_refresh_at} onActivityRefreshed={refreshPersonalCache} syncBusy={syncActive} activityProgress={syncProgress} login={login} kind={feedKind} state={feedState} relationship={feedRelationship} repository={feedRepo} lockedRepository={screen === 'detail' && selectedRepo ? String(repositoryId(selectedRepo)) : null} repositories={activeRepositories} prs={filteredPrs} issues={filteredIssues} onKind={handleFeedKind} onState={handleFeedState} onRelationship={handleFeedRelationship} onRepository={handleFeedRepository} onOpenUrl={handleOpenUrl} />}
+          {screen !== 'kanban' && <ActivitySidebar loading={feedPending} hidden={!feedOpen} asOf={feedRelationship === 'everyone' ? dashboard.last_activity_refresh_at : dashboard.last_personal_refresh_at} onActivityRefreshed={refreshPersonalCache} syncBusy={syncActive} activityProgress={syncProgress} login={login} kind={feedKind} state={feedState} relationship={feedRelationship} repository={feedRepo} lockedRepository={screen === 'detail' && selectedRepo ? String(repositoryId(selectedRepo)) : null} repositories={activeRepositories} prs={filteredPrs} issues={filteredIssues} onKind={handleFeedKind} onState={handleFeedState} onRelationship={handleFeedRelationship} onRepository={handleFeedRepository} onOpenUrl={handleOpenUrl} />}
         </div>
       )}
 
@@ -998,7 +1015,7 @@ function detailChangeValue(repo: Repository): string {
   return repoLocAvailable(repo) && repoBaseline30Available(repo) ? formatSigned(repoChange(repo), true) : '—'
 }
 
-const ActivitySidebar = memo(function ActivitySidebar({ hidden, asOf, onActivityRefreshed, syncBusy, activityProgress, login, kind, state, relationship, repository, lockedRepository, repositories, prs, issues, onKind, onState, onRelationship, onRepository, onOpenUrl }: { hidden: boolean; asOf?: string | null; onActivityRefreshed: () => void; syncBusy: boolean; activityProgress: SyncProgress | null; login: string; kind: ActivityView; state: FeedState; relationship: ActivityRelationship; repository: string; lockedRepository?: string | null; repositories: Repository[]; prs: PullRequest[]; issues: Issue[]; onKind: (kind: ActivityView) => void; onState: (state: FeedState) => void; onRelationship: (relationship: ActivityRelationship) => void; onRepository: (repository: string) => void; onOpenUrl: (url: string | undefined) => void }) {
+const ActivitySidebar = memo(function ActivitySidebar({ loading, hidden, asOf, onActivityRefreshed, syncBusy, activityProgress, login, kind, state, relationship, repository, lockedRepository, repositories, prs, issues, onKind, onState, onRelationship, onRepository, onOpenUrl }: { loading: boolean; hidden: boolean; asOf?: string | null; onActivityRefreshed: () => void; syncBusy: boolean; activityProgress: SyncProgress | null; login: string; kind: ActivityView; state: FeedState; relationship: ActivityRelationship; repository: string; lockedRepository?: string | null; repositories: Repository[]; prs: PullRequest[]; issues: Issue[]; onKind: (kind: ActivityView) => void; onState: (state: FeedState) => void; onRelationship: (relationship: ActivityRelationship) => void; onRepository: (repository: string) => void; onOpenUrl: (url: string | undefined) => void }) {
   const sidebarRef = useRef<HTMLElement>(null)
   useEffect(() => { if (sidebarRef.current) sidebarRef.current.inert = hidden }, [hidden])
   const [compactPullRequestLabel, setCompactPullRequestLabel] = useState(true)
@@ -1047,7 +1064,28 @@ const ActivitySidebar = memo(function ActivitySidebar({ hidden, asOf, onActivity
     })
   }, [kind, prs, issues])
   const selectedRepository = lockedRepository ?? repository
-  return <aside id="activity-sidebar" ref={sidebarRef} className="activity-sidebar" aria-hidden={hidden}><div className="sidebar-sticky"><div className="sidebar-heading"><div><p className="eyebrow">Live feed <span className="feed-count">{feed.length}</span></p><h2>Recent activity</h2></div><button className="button primary compact activity-refresh-button" disabled={syncBusy || refreshing} title="Refresh your authored and assigned PRs and issues in tracked repositories without scanning lines of code" onClick={() => void refreshActivity()}>{refreshing ? 'Refreshing…' : 'Refresh Tickets'}</button></div><p className="activity-as-of" title={exactDate(effectiveAsOf)}>{relationship === 'everyone' ? 'All tracked activity' : 'Personal activity'} · As of {effectiveAsOf ? relativeTime(effectiveAsOf) : 'Not recorded'}</p>{refreshing || refreshMessage ? <p className="small-note" role="status">{refreshing && activityProgress?.phase.includes('work_items') ? activityProgress.message : refreshMessage}</p> : null}{refreshError && <p className="activity-refresh-error" role="alert">{refreshError}</p>}<div className="feed-tabs" role="tablist" aria-label="Activity type"><button className={kind === 'all' ? 'active' : ''} aria-label="Pull requests and issues" aria-pressed={kind === 'all'} onClick={() => onKind('all')}>All</button><button className={kind === 'prs' ? 'active' : ''} aria-label="Pull requests" title="Pull requests" onClick={() => onKind('prs')}><GitPullRequest size={14} aria-hidden="true" /><span aria-hidden="true">{compactPullRequestLabel ? 'PRs' : 'Pull requests'}</span></button><button className={kind === 'issues' ? 'active' : ''} onClick={() => onKind('issues')}><CircleDot size={14} aria-hidden="true" />Issues</button></div><div className="feed-filters"><div className="filter-pills">{(['all', 'open', 'closed'] as FeedState[]).map((key) => <button key={key} className={state === key ? 'active' : ''} onClick={() => onState(key)}>{key[0].toUpperCase() + key.slice(1)}</button>)}</div><ActivityInvolvementFilter id="activity-involvement-select" value={relationship} onChange={onRelationship} /><ActivityRepositoryMenu repositories={repositories} login={login} value={selectedRepository} disabled={Boolean(lockedRepository)} onChange={onRepository} /></div></div><div className="feed-list">{feed.length ? feed.map((entry) => entry.kind === 'prs' ? <PullRequestItem key={`pr-${activityRepo(entry.item)}-${entry.item.number}`} item={entry.item} onOpen={() => onOpenUrl(entry.item.url)} /> : <IssueItem key={`issue-${activityRepo(entry.item)}-${entry.item.number}`} item={entry.item} onOpen={() => onOpenUrl(entry.item.url)} />) : <div className="feed-empty"><CircleDot size={21} /><p>No {kind === 'all' ? 'pull requests or issues' : kind === 'prs' ? 'pull requests' : 'issues'} match these filters</p><span>Activity will appear here after the next refresh.</span></div>}</div></aside>
+  const feedListRef = useRef<HTMLDivElement>(null)
+  const feedPositionsRef = useRef(new Map<string, number>())
+  const filterSelection = JSON.stringify([kind, state, relationship, selectedRepository])
+  const previousFilterSelectionRef = useRef(filterSelection)
+  useLayoutEffect(() => {
+    const positions = new Map<string, number>()
+    const changingFilters = previousFilterSelectionRef.current !== filterSelection
+    previousFilterSelectionRef.current = filterSelection
+    const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+    feedListRef.current?.querySelectorAll<HTMLButtonElement>('[data-activity-key]').forEach((item) => {
+      const key = item.dataset.activityKey!
+      const top = item.offsetTop
+      const previousTop = feedPositionsRef.current.get(key)
+      positions.set(key, top)
+      if (!reducedMotion && item.animate && previousTop !== undefined && (previousTop !== top || changingFilters)) {
+        item.getAnimations().forEach((animation) => animation.cancel())
+        item.animate([{ transform: `translateY(${previousTop - top}px)`, opacity: changingFilters ? .7 : 1 }, { transform: 'translateY(0)', opacity: 1 }], { duration: 180, easing: 'cubic-bezier(.2,.8,.2,1)' })
+      }
+    })
+    feedPositionsRef.current = positions
+  }, [feed, filterSelection])
+  return <aside id="activity-sidebar" ref={sidebarRef} className="activity-sidebar" aria-hidden={hidden}><div className="sidebar-sticky"><div className="sidebar-heading"><div><p className="eyebrow">Live feed <span className="feed-count">{feed.length}</span></p><h2>Recent activity</h2></div><button className="button primary compact activity-refresh-button" disabled={syncBusy || refreshing} title="Refresh your authored and assigned PRs and issues in tracked repositories without scanning lines of code" onClick={() => void refreshActivity()}>{refreshing ? 'Refreshing…' : 'Refresh Tickets'}</button></div><p className="activity-as-of" title={exactDate(effectiveAsOf)}>{relationship === 'everyone' ? 'All tracked activity' : 'Personal activity'} · As of {effectiveAsOf ? relativeTime(effectiveAsOf) : 'Not recorded'}</p>{refreshing || refreshMessage ? <p className="small-note" role="status">{refreshing && activityProgress?.phase.includes('work_items') ? activityProgress.message : refreshMessage}</p> : null}{refreshError && <p className="activity-refresh-error" role="alert">{refreshError}</p>}<div className="feed-tabs" role="tablist" aria-label="Activity type"><button className={kind === 'all' ? 'active' : ''} aria-label="Pull requests and issues" aria-pressed={kind === 'all'} onClick={() => onKind('all')}>All</button><button className={kind === 'prs' ? 'active' : ''} aria-label="Pull requests" title="Pull requests" onClick={() => onKind('prs')}><GitPullRequest size={14} aria-hidden="true" /><span aria-hidden="true">{compactPullRequestLabel ? 'PRs' : 'Pull requests'}</span></button><button className={kind === 'issues' ? 'active' : ''} onClick={() => onKind('issues')}><CircleDot size={14} aria-hidden="true" />Issues</button></div><div className="feed-filters"><div className="filter-pills">{(['all', 'open', 'closed'] as FeedState[]).map((key) => <button key={key} className={state === key ? 'active' : ''} onClick={() => onState(key)}>{key[0].toUpperCase() + key.slice(1)}</button>)}</div><ActivityInvolvementFilter id="activity-involvement-select" value={relationship} onChange={onRelationship} /><ActivityRepositoryMenu repositories={repositories} login={login} value={selectedRepository} disabled={Boolean(lockedRepository)} onChange={onRepository} /></div></div><div ref={feedListRef} className="feed-list" aria-busy={loading}>{feed.length ? feed.map((entry) => entry.kind === 'prs' ? <PullRequestItem key={`pr-${activityRepo(entry.item)}-${entry.item.number}`} item={entry.item} onOpen={() => onOpenUrl(entry.item.url)} /> : <IssueItem key={`issue-${activityRepo(entry.item)}-${entry.item.number}`} item={entry.item} onOpen={() => onOpenUrl(entry.item.url)} />) : <div className="feed-empty"><CircleDot size={21} /><p>{loading ? 'Loading activity…' : <>No {kind === 'all' ? 'pull requests or issues' : kind === 'prs' ? 'pull requests' : 'issues'} match these filters</>}</p><span>{loading ? 'Reading your saved tickets.' : 'Activity will appear here after the next refresh.'}</span></div>}</div></aside>
 })
 
 function PullRequestItem({ item, onOpen }: { item: PullRequest; onOpen: () => void }) {
@@ -1056,7 +1094,7 @@ function PullRequestItem({ item, onOpen }: { item: PullRequest; onOpen: () => vo
   const ciState = String(item.ci_state ?? item.ciState ?? '').toLowerCase()
   const CiIcon = ciState === 'success' ? Check : ciState === 'failure' ? X : ciState === 'pending' ? LoaderCircle : null
   const ActivityIcon = state === 'MERGED' ? CircleCheck : GitPullRequest
-  return <button className="feed-item" onClick={onOpen}><span className={`feed-item-icon pr-${state.toLowerCase()}`}><ActivityIcon size={24} aria-hidden="true" /></span><div className="feed-item-content"><div className="feed-item-top"><span className="feed-repo">{activityRepo(item) || 'Repository'} <b>#{item.number}</b></span><ExternalLink size={13} /></div><strong className="feed-title">{item.title}</strong><div className="feed-meta"><span className={`badge ${state.toLowerCase()}`}>{state}</span><span title={exactDate(date)}>{relativeTime(date)}</span></div><div className="feed-detail"><span className="diff positive">+{formatCount(item.additions ?? 0)}</span><span className="diff negative">−{formatCount(item.deletions ?? 0)}</span><span>{item.changed_files ?? item.changedFiles ?? 0} files</span>{CiIcon ? <span className={`ci-state ${ciState}`}><CiIcon size={12} className={ciState === 'pending' ? 'spin' : ''} /> Checks {ciState}</span> : null}</div></div></button>
+  return <button className="feed-item" data-activity-key={`pr-${activityRepo(item)}-${item.number}`} onClick={onOpen}><span className={`feed-item-icon pr-${state.toLowerCase()}`}><ActivityIcon size={24} aria-hidden="true" /></span><div className="feed-item-content"><div className="feed-item-top"><span className="feed-repo">{activityRepo(item) || 'Repository'} <b>#{item.number}</b></span><ExternalLink size={13} /></div><strong className="feed-title">{item.title}</strong><div className="feed-meta"><span className={`badge ${state.toLowerCase()}`}>{state}</span><span title={exactDate(date)}>{relativeTime(date)}</span></div><div className="feed-detail"><span className="diff positive">+{formatCount(item.additions ?? 0)}</span><span className="diff negative">−{formatCount(item.deletions ?? 0)}</span><span>{item.changed_files ?? item.changedFiles ?? 0} files</span>{CiIcon ? <span className={`ci-state ${ciState}`}><CiIcon size={12} className={ciState === 'pending' ? 'spin' : ''} /> Checks {ciState}</span> : null}</div></div></button>
 }
 
 function IssueItem({ item, onOpen }: { item: Issue; onOpen: () => void }) {
@@ -1064,7 +1102,7 @@ function IssueItem({ item, onOpen }: { item: Issue; onOpen: () => void }) {
   const date = item.updated_at ?? item.updatedAt ?? item.created_at ?? item.createdAt
   const labels = normalizeLabels(item.labels, item.labels_json ?? item.labelsJson)
   const ActivityIcon = state === 'CLOSED' ? CircleCheck : CircleDot
-  return <button className="feed-item issue-item" onClick={onOpen}><span className={`feed-item-icon issue-${state.toLowerCase()}`}><ActivityIcon size={24} aria-hidden="true" /></span><div className="feed-item-content"><div className="feed-item-top"><span className="feed-repo">{activityRepo(item) || 'Repository'} <b>#{item.number}</b></span><ExternalLink size={13} /></div><strong className="feed-title">{item.title}</strong><div className="feed-meta"><span className={`badge ${state.toLowerCase()}`}>{state}</span><span title={exactDate(date)}>Updated {relativeTime(date)}</span></div>{labels.length ? <div className="label-row">{labels.slice(0, 4).map((label) => <span key={label}>{label}</span>)}</div> : null}</div></button>
+  return <button className="feed-item issue-item" data-activity-key={`issue-${activityRepo(item)}-${item.number}`} onClick={onOpen}><span className={`feed-item-icon issue-${state.toLowerCase()}`}><ActivityIcon size={24} aria-hidden="true" /></span><div className="feed-item-content"><div className="feed-item-top"><span className="feed-repo">{activityRepo(item) || 'Repository'} <b>#{item.number}</b></span><ExternalLink size={13} /></div><strong className="feed-title">{item.title}</strong><div className="feed-meta"><span className={`badge ${state.toLowerCase()}`}>{state}</span><span title={exactDate(date)}>Updated {relativeTime(date)}</span></div>{labels.length ? <div className="label-row">{labels.slice(0, 4).map((label) => <span key={label}>{label}</span>)}</div> : null}</div></button>
 }
 
 const RepositoryDetails = memo(function RepositoryDetails({ repo, history, historyLoading, metric, range, onMetric, onRange, onBack, pullRequests, issues, onOpenUrl }: { repo: Repository; history: { date: string; timestamp: number; total: number; source: number; tests: number }[]; historyLoading: boolean; metric: 'total' | 'source' | 'tests'; range: TimeRange; onMetric: (metric: 'total' | 'source' | 'tests') => void; onRange: (range: TimeRange) => void; onBack: () => void; pullRequests: PullRequest[]; issues: Issue[]; onOpenUrl: (url: string | undefined) => void }) {

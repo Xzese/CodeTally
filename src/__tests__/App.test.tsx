@@ -455,12 +455,19 @@ describe('dashboard UI', () => {
     const navigation = screen.getByRole('navigation', { name: 'Main navigation' })
     expect(within(navigation).getAllByRole('button')).toHaveLength(2)
     expect(within(navigation).getByRole('button', { name: 'Overview' })).toHaveAttribute('aria-current', 'page')
+    screen.getByRole('main').scrollTop = 160
     await user.click(within(navigation).getByRole('button', { name: /Kanban Board/ }))
     await screen.findByRole('heading', { name: 'Kanban' })
     expect(within(navigation).getByRole('button', { name: /Kanban Board/ })).toHaveAttribute('aria-current', 'page')
     expect(screen.getAllByRole('button', { name: 'Back to dashboard' })).toHaveLength(1)
     expect(within(navigation).getByRole('button', { name: 'Back to dashboard' })).toBeInTheDocument()
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('get_kanban_page', expect.objectContaining({ kind: 'prs' })))
+    screen.getByRole('main').scrollTop = 90
+    await user.click(within(navigation).getByRole('button', { name: 'Back to dashboard' }))
+    expect(await screen.findByRole('heading', { name: 'Code at a glance' })).toBeInTheDocument()
+    expect(screen.getByRole('main').scrollTop).toBe(0)
+    await user.click(within(navigation).getByRole('button', { name: /Kanban Board/ }))
+    await screen.findByRole('heading', { name: 'Kanban' })
     await user.click(screen.getByTitle('Settings'))
     await user.click(screen.getByRole('switch', { name: 'Enable Kanban board' }))
     await user.click(screen.getByRole('button', { name: 'Close settings' }))
@@ -642,7 +649,8 @@ describe('dashboard UI', () => {
   it('switches between PR and issue feeds and applies state and repository filters', async () => {
     const closedPr: PullRequest = { ...prs[1], number: 9, title: 'Close unused beta experiment', state: 'CLOSED', merged_at: null, updated_at: '2026-09-08T16:00:00Z' }
     const nativeMergedPr: PullRequest = { ...prs[1], state: 'MERGED' }
-    configureBackend({ activityFeed: (kind) => kind === 'issues' ? issues : [prs[0], nativeMergedPr, closedPr] })
+    let pendingPrFeed: Promise<PullRequest[]> | undefined
+    configureBackend({ activityFeed: (kind) => kind === 'issues' ? issues : pendingPrFeed ?? [prs[0], nativeMergedPr, closedPr] })
     const user = await renderDashboard()
     const sidebar = () => screen.getByRole('heading', { name: 'Recent activity' }).closest('aside') as HTMLElement
 
@@ -700,6 +708,26 @@ describe('dashboard UI', () => {
     expect(screen.getByText('Beta issue')).toBeInTheDocument()
     expect(screen.queryByText('Fix alpha flow')).not.toBeInTheDocument()
     expect(screen.queryByText('Alpha issue')).not.toBeInTheDocument()
+    await user.click(within(sidebar()).getByRole('button', { name: 'Open' }))
+    await waitFor(() => expect(sidebar().querySelector('.feed-list')).toHaveAttribute('aria-busy', 'false'))
+    const cachedRow = within(sidebar()).getByRole('button', { name: /Fix alpha flow/ })
+    const refresh = deferred<PullRequest[]>()
+    pendingPrFeed = refresh.promise
+    await user.click(within(sidebar()).getByRole('button', { name: 'Pull requests' }))
+    expect(sidebar().querySelector('.feed-list')).toHaveAttribute('aria-busy', 'true')
+    expect(within(sidebar()).getByRole('button', { name: /Fix alpha flow/ })).toBe(cachedRow)
+    expect(within(sidebar()).queryByText('Loading activity…')).not.toBeInTheDocument()
+    refresh.resolve([prs[0], nativeMergedPr, closedPr])
+    await waitFor(() => expect(sidebar().querySelector('.feed-list')).toHaveAttribute('aria-busy', 'false'))
+    expect(within(sidebar()).getByRole('button', { name: /Fix alpha flow/ })).toBe(cachedRow)
+
+    const newScope = deferred<PullRequest[]>()
+    pendingPrFeed = newScope.promise
+    await user.selectOptions(within(sidebar()).getByRole('combobox', { name: 'My involvement' }), 'assignee')
+    expect(within(sidebar()).queryByText('Fix alpha flow')).not.toBeInTheDocument()
+    expect(within(sidebar()).getByText('Loading activity…')).toBeInTheDocument()
+    newScope.resolve([{ ...prs[0], title: 'Assigned alpha task' }])
+    expect(await within(sidebar()).findByText('Assigned alpha task')).toBeInTheDocument()
   })
 
   it('groups activity scopes and sends owner repository ids while retaining the scope across tabs', async () => {

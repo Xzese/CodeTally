@@ -219,6 +219,12 @@ td:first-child { padding-left: 18px; }
 .select-wrap > svg:last-child { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); pointer-events: none; }
 .select-wrap:focus-within { outline: 2px solid var(--blue); outline-offset: 2px; }
 .feed-list { padding: 5px 10px 35px; }
+.feed-list, .overview-column { overflow-anchor: none; }
+.feed-list > .feed-item, .feed-list > .feed-empty { animation: activity-item-enter 180ms ease-out; }
+@keyframes activity-item-enter {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
 .feed-item { width: 100%; border: 0; border-bottom: 1px solid var(--line); padding: 15px 7px 14px; display: block; text-align: left; background: transparent; cursor: pointer; }
 .feed-item:hover { background: var(--panel-hover); }
 .feed-item-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--muted); font-size: 10px; }
@@ -816,6 +822,7 @@ body.kanban-drag-active, body.kanban-drag-active * { cursor: grabbing !important
 }
 @media (prefers-reduced-motion: reduce) {
   .content-shell, .activity-sidebar, .activity-backdrop { transition: none !important; }
+  .feed-list > .feed-item, .feed-list > .feed-empty { animation: none; }
 }
 
 /* Workspace navigation and compact dashboard cards. */
