@@ -1567,6 +1567,12 @@ fn activity_feeds_sort_newest_first_and_apply_state_and_repository_filters() {
     assert_eq!(database.pull_requests(Some(repo_a), Some("OPEN"), 10).expect("repo/state PR filter").len(), 1);
     assert!(database.pull_requests(Some(repo_a), Some("MERGED"), 10).expect("repo/state PR filter").is_empty());
 
+    let closed_pr = PullRequest { repository_id: repo_b, number: 3, title: "Closed without merge".into(), state: "CLOSED".into(), updated_at: "2026-09-04T00:00:00Z".into(), ..pr_b.clone() };
+    database.upsert_pull_request(&closed_pr).expect("closed PR");
+    let closed = database.all_activity("prs", None, Some("closed"), 10).expect("closed and merged PRs");
+    assert!(matches!(&closed[..], [ActivityItem::PullRequest(first), ActivityItem::PullRequest(second)] if first.title == "Closed without merge" && second.title == "Newest PR"));
+    assert!(database.all_activity("prs", Some(repo_a), Some("closed"), 10).expect("closed scope").is_empty());
+
     let issue_a = Issue { repository_id: repo_a, repository: "owner/alpha".to_string(), number: 5, title: "Open issue".to_string(), state: "OPEN".to_string(), created_at: "2026-09-01T00:00:00Z".to_string(), updated_at: "2026-09-04T00:00:00Z".to_string(), ..Issue::default() };
     let issue_b = Issue { repository_id: repo_b, repository: "owner/beta".to_string(), number: 6, title: "Closed issue".to_string(), state: "CLOSED".to_string(), created_at: "2026-09-01T00:00:00Z".to_string(), updated_at: "2026-09-05T00:00:00Z".to_string(), ..Issue::default() };
     database.upsert_issue(&issue_a).expect("issue a");

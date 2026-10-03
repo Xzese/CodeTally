@@ -3,9 +3,9 @@
 //! on one menu row while leaving the other menu actions native.
 use crate::models::{HistoryPoint, LocChartRange, MenuBarMetric};
 use chrono::{Duration, Months, NaiveDate};
-use objc2::{AnyThread, MainThreadMarker};
-use objc2_app_kit::{NSImage, NSImageView};
-use objc2_foundation::{NSData, NSSize};
+use objc2::{AnyThread, MainThreadMarker, MainThreadOnly};
+use objc2_app_kit::{NSImage, NSImageView, NSView};
+use objc2_foundation::{NSData, NSPoint, NSRect, NSSize, NSString};
 use tauri::tray::TrayIcon;
 
 const DAYS: usize = 30;
@@ -14,6 +14,7 @@ const WIDTH: usize = 600;
 const HEIGHT: usize = 144;
 const DISPLAY_WIDTH: f64 = 300.0;
 const DISPLAY_HEIGHT: f64 = 72.0;
+const CHART_ROW_HORIZONTAL_INSET: f64 = 16.0;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChartData {
@@ -103,9 +104,15 @@ fn chart_png(data: &ChartData) -> Option<Vec<u8>> {
             rectangle(&mut pixels, x, y, 3, 1, [119, 145, 168, 75]);
         }
     }
+    // The selected range filters saved days; draw from the first measured bin
+    // to the last so missing days at either edge do not push the line aside.
+    let first_index = data.values.iter().position(Option::is_some)?;
+    let last_index = data.values.iter().rposition(Option::is_some)?;
     let points: Vec<_> = data.values.iter().enumerate().filter_map(|(index, sample)| {
         let sample = (*sample)?;
-        let x = 12 + (index as f64 * (WIDTH - 24) as f64 / (data.values.len() - 1) as f64).round() as usize;
+        let x = if first_index == last_index { WIDTH / 2 } else {
+            12 + ((index - first_index) as f64 * (WIDTH - 24) as f64 / (last_index - first_index) as f64).round() as usize
+        };
         // Scale to the observed range so small changes remain visible.
         let y = if minimum == maximum { 72 } else {
             118 - (((sample - minimum) as f64 / (maximum - minimum) as f64) * 96.0).round() as usize
@@ -134,7 +141,7 @@ fn chart_png(data: &ChartData) -> Option<Vec<u8>> {
     Some(output)
 }
 
-/// Replace the chart placeholder (the second native menu row) with an image
+/// Replace the named chart placeholder with an image
 /// view. `with_inner_tray_icon` runs this closure on AppKit's main thread.
 pub fn attach(tray: &TrayIcon<tauri::Wry>, data: &ChartData) {
     let Some(bytes) = chart_png(data) else {
@@ -150,7 +157,8 @@ pub fn attach(tray: &TrayIcon<tauri::Wry>, data: &ChartData) {
         let Some(menu) = status_item.menu(mtm) else {
             return;
         };
-        let Some(menu_item) = menu.itemAtIndex(1) else {
+        menu.update();
+        let Some(menu_item) = menu.itemWithTitle(&NSString::from_str("LOC chart")) else {
             return;
         };
         let Some(image) = NSImage::initWithData(NSImage::alloc(), &NSData::with_bytes(&bytes))
@@ -159,16 +167,49 @@ pub fn attach(tray: &TrayIcon<tauri::Wry>, data: &ChartData) {
         };
         image.setSize(NSSize::new(DISPLAY_WIDTH, DISPLAY_HEIGHT));
         let image_view = NSImageView::imageViewWithImage(&image, mtm);
+        // Give the chart row the menu's measured content width so it follows
+        // wider summary/status text, then center the fixed-size chart inside it.
+        let row_width = menu.size().width.max(DISPLAY_WIDTH + 2.0 * CHART_ROW_HORIZONTAL_INSET);
+        let row = NSView::initWithFrame(
+            NSView::alloc(mtm),
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(row_width, DISPLAY_HEIGHT)),
+        );
+        image_view.setFrameOrigin(NSPoint::new((row_width - DISPLAY_WIDTH) / 2.0, 0.0));
         image_view.setFrameSize(NSSize::new(DISPLAY_WIDTH, DISPLAY_HEIGHT));
-        menu_item.setView(Some(&image_view));
+        row.addSubview(&image_view);
+        menu_item.setView(Some(&row));
     });
 }
 
 #[cfg(test)]
 mod tests {
-    use super::chart_data;
+    use super::{chart_data, chart_png, ChartData, WIDTH};
     use crate::models::{HistoryPoint, LocChartRange, MenuBarMetric};
     use chrono::NaiveDate;
+
+    #[test]
+    fn rendered_line_centers_sparse_history_and_single_samples() {
+        for single_sample in [false, true] {
+            let mut values = vec![None; 30];
+            values[25] = Some(120);
+            if !single_sample { values[8] = Some(100); }
+            let bytes = chart_png(&ChartData { values, first: None, latest: None, measured_days: if single_sample { 1 } else { 2 } }).unwrap();
+            let mut reader = png::Decoder::new(std::io::Cursor::new(bytes)).read_info().unwrap();
+            let mut pixels = vec![0; reader.output_buffer_size()];
+            let frame = reader.next_frame(&mut pixels).unwrap();
+            let ink: Vec<_> = pixels[..frame.buffer_size()].chunks_exact(4).enumerate()
+                .filter(|(_, rgba)| rgba[0] < 100 && rgba[1] > 100 && rgba[2] > 100 && rgba[3] > 200)
+                .map(|(index, _)| index % WIDTH).collect();
+            let left = *ink.iter().min().unwrap();
+            let right = *ink.iter().max().unwrap();
+            assert!(left.abs_diff(WIDTH - 1 - right) <= 3, "unequal plot margins: {left}..{right}");
+            if single_sample {
+                assert!(left >= WIDTH / 2 - 5 && right <= WIDTH / 2 + 5);
+            } else {
+                assert!(left < 20 && right > WIDTH - 20, "measured days should use the plot width");
+            }
+        }
+    }
 
     #[test]
     fn chart_keeps_only_measured_days_and_selects_the_requested_metric() {

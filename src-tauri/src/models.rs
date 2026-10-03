@@ -294,6 +294,8 @@ pub struct AppSettings {
     pub menu_bar_metrics: Vec<MenuBarMetric>,
     #[serde(default)]
     pub menu_bar_compact_metrics: Vec<MenuBarMetric>,
+    #[serde(default)]
+    pub menu_bar_combined: bool,
     #[serde(default = "default_run_in_background")]
     pub show_menu_bar: bool,
     #[serde(default)]
@@ -345,6 +347,7 @@ impl Default for AppSettings {
             loc_chart_range: LocChartRange::default(),
             menu_bar_metrics: Vec::new(),
             menu_bar_compact_metrics: Vec::new(),
+            menu_bar_combined: false,
             show_menu_bar: true,
             include_forks_in_totals: false,
             include_personal_repositories: true,

@@ -45,6 +45,7 @@ pub async fn check_for_updates(app: tauri::AppHandle) -> Result<crate::updates::
 
 #[tauri::command(rename_all = "snake_case")]
 pub async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
+    if crate::screenshot_mode() { return Err("Updates are disabled in screenshot builds".into()); }
     let _install_guard = begin_update_install()?;
     let update = app
         .updater()
@@ -101,6 +102,7 @@ pub async fn get_github_user(state: State<'_, AppState>) -> Result<GithubUser, S
 
 #[tauri::command(rename_all = "snake_case")]
 pub async fn discover_repositories(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<Vec<RepositorySummary>, String> {
+    if crate::screenshot_mode() { return state.database().summaries().map_err(|error| error.to_string()); }
     let state = state.inner().clone();
     tokio::task::spawn_blocking(move || {
         let _job = state.job_lock.lock().map_err(|_| "sync lock poisoned".to_string())?;
@@ -114,6 +116,7 @@ pub async fn discover_repositories(app: tauri::AppHandle, state: State<'_, AppSt
 
 #[tauri::command(rename_all = "snake_case")]
 pub async fn sync_github_data(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<SyncResult, String> {
+    if crate::screenshot_mode() { return Ok(SyncResult { ok: true, message: "Screenshot data is ready".into(), ..SyncResult::default() }); }
     let state = state.inner().clone();
     tokio::task::spawn_blocking(move || {
         let _job = state.job_lock.lock().map_err(|_| "sync lock poisoned".to_string())?;
@@ -126,6 +129,7 @@ pub async fn sync_github_data(app: tauri::AppHandle, state: State<'_, AppState>)
 
 #[tauri::command(rename_all = "snake_case")]
 pub async fn sync_activity(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<SyncResult, String> {
+    if crate::screenshot_mode() { return Ok(SyncResult { ok: true, message: "Screenshot data is ready".into(), ..SyncResult::default() }); }
     let state = state.inner().clone();
     tokio::task::spawn_blocking(move || {
         let _job = state.job_lock.lock().map_err(|_| "sync lock poisoned".to_string())?;
@@ -293,6 +297,7 @@ pub fn reveal_database(state: State<'_, AppState>) -> Result<bool, String> {
 
 #[tauri::command(rename_all = "snake_case")]
 pub async fn sync_repository(app: tauri::AppHandle, state: State<'_, AppState>, repo_id: i64) -> Result<SyncResult, String> {
+    if crate::screenshot_mode() { return Ok(SyncResult { ok: true, message: "Screenshot data is ready".into(), ..SyncResult::default() }); }
     let state = state.inner().clone();
     tokio::task::spawn_blocking(move || {
         let _job = state.job_lock.lock().map_err(|_| "sync lock poisoned".to_string())?;
@@ -305,6 +310,7 @@ pub async fn sync_repository(app: tauri::AppHandle, state: State<'_, AppState>, 
 
 #[tauri::command(rename_all = "snake_case")]
 pub async fn backfill_loc(app: tauri::AppHandle, state: State<'_, AppState>, repo_id: i64) -> Result<SyncResult, String> {
+    if crate::screenshot_mode() { return Ok(SyncResult { ok: true, message: "Screenshot data is ready".into(), ..SyncResult::default() }); }
     let state = state.inner().clone();
     tokio::task::spawn_blocking(move || {
         let _job = state.job_lock.lock().map_err(|_| "sync lock poisoned".to_string())?;
