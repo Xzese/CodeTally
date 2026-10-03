@@ -825,14 +825,21 @@ body.kanban-drag-active, body.kanban-drag-active * { cursor: grabbing !important
 .rail-brand { display: flex; justify-content: center; padding-bottom: 25px; }
 .rail-brand img { width: 27px; height: 27px; border-radius: 7px; }
 .navigation-rail nav { display: grid; gap: 5px; }
-.navigation-rail button { display: flex; align-items: center; justify-content: center; min-height: 44px; padding: 10px; border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--subtle); cursor: pointer; }
-.navigation-rail button span { display: none; }
-.navigation-rail button svg { flex: 0 0 auto; }
-.navigation-rail button:hover:not(:disabled) { background: var(--panel-hover); color: var(--blue); }
+.navigation-rail nav button, .rail-settings, .rail-update > .update-trigger { display: flex; align-items: center; justify-content: center; min-height: 44px; padding: 10px; border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--subtle); cursor: pointer; }
+.navigation-rail nav button span { display: none; }
+.navigation-rail nav button svg, .rail-settings svg, .rail-update > .update-trigger svg { flex: 0 0 auto; }
+.navigation-rail nav button:hover:not(:disabled), .rail-settings:hover, .rail-update > .update-trigger:hover:not(:disabled) { background: var(--panel-hover); color: var(--blue); }
 .navigation-rail nav button.active { color: #fff; background: linear-gradient(135deg, #236bda, #204daf); border-color: #3b79dc; box-shadow: 0 3px 12px #001c4933; }
 .navigation-rail nav button:disabled { opacity: .45; cursor: default; }
-.rail-footer { margin-top: auto; padding-top: 24px; }
+.rail-footer { display: grid; gap: 5px; margin-top: auto; padding-top: 24px; }
 .rail-settings { width: 100%; }
+.rail-update { width: 100%; order: initial; }
+.rail-update > .update-trigger { width: 100%; height: 44px; }
+.rail-update > .update-trigger.update-available { color: var(--green); }
+.rail-update > .update-trigger:disabled { opacity: .45; cursor: default; }
+.rail-update.active::after { top: 0; right: auto; left: 100%; width: 12px; height: 100%; }
+.rail-update .update-panel { top: auto; right: auto; bottom: 0; left: calc(100% + 12px); width: min(370px, calc(100vw - 88px)); max-height: calc(100dvh - 24px); overflow-y: auto; }
+.rail-update .update-actions { flex-wrap: wrap; }
 .topbar { background: #0f1b2c; min-height: 56px; flex-basis: 56px; padding-inline: 24px; }
 .light .topbar { background: #f8fafd; }
 .topbar-navigation { gap: 10px; min-width: 0; font-size: 11px; color: var(--subtle); }
