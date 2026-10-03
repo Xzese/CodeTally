@@ -85,7 +85,7 @@ fn state(database_path: PathBuf, root: &Path) -> AppState {
         db_path: database_path,
         cache_dir: root.join("cache"),
         progress: Arc::new(Mutex::new(SyncProgress::default())),
-        job_lock: Arc::new(Mutex::new(())),
+        dashboard_cache: Arc::new(Mutex::new(Default::default())), job_lock: Arc::new(Mutex::new(())),
     }
 }
 
@@ -380,6 +380,27 @@ fn failed_page_leaves_page_cursor_durable_and_retryable() {
 
     let _ = std::fs::remove_dir_all(root);
     let _ = std::fs::remove_file(database_path);
+}
+
+#[test]
+fn resumed_issue_feed_omits_unused_sibling_page_and_keeps_its_checkpoint() {
+    let root = unique_root("resumed-issues");
+    let fake = FakeGh::new("resumed-issues", "pages", 1);
+    let (database, _) = seed_database(&root, &[repository("repo-1", "one")]);
+    let stored = database.repositories().unwrap().remove(0);
+    let key = format!("github_activity_v2:{}:issues:true", stored.id);
+    database.upsert_issue(&codetally_lib::models::Issue { repository_id: stored.id, number: 1, title: "already saved".into(), state: "OPEN".into(), ..Default::default() }).unwrap();
+    database.set_metadata(&key, r#"{"after":"AFTER_ISSUE_OPEN_1","started_at":"2026-09-10T00:00:00Z"}"#).unwrap();
+    fake.with_path(|| github_sync::sync_activity(&database, &stored).unwrap());
+    let calls = fake.calls();
+    let first = calls.lines().find(|call| call.starts_with("api graphql")).unwrap();
+    assert!(!first.contains("sibling:issues"), "a resumed issue page should not fetch and discard its first page");
+    assert!(calls.lines().any(|call| call.contains("items:issues") && call.contains("after=AFTER_ISSUE_OPEN_1")));
+    assert_eq!(database.issues(Some(stored.id), None, 100).unwrap().len(), 2);
+    let checkpoint: serde_json::Value = serde_json::from_str(&database.metadata(&key).unwrap().unwrap()).unwrap();
+    assert!(checkpoint["after"].is_null());
+    assert!(checkpoint["completed_at"].is_string());
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]

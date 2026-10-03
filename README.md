@@ -176,6 +176,26 @@ flowchart LR
 
 The frontend does not talk to GitHub or SQLite directly. It invokes Rust commands through Tauri, and the backend serializes synchronization jobs so multiple refreshes cannot mutate the cache simultaneously.
 
+## Efficiency and regression checks
+
+Dashboard polls reuse cached summaries and history while SQLite is unchanged. A persistent read-only observer checks `PRAGMA data_version`, so commits from synchronization or another connection invalidate the cache. Growth cutoffs also expire it when a measurement crosses the current, 7-day, 30-day, or 90-day boundary; entries live at most one minute. A write during a rebuild prevents that result from being cached.
+
+Activity pages publish their rows, server counts, and pagination checkpoint in one transaction. Unchanged upserts avoid row updates. History is scoped and ordered in SQLite, then aggregated in one pass. Managed Git caches fetch the default branch without tags; an empty cache bootstraps available branches before subsequent fetches become scoped.
+
+The frontend reuses embedded dashboard history, loads chart code separately, and preserves unchanged records so progress updates can skip inventory rendering. Date and number formatters are shared. The displayed logo uses lossless WebP; its original PNG remains available as the source asset.
+
+Representative local debug-build measurements (synthetic fixtures, not end-to-end latency guarantees):
+
+| Workload | Result |
+| --- | --- |
+| 1,000 repositories, 180,000 historical samples | Full dashboard build about 314 ms |
+| Ten unchanged reads of that dashboard | About 24 microseconds total, excluding IPC cloning and serialization |
+| 100 PR writes | About 172 ms as individual commits; about 3 ms as one activity-page transaction |
+| Initial JavaScript bundle | About 192 KB; chart code loads separately |
+| Logo encoding | 433 KB PNG to 247 KB lossless WebP |
+
+Run `cargo test --manifest-path src-tauri/Cargo.toml --test backend_logic large_portfolio_history -- --nocapture` to repeat the portfolio benchmark. The backend tests also cover cache invalidation, time boundaries, atomic page failure, resumed feeds, and managed Git branch changes. The frontend suite checks visible updates during an ongoing import and repository detail navigation.
+
 ## Development commands
 
 ```sh

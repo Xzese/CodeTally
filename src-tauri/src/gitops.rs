@@ -66,7 +66,7 @@ pub fn ensure_clone_with_fetch(repo: &Repository, cache_root: &Path, fetch: bool
     let local = cache_path(cache_root, repo);
     if local.join(".git").is_dir() {
         if fetch {
-            run_git(Some(&local), &["fetch".into(), "--all".into(), "--prune".into()])?;
+            fetch_default_branch(&local, &repo.default_branch)?;
         }
     } else {
         if local.exists() {
@@ -76,10 +76,36 @@ pub fn ensure_clone_with_fetch(repo: &Repository, cache_root: &Path, fetch: bool
             std::fs::create_dir_all(parent)?;
         }
         let source = https_clone_url(repo);
-        run_git(None, &["clone".into(), source, local.to_string_lossy().to_string()])?;
+        run_git(None, &["clone".into(), "--single-branch".into(), "--no-tags".into(), source, local.to_string_lossy().to_string()])?;
+        // Remote HEAD and discovery metadata can disagree during a default
+        // branch change. Fetch the requested branch if clone selected another.
+        let branch = default_branch(&repo.default_branch);
+        if run_git(Some(&local), &["rev-parse".into(), "--verify".into(), format!("refs/remotes/origin/{branch}")]).is_err() {
+            fetch_default_branch(&local, branch)?;
+        }
     }
     checkout_branch(&local, &repo.default_branch)?;
     Ok(local)
+}
+
+fn default_branch(branch: &str) -> &str {
+    if branch.trim().is_empty() { "main" } else { branch }
+}
+
+fn fetch_default_branch(path: &Path, branch: &str) -> AppResult<()> {
+    let mut args = vec!["fetch".into(), "--no-tags".into(), "--prune".into(), "origin".into()];
+    // A single-branch empty clone can have no configured fetch refspec. Also,
+    // remote HEAD may name a deleted branch while other branches still exist.
+    // Bootstrap remote heads explicitly in either case; a truly empty remote
+    // succeeds with no refs. Subsequent fetches stay scoped to the default.
+    if is_empty_repository(path)? {
+        args.push("+refs/heads/*:refs/remotes/origin/*".into());
+    } else {
+        let branch = default_branch(branch);
+        args.push(format!("+refs/heads/{branch}:refs/remotes/origin/{branch}"));
+    }
+    run_git(Some(path), &args)?;
+    Ok(())
 }
 
 fn https_clone_url(repo: &Repository) -> String {
@@ -107,7 +133,7 @@ fn shell_quote(value: &str) -> String {
 }
 
 pub fn checkout_branch(path: &Path, branch: &str) -> AppResult<()> {
-    let branch = if branch.trim().is_empty() { "main" } else { branch };
+    let branch = default_branch(branch);
     let remote = format!("origin/{branch}");
     match run_git(Some(path), &["checkout".into(), "--force".into(), "-B".into(), branch.to_string(), remote]) {
         Ok(_) => Ok(()),
@@ -185,11 +211,17 @@ pub fn commit_at_or_before(path: &Path, branch: &str, date: &str) -> AppResult<O
     if is_empty_repository(path)? {
         return Ok(None);
     }
-    let output = run_git(Some(path), &["rev-list".into(), "-n".into(), "1".into(), format!("--before={date}"), branch.to_string()])?;
-    let sha = output_text(output)?;
-    if sha.is_empty() { return Ok(None); }
-    let commit_date = output_text(run_git(Some(path), &["show".into(), "-s".into(), "--format=%cI".into(), sha.clone()])?)?;
-    Ok(Some((sha, commit_date)))
+    commit_at_or_before_nonempty(path, branch, date)
+}
+
+/// The backfill caller has already established a nonempty default branch.
+/// Return SHA and committer date together rather than probing HEAD and then
+/// invoking `show` for each monthly sample.
+pub(crate) fn commit_at_or_before_nonempty(path: &Path, branch: &str, date: &str) -> AppResult<Option<(String, String)>> {
+    let output = output_text(run_git(Some(path), &["log".into(), "-1".into(), "--format=%H%x00%cI".into(), format!("--before={date}"), branch.into()])?)?;
+    if output.is_empty() { return Ok(None); }
+    let (sha, commit_date) = output.split_once('\0').ok_or_else(|| AppError::InvalidArgument("Git returned an invalid historical commit".into()))?;
+    Ok(Some((sha.into(), commit_date.into())))
 }
 
 pub fn scan_at_commit(path: &Path, commit: &str, restore_branch: &str) -> AppResult<LocScan> {
@@ -197,13 +229,16 @@ pub fn scan_at_commit(path: &Path, commit: &str, restore_branch: &str) -> AppRes
 }
 
 pub fn scan_at_commit_with_config(path: &Path, commit: &str, restore_branch: &str, config: Option<&ClassificationConfig>) -> AppResult<LocScan> {
-    run_git(Some(path), &["checkout".into(), "--force".into(), commit.to_string()])?;
-    let result = scan_worktree_with_config(path, config);
-    let restore_result = checkout_branch(path, restore_branch);
-    if let Err(error) = restore_result {
-        return Err(error);
-    }
+    let result = scan_at_commit_detached(path, commit, config);
+    checkout_branch(path, restore_branch)?;
     result
+}
+
+/// Leave the managed clone detached so a backfill can scan the next sample
+/// directly. The caller must restore the branch once on every exit path.
+pub(crate) fn scan_at_commit_detached(path: &Path, commit: &str, config: Option<&ClassificationConfig>) -> AppResult<LocScan> {
+    run_git(Some(path), &["checkout".into(), "--force".into(), commit.to_string()])?;
+    scan_worktree_with_config(path, config)
 }
 
 pub fn scan_worktree(path: &Path) -> AppResult<LocScan> {
@@ -493,10 +528,17 @@ fn run_command_with_timeout(mut command: Command, program: &str) -> AppResult<Ou
         })
     });
     let deadline = Instant::now() + EXTERNAL_COMMAND_TIMEOUT;
+    // Most local Git queries finish in a few milliseconds. Start with short
+    // waits so each query does not pay a fixed 50 ms polling delay, then back
+    // off for clones and scans while retaining the existing timeout bound.
+    let mut poll_delay = Duration::from_millis(1);
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(50)),
+            Ok(None) if Instant::now() < deadline => {
+                thread::sleep(poll_delay);
+                poll_delay = (poll_delay * 2).min(Duration::from_millis(50));
+            }
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();

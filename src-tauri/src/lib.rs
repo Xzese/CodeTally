@@ -95,7 +95,7 @@ pub fn run() {
                     .rebase_local_paths(&legacy_cache_dir, &cache_dir)
                     .map_err(|error| error.to_string())?;
             }
-            app.manage(AppState { db_path, cache_dir, progress: Arc::new(Mutex::new(SyncProgress::default())), job_lock: Arc::new(Mutex::new(())) });
+            app.manage(AppState { db_path, cache_dir, progress: Arc::new(Mutex::new(SyncProgress::default())), dashboard_cache: Arc::new(Mutex::new(Default::default())), job_lock: Arc::new(Mutex::new(())) });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

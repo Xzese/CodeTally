@@ -221,7 +221,10 @@ describe('dashboard UI', () => {
     expect(screen.getByText('CodeTally')).toBeInTheDocument()
     expect(screen.getByText('16,000')).toBeInTheDocument()
     expect(screen.getByText('Portfolio overview')).toBeInTheDocument()
-    expect(screen.getByRole('heading', { name: 'Total Lines' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Total Lines' })).toBeInTheDocument()
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'get_loc_history')).toHaveLength(0)
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'get_github_user')).toHaveLength(0)
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'check_dependencies')).toHaveLength(0)
     expect(screen.getByRole('heading', { name: 'Repositories' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Recent activity' })).toBeInTheDocument()
     expect(screen.getByText('Fix alpha flow')).toBeInTheDocument()
@@ -769,6 +772,18 @@ describe('dashboard UI', () => {
       issues: [],
       last_sync_at: null
     }
+    const dashboardAfterImport = structuredClone(dashboard)
+    dashboardAfterImport.repositories = [
+      { ...repoAlpha, total_loc: 14_000, source_loc: 11_000, test_loc: 3_000 },
+      structuredClone(repoBeta)
+    ]
+    dashboardAfterImport.metrics = { ...dashboard.metrics, total_loc: 20_000, source_loc: 16_000, test_loc: 4_000 }
+    const dashboardInDetail = structuredClone(dashboardAfterImport)
+    dashboardInDetail.repositories = [
+      { ...repoAlpha, total_loc: 15_000, source_loc: 12_000, test_loc: 3_000 },
+      structuredClone(repoBeta)
+    ]
+    dashboardInDetail.metrics = { ...dashboard.metrics, total_loc: 21_000, source_loc: 17_000, test_loc: 4_000 }
     const inProgress: SyncProgress = {
       running: true,
       phase: 'backfilling',
@@ -781,7 +796,7 @@ describe('dashboard UI', () => {
       repository_name: 'sam/alpha',
       message: 'Analysing alpha snapshots'
     }
-    configureBackend({ dashboardResponses: [emptyDashboard, dashboard, dashboard], syncPromise: sync.promise, progress: inProgress })
+    configureBackend({ dashboardResponses: [emptyDashboard, dashboardAfterImport, dashboardInDetail, structuredClone(dashboardInDetail)], syncPromise: sync.promise, progress: inProgress })
     const user = userEvent.setup()
     render(<App />)
 
@@ -789,14 +804,20 @@ describe('dashboard UI', () => {
       await user.click(await screen.findByRole('button', { name: 'Import repositories' }))
       expect(await screen.findByRole('heading', { name: 'Code at a glance' })).toBeInTheDocument()
       expect(screen.getByRole('heading', { name: 'Total Lines' })).toBeInTheDocument()
+      expect(await screen.findByText('20,000')).toBeInTheDocument()
+      const alphaRow = screen.getByRole('row', { name: /alpha/ })
+      expect(within(alphaRow).getByText('14.0k')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /Importing/i })).toBeInTheDocument()
       expect(screen.queryByText('No LOC history for this range')).not.toBeInTheDocument()
       await user.click(screen.getByRole('button', { name: /Sync details|Syncing|Importing/i }))
       expect(screen.getByText(/Repositories 1 \/ 2/)).toBeInTheDocument()
 
+      expect(invokeMock.mock.calls.filter(([command]) => command === 'sync_github_data')).toHaveLength(1)
       const dashboardCalls = invokeMock.mock.calls.filter(([command]) => command === 'get_dashboard')
       const historyCalls = invokeMock.mock.calls.filter(([command]) => command === 'get_loc_history')
       expect(dashboardCalls.length).toBeGreaterThanOrEqual(2)
-      expect(historyCalls.length).toBeGreaterThanOrEqual(2)
+      expect(historyCalls).toHaveLength(0)
+      expect(invokeMock.mock.calls.filter(([command]) => command === 'discover_repositories')).toHaveLength(0)
 
       const progressPanel = screen.getByText(/Repositories 1 \/ 2/).closest('.sync-progress-panel')
       expect(progressPanel).not.toBeNull()
@@ -814,6 +835,14 @@ describe('dashboard UI', () => {
       expect(within(bars as HTMLElement).getByText('Overall repository progress')).toBeInTheDocument()
       expect(within(bars as HTMLElement).getByText('Current repository samples')).toBeInTheDocument()
       expect(within(bars as HTMLElement).getAllByRole('progressbar')).toHaveLength(2)
+
+      await user.click(alphaRow)
+      expect(await screen.findByRole('heading', { name: 'alpha' })).toBeInTheDocument()
+      await waitFor(() => {
+        expect(invokeMock.mock.calls.filter(([command]) => command === 'get_dashboard').length).toBeGreaterThanOrEqual(3)
+        expect(within(screen.getByRole('main')).getByText('15,000')).toBeInTheDocument()
+      })
+      expect(screen.getByRole('button', { name: /Importing/i })).toBeInTheDocument()
     } finally {
       sync.resolve(syncOk)
     }

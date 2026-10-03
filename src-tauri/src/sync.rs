@@ -1,7 +1,7 @@
 use crate::classify::month_sample_dates;
-use crate::db::Database;
+use crate::db::{DashboardCache, Database};
 use crate::error::{AppError, AppResult};
-use crate::gitops::{commit_at_or_before, current_commit, current_commit_optional, earliest_commit, ensure_clone, scan_at_commit_with_config};
+use crate::gitops::{commit_at_or_before_nonempty, current_commit, current_commit_optional, earliest_commit, ensure_clone, scan_at_commit_detached, scan_at_commit_with_config};
 use crate::github;
 use crate::github_sync;
 use crate::models::{AppSettings, Repository, Snapshot, SyncProgress, SyncResult};
@@ -16,6 +16,7 @@ pub struct AppState {
     pub cache_dir: PathBuf,
     pub progress: Arc<Mutex<SyncProgress>>,
     pub job_lock: Arc<Mutex<()>>,
+    pub dashboard_cache: Arc<Mutex<DashboardCache>>,
 }
 
 pub const LOC_SWEEP_METADATA_KEY: &str = "last_loc_sweep_at";
@@ -84,6 +85,11 @@ impl AppState {
         Database::new(&self.db_path)
     }
 
+    pub fn dashboard(&self) -> AppResult<Arc<crate::models::Dashboard>> {
+        let mut cache = self.dashboard_cache.lock().map_err(|_| AppError::InvalidArgument("dashboard cache lock poisoned".into()))?;
+        self.database().dashboard_cached(&mut cache)
+    }
+
     pub fn set_progress(&self, progress: SyncProgress) {
         if let Ok(mut current) = self.progress.lock() {
             *current = progress;
@@ -122,9 +128,8 @@ pub fn discover(state: &AppState) -> AppResult<Vec<Repository>> {
         db.set_metadata("org_discovery_errors", &org_errors.join("\n"))?;
     }
     let mut seen = BTreeSet::new();
-    for repo in discovered.into_iter().filter(|repo| seen.insert(repo.github_id.clone())) {
-        db.upsert_repository(&repo)?;
-    }
+    let discovered: Vec<_> = discovered.into_iter().filter(|repo| seen.insert(repo.github_id.clone())).collect();
+    db.upsert_repositories(&discovered)?;
     if org_errors.is_empty() { db.set_metadata("github_discovered_at", &Utc::now().to_rfc3339())?; }
     db.repositories()
 }
@@ -501,45 +506,49 @@ fn backfill_repo(state: &AppState, repo: &Repository) -> AppResult<i64> {
 }
 
 fn backfill_repo_at_path(state: &AppState, repo: &Repository, path: &Path) -> AppResult<i64> {
-    let history_start = earliest_commit(path, &repo.default_branch)?
-        .map(|(_, date)| date)
-        .or_else(|| repo.created_at.clone());
-    let dates = month_sample_dates(history_start.as_deref(), Utc::now());
-    let prior = state.progress();
-    state.set_progress(SyncProgress { running: true, phase: "backfilling".into(), current: prior.current, total: prior.total, repository_current: prior.repository_current, repository_total: prior.repository_total, snapshot_current: 0, snapshot_total: dates.len() as i64, repository_name: Some(repo.name_with_owner.clone()), message: "Selecting monthly commits".into(), ..SyncProgress::default() });
-    let db = state.database();
-    let config = db.classification_config(repo.id)?;
-    let mut created = 0;
-    let mut errors = Vec::new();
-    for (index, sample_date) in dates.iter().enumerate() {
-        state.set_progress(SyncProgress { running: true, phase: "backfilling".into(), current: prior.current, total: prior.total, repository_current: prior.repository_current, repository_total: prior.repository_total, snapshot_current: index as i64, snapshot_total: dates.len() as i64, repository_name: Some(repo.name_with_owner.clone()), message: format!("Analysing snapshot {}/{}", index + 1, dates.len()), ..SyncProgress::default() });
-        let Some((sha, commit_date)) = commit_at_or_before(path, &repo.default_branch, sample_date)? else {
-            let mut progress = state.progress();
-            progress.snapshot_current = index as i64 + 1;
-            state.set_progress(progress);
-            continue;
-        };
-        if db.has_commit_snapshot(repo.id, &sha)? {
-            db.move_snapshot_date_earlier(repo.id, &sha, sample_date)?;
-            let mut progress = state.progress();
-            progress.snapshot_current = index as i64 + 1;
-            state.set_progress(progress);
-            continue;
-        }
-        match scan_at_commit_with_config(path, &sha, &repo.default_branch, Some(&config)) {
-            Ok(scan) => {
-                let snapshot = Snapshot { id: 0, repository_id: repo.id, commit_sha: sha, commit_date, snapshot_date: sample_date.clone(), total_loc: scan.total_loc, source_loc: scan.source_loc, test_loc: scan.test_loc, created_at: Utc::now().to_rfc3339() };
-                if db.upsert_snapshot(&snapshot)? { created += 1; }
+    let result = (|| {
+        let history_start = earliest_commit(path, &repo.default_branch)?
+            .map(|(_, date)| date)
+            .or_else(|| repo.created_at.clone());
+        let dates = month_sample_dates(history_start.as_deref(), Utc::now());
+        let prior = state.progress();
+        state.set_progress(SyncProgress { running: true, phase: "backfilling".into(), current: prior.current, total: prior.total, repository_current: prior.repository_current, repository_total: prior.repository_total, snapshot_current: 0, snapshot_total: dates.len() as i64, repository_name: Some(repo.name_with_owner.clone()), message: "Selecting monthly commits".into(), ..SyncProgress::default() });
+        let db = state.database();
+        let config = db.classification_config(repo.id)?;
+        let mut created = 0;
+        let mut errors = Vec::new();
+        for (index, sample_date) in dates.iter().enumerate() {
+            state.set_progress(SyncProgress { running: true, phase: "backfilling".into(), current: prior.current, total: prior.total, repository_current: prior.repository_current, repository_total: prior.repository_total, snapshot_current: index as i64, snapshot_total: dates.len() as i64, repository_name: Some(repo.name_with_owner.clone()), message: format!("Analysing snapshot {}/{}", index + 1, dates.len()), ..SyncProgress::default() });
+            let Some((sha, commit_date)) = commit_at_or_before_nonempty(path, &repo.default_branch, sample_date)? else {
+                let mut progress = state.progress();
+                progress.snapshot_current = index as i64 + 1;
+                state.set_progress(progress);
+                continue;
+            };
+            if db.has_commit_snapshot(repo.id, &sha)? {
+                db.move_snapshot_date_earlier(repo.id, &sha, sample_date)?;
+                let mut progress = state.progress();
+                progress.snapshot_current = index as i64 + 1;
+                state.set_progress(progress);
+                continue;
             }
-            Err(error) => errors.push(error.to_string()),
+            match scan_at_commit_detached(path, &sha, Some(&config)) {
+                Ok(scan) => {
+                    let snapshot = Snapshot { id: 0, repository_id: repo.id, commit_sha: sha, commit_date, snapshot_date: sample_date.clone(), total_loc: scan.total_loc, source_loc: scan.source_loc, test_loc: scan.test_loc, created_at: Utc::now().to_rfc3339() };
+                    if db.upsert_snapshot(&snapshot)? { created += 1; }
+                }
+                Err(error) => errors.push(error.to_string()),
+            }
+            let mut progress = state.progress();
+            progress.snapshot_current = index as i64 + 1;
+            state.set_progress(progress);
         }
-        let mut progress = state.progress();
-        progress.snapshot_current = index as i64 + 1;
-        state.set_progress(progress);
-    }
-    if let Err(error) = crate::gitops::checkout_branch(path, &repo.default_branch) { errors.push(error.to_string()); }
-    if let Some(error) = errors.first() { return Err(AppError::Command { program: "tokei".into(), message: error.clone() }); }
-    Ok(created)
+        if let Some(error) = errors.first() { return Err(AppError::Command { program: "tokei".into(), message: error.clone() }); }
+        Ok(created)
+    })();
+    // Restore even when selecting a commit, saving a sample, or scanning fails.
+    let restored = crate::gitops::checkout_branch(path, &repo.default_branch);
+    result.and_then(|created| restored.map(|_| created))
 }
 
 fn finish_progress(state: &AppState, error: Option<String>) {

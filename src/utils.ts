@@ -36,7 +36,10 @@ export const prUpdated = (pr: PullRequest): string => pr.updated_at ?? pr.update
 export const issueUpdated = (issue: Issue): string => issue.updated_at ?? issue.updatedAt ?? issue.created_at ?? issue.createdAt ?? ''
 export const activityRepo = (item: PullRequest | Issue): string => item.repository_name ?? item.repositoryName ?? item.repository ?? ''
 
-export const formatCount = (number: number): string => new Intl.NumberFormat('en-US').format(Math.round(number))
+const countFormatter = new Intl.NumberFormat('en-US')
+const dateFormatter = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+
+export const formatCount = (number: number): string => countFormatter.format(Math.round(number))
 export const formatCompact = (number: number): string => {
   const absolute = Math.abs(number)
   if (absolute >= 1_000_000) return `${(number / 1_000_000).toFixed(1)}m`
@@ -67,7 +70,7 @@ export const exactDate = (date?: string | number | null): string => {
   if (!date) return 'Unknown date'
   const parsed = new Date(date)
   if (Number.isNaN(parsed.getTime())) return String(date)
-  return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(parsed)
+  return dateFormatter.format(parsed)
 }
 
 export interface NormalizedMetrics {

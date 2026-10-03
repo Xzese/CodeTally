@@ -100,12 +100,15 @@ pub fn sync_activity(db: &Database, repo: &Repository) -> AppResult<(i64, i64, b
     sync_activity_reporting(db, repo, &mut [0, 0])
 }
 
-/// Counts advance after each durable upsert, including when a later request fails.
+/// Counts advance after each durable page, including when a later request fails.
 pub(crate) fn sync_activity_reporting(db: &Database, repo: &Repository, counts: &mut [i64; 2]) -> AppResult<(i64, i64, bool)> {
     let mut complete = true;
     let cycle_started = Utc::now().to_rfc3339();
     for open in [true, false] {
         let mut sibling_page = None;
+        let issue_key = format!("github_activity_v2:{}:issues:{open}", repo.id);
+        let issue_cursor: Cursor = db.metadata(&issue_key)?.map(|s| serde_json::from_str(&s)).transpose()?.unwrap_or_default();
+        let fetch_sibling = issue_cursor.after.is_none();
         for (index, feed) in ["pullRequests", "issues"].iter().enumerate() {
             let key = format!("github_activity_v2:{}:{feed}:{open}", repo.id);
             let mut cursor: Cursor = db.metadata(&key)?.map(|s| serde_json::from_str(&s)).transpose()?.unwrap_or_default();
@@ -114,7 +117,7 @@ pub(crate) fn sync_activity_reporting(db: &Database, repo: &Repository, counts: 
             let fields = if index == 0 { "number title state isDraft createdAt updatedAt mergedAt closedAt url additions deletions changedFiles commits(last:1){nodes{commit{statusCheckRollup{state}}}}" } else { "number title state createdAt updatedAt closedAt url author{login} labels(first:100){nodes{name}} assignees(first:100){nodes{login}}" };
             let states = if open { "[OPEN]" } else if index == 0 { "[CLOSED,MERGED]" } else { "[CLOSED]" };
             for page in 0..5 {
-                let sibling = if index == 0 && page == 0 {
+                let sibling = if index == 0 && page == 0 && fetch_sibling {
                     let states = if open { "[OPEN]" } else { "[CLOSED]" };
                     format!("sibling:issues(first:100,states:{states},orderBy:{{field:UPDATED_AT,direction:DESC}}){{nodes{{number title state createdAt updatedAt closedAt url author{{login}} labels(first:100){{nodes{{name}}}} assignees(first:100){{nodes{{login}}}}}} pageInfo{{hasNextPage endCursor}}}}")
                 } else { String::new() };
@@ -133,7 +136,7 @@ pub(crate) fn sync_activity_reporting(db: &Database, repo: &Repository, counts: 
                         }
                     }
                 };
-                if index == 0 && page == 0 {
+                if index == 0 && page == 0 && fetch_sibling {
                     let mut sibling = response.clone();
                     sibling["data"]["repository"]["items"] = sibling["data"]["repository"]["sibling"].clone();
                     sibling_page = Some(sibling);
@@ -143,6 +146,8 @@ pub(crate) fn sync_activity_reporting(db: &Database, repo: &Repository, counts: 
                 let pr_total = repository["openPRs"]["totalCount"].as_i64().ok_or_else(|| AppError::InvalidArgument("GitHub response missing PR count".into()))?;
                 let issue_total = repository["openIssues"]["totalCount"].as_i64().ok_or_else(|| AppError::InvalidArgument("GitHub response missing issue count".into()))?;
                 let mut reached_cutoff = false;
+                let mut prs = Vec::new();
+                let mut issues = Vec::new();
                 for node in nodes {
                     let updated = node["updatedAt"].as_str().and_then(|s| s.parse::<DateTime<Utc>>().ok()).ok_or_else(|| AppError::InvalidArgument("GitHub activity missing updatedAt".into()))?;
                     if !open && updated < cutoff { reached_cutoff = true; continue; }
@@ -150,27 +155,27 @@ pub(crate) fn sync_activity_reporting(db: &Database, repo: &Repository, counts: 
                     if index == 0 {
                         let ci = node.pointer("/commits/nodes/0/commit/statusCheckRollup/state").and_then(Value::as_str).map(|s| match s { "ERROR" | "FAILURE" => "failure".into(), "EXPECTED" | "PENDING" => "pending".into(), _ => s.to_ascii_lowercase() });
                         let v: crate::models::GithubPullRequestJson = serde_json::from_value(node)?;
-                        db.upsert_pull_request(&PullRequest { repository_id:repo.id, repository:repo.name_with_owner.clone(), number:v.number,title:v.title,state:v.state,is_draft:v.is_draft,created_at:v.created_at,updated_at:v.updated_at,merged_at:v.merged_at,closed_at:v.closed_at,url:v.url,additions:v.additions.unwrap_or(0),deletions:v.deletions.unwrap_or(0),changed_files:v.changed_files.unwrap_or(0),ci_state:ci })?;
+                        prs.push(PullRequest { repository_id:repo.id, repository:repo.name_with_owner.clone(), number:v.number,title:v.title,state:v.state,is_draft:v.is_draft,created_at:v.created_at,updated_at:v.updated_at,merged_at:v.merged_at,closed_at:v.closed_at,url:v.url,additions:v.additions.unwrap_or(0),deletions:v.deletions.unwrap_or(0),changed_files:v.changed_files.unwrap_or(0),ci_state:ci });
                     } else {
                         node["labels"] = node["labels"]["nodes"].clone();
                         node["assignees"] = node["assignees"]["nodes"].clone();
                         let v: crate::models::GithubIssueJson = serde_json::from_value(node)?;
-                        db.upsert_issue(&Issue {repository_id:repo.id,repository:repo.name_with_owner.clone(),number:v.number,title:v.title,state:v.state,created_at:v.created_at,updated_at:v.updated_at,closed_at:v.closed_at,url:v.url,author:v.author.map(|a|a.login),labels:v.labels.into_iter().map(|a|a.name).collect(),assignees:v.assignees.into_iter().map(|a|a.login).collect()})?;
+                        issues.push(Issue {repository_id:repo.id,repository:repo.name_with_owner.clone(),number:v.number,title:v.title,state:v.state,created_at:v.created_at,updated_at:v.updated_at,closed_at:v.closed_at,url:v.url,author:v.author.map(|a|a.login),labels:v.labels.into_iter().map(|a|a.name).collect(),assignees:v.assignees.into_iter().map(|a|a.login).collect()});
                     }
-                    counts[index] += 1;
                 }
-                db.set_open_counts(repo.id, pr_total, issue_total)?;
                 let more = repository["items"]["pageInfo"]["hasNextPage"].as_bool().ok_or_else(|| AppError::InvalidArgument("GitHub response missing pageInfo".into()))?;
                 if !more || reached_cutoff {
                     cursor = Cursor { completed_at:Some(started.clone()), ..Cursor::default() };
-                    db.set_metadata(&key, &serde_json::to_string(&cursor)?)?;
+                    db.apply_activity_page(&prs, &issues, repo.id, pr_total, issue_total, &key, &serde_json::to_string(&cursor)?)?;
+                    counts[index] += (prs.len() + issues.len()) as i64;
                     break;
                 }
                 let after = repository["items"]["pageInfo"]["endCursor"].as_str().filter(|s| !s.is_empty()).ok_or_else(|| AppError::InvalidArgument("GitHub response missing endCursor".into()))?;
                 if cursor.after.as_deref() == Some(after) { return Err(AppError::InvalidArgument("GitHub pagination cursor did not advance".into())); }
                 cursor.after = Some(after.into());
                 cursor.started_at = Some(started.clone());
-                db.set_metadata(&key, &serde_json::to_string(&cursor)?)?;
+                db.apply_activity_page(&prs, &issues, repo.id, pr_total, issue_total, &key, &serde_json::to_string(&cursor)?)?;
+                counts[index] += (prs.len() + issues.len()) as i64;
                 if page == 4 { complete = false; }
             }
         }

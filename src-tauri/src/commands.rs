@@ -100,14 +100,7 @@ pub fn set_repository_classification(state: State<'_, AppState>, repository_id: 
 pub async fn get_dashboard(state: State<'_, AppState>) -> Result<Dashboard, String> {
     let state = state.inner().clone();
     tokio::task::spawn_blocking(move || {
-        let db = state.database();
-        let summaries: Vec<RepositorySummary> = db.summaries().map_err(|error| error.to_string())?.into_iter().filter(|repo| !repo.is_archived).collect();
-        let totals = db.totals(&summaries);
-        let history = db.history(None).map_err(|error| error.to_string())?;
-        let last_sync_at = summaries.iter().filter_map(|repo| repo.last_sync_at.clone()).max();
-        let user = db.metadata("github_login").map_err(|error| error.to_string())?.map(|login| GithubUser { login });
-        let errors = db.metadata("org_discovery_errors").map_err(|error| error.to_string())?.map(|value| value.lines().map(str::to_string).collect()).unwrap_or_default();
-        Ok(Dashboard { user, repositories: summaries, totals, history, last_sync_at, errors })
+        state.dashboard().map(|dashboard| dashboard.as_ref().clone()).map_err(|error| error.to_string())
     }).await.map_err(|error| error.to_string())?
 }
 

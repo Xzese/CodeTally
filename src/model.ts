@@ -66,3 +66,22 @@ export function aggregateHistory(snapshots: LocSnapshot[], repositoryId?: number
     })
   return [...rows.values()].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
 }
+
+// IPC creates new objects even when a cache poll returns unchanged values.
+// Reuse those records so unrelated sync-progress updates can skip rendering.
+export function sameFields<T extends object>(left: T, right: T): boolean {
+  if (left === right) return true
+  const keys = Object.keys(left) as Array<keyof T>
+  return keys.length === Object.keys(right).length && keys.every((key) => Object.prototype.hasOwnProperty.call(right, key) && Object.is(left[key], right[key]))
+}
+
+export function reuseUnchangedRecords<T extends object>(previous: T[], next: T[]): T[] {
+  let changed = previous.length !== next.length
+  const records = next.map((record, index) => {
+    const old = previous[index]
+    if (old && sameFields(old, record)) return old
+    changed = true
+    return record
+  })
+  return changed ? records : previous
+}
