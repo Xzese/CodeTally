@@ -878,6 +878,11 @@ body.kanban-drag-active, body.kanban-drag-active * { cursor: grabbing !important
 .feed-item { margin: 0; border-radius: 0; border-bottom: 1px solid var(--line); padding: 15px 16px; }
 .feed-list { padding: 0 6px; }
 .feed-title { font-size: 12px; }
+.feed-item { display: grid; grid-template-columns: 36px minmax(0, 1fr); align-items: start; gap: 12px; }
+.feed-item-content { min-width: 0; }
+.feed-item-icon { display: flex; align-items: center; justify-content: center; width: 36px; height: 36px; margin-top: 2px; border-radius: 9px; color: var(--purple); background: color-mix(in srgb, var(--purple) 12%, transparent); }
+.feed-item-icon.pr-merged, .feed-item-icon.issue-closed { color: var(--green); background: color-mix(in srgb, var(--green) 12%, transparent); }
+.feed-item-icon.issue-open, .feed-item-icon.pr-closed { color: var(--red); background: color-mix(in srgb, var(--red) 12%, transparent); }
 .combined-menu-preview { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); padding: 15px; max-width: 320px; margin: 16px auto; box-shadow: 0 8px 22px #00102022; }
 .combined-preview-heading { display: flex; justify-content: space-between; color: var(--subtle); font-size: 14px; }
 .combined-preview-heading svg { color: var(--blue); }
