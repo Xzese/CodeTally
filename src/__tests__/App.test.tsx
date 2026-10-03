@@ -390,6 +390,7 @@ async function expandSettingsSection(user: ReturnType<typeof userEvent.setup>, c
 }
 
 beforeEach(() => {
+  window.localStorage.clear()
   invokeMock.mockReset()
   backgroundSyncListener.mockReset()
   personalSyncListener.mockReset()
@@ -502,7 +503,7 @@ describe('dashboard UI', () => {
     })
   })
 
-  it('excludes forks from the repository picker without changing tracking or dashboard totals', async () => {
+  it('persists the table fork filter across navigation and restarts without changing tracking or totals', async () => {
     configureBackend({ cachedDashboard: { ...dashboard, repositories: [repoAlpha, { ...repoBeta, is_fork: true }] } })
     const user = await renderDashboard()
     const table = screen.getByRole('table')
@@ -516,9 +517,28 @@ describe('dashboard UI', () => {
     expect(within(table).queryByText('beta')).not.toBeInTheDocument()
     expect(within(picker).getByText('1 of 2 visible')).toBeInTheDocument()
     expect(screen.getByText('16,000')).toBeInTheDocument()
-    await user.click(within(picker).getByRole('button', { name: 'Show all' }))
-    expect(within(table).getByText('beta')).toBeInTheDocument()
-    expect(within(picker).getByRole('checkbox', { name: 'Exclude forks from table' })).not.toBeChecked()
+
+    await user.click(within(table).getByRole('row', { name: /alpha/ }))
+    expect(await screen.findByRole('heading', { name: 'alpha' })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Back to repositories' }))
+    expect(within(screen.getByRole('table')).queryByText('beta')).not.toBeInTheDocument()
+
+    cleanup()
+    await renderDashboard()
+    expect(within(screen.getByRole('table')).queryByText('beta')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '2 tracked' }))
+    const restoredPicker = screen.getByRole('dialog', { name: 'Show repositories in table' })
+    expect(within(restoredPicker).getByRole('checkbox', { name: 'Exclude forks from table' })).toBeChecked()
+    await user.click(within(restoredPicker).getByRole('button', { name: 'Show all' }))
+    expect(within(screen.getByRole('table')).getByText('beta')).toBeInTheDocument()
+    expect(within(restoredPicker).getByRole('checkbox', { name: 'Exclude forks from table' })).not.toBeChecked()
+
+    cleanup()
+    await renderDashboard()
+    expect(within(screen.getByRole('table')).getByText('beta')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '2 tracked' }))
+    expect(within(screen.getByRole('dialog', { name: 'Show repositories in table' })).getByRole('checkbox', { name: 'Exclude forks from table' })).not.toBeChecked()
+    expect(screen.getByText('16,000')).toBeInTheDocument()
     expect(invokeMock.mock.calls.some(([command]) => command === 'set_app_settings')).toBe(false)
   })
 
