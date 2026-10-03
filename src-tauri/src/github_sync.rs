@@ -54,6 +54,7 @@ pub fn graphql(db: &Database, query: &str, variables: Value) -> AppResult<Value>
         args.extend([if value.is_string() { "-f" } else { "-F" }.into(), format!("{key}={}", value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string()))]);
     }
     let output = Command::new(github::command_path("gh")).args(args).output()?;
+    if output.status.code() == Some(4) { return Err(AppError::Authentication); }
     parse_response(db, output.status.success(), &String::from_utf8_lossy(&output.stdout), &String::from_utf8_lossy(&output.stderr))
 }
 
@@ -61,6 +62,9 @@ pub fn parse_response(db: &Database, success: bool, stdout: &str, stderr: &str) 
     let normalized = stdout.replace("\r\n", "\n");
     let (headers, body) = if normalized.starts_with("HTTP/") { normalized.split_once("\n\n").unwrap_or(("", &normalized)) } else { ("", normalized.as_str()) };
     let header = |name: &str| headers.lines().filter_map(|line| line.split_once(':')).find(|(key, _)| key.eq_ignore_ascii_case(name)).map(|(_, value)| value.trim());
+    if headers.lines().next().and_then(|line| line.split_whitespace().nth(1)) == Some("401") || (!success && stderr.contains("(HTTP 401)")) {
+        return Err(AppError::Authentication);
+    }
     let value = serde_json::from_str::<Value>(body);
     let message = format!("{} {} {}", if success { "" } else { stderr }, value.as_ref().ok().and_then(|v| v.get("errors")).map(Value::to_string).unwrap_or_default(), if success { String::new() } else { value.as_ref().ok().and_then(|v| v["message"].as_str()).unwrap_or("").to_string() });
     let rate = value.as_ref().ok().and_then(|v| v.pointer("/data/rateLimit"));
@@ -84,6 +88,41 @@ pub fn parse_response(db: &Database, success: bool, stdout: &str, stderr: &str) 
     if let Some(errors) = value.get("errors") { return Err(AppError::Command { program: "gh api graphql".into(), message: errors.to_string() }); }
     if value.get("data").map_or(true, Value::is_null) { return Err(AppError::InvalidArgument("GitHub response missing data".into())); }
     Ok(value)
+}
+
+/// Identity, quota and the first owned-repository page share a request.
+/// Accumulate complete metadata before discovery publishes it to SQLite.
+pub(crate) fn discover_owned(db: &Database) -> AppResult<(crate::models::GithubUser, Vec<Repository>)> {
+    let fields = "id name nameWithOwner url sshUrl isPrivate isFork isArchived stargazerCount forkCount defaultBranchRef{name} primaryLanguage{name} createdAt updatedAt pushedAt";
+    let query = format!("query($after:String){{rateLimit{{remaining resetAt}} viewer{{login repositories(first:100,after:$after,ownerAffiliations:[OWNER]){{nodes{{{fields}}} pageInfo{{hasNextPage endCursor}}}}}}}}");
+    let mut after: Option<String> = None;
+    let mut login: Option<String> = None;
+    let mut repositories = Vec::new();
+    for _ in 0..100 {
+        let response = graphql(db, &query, json!({"after": after}))?;
+        let viewer = &response["data"]["viewer"];
+        let current_login = viewer["login"].as_str().map(str::trim).filter(|login| !login.is_empty())
+            .ok_or_else(|| AppError::InvalidArgument("GitHub did not return the authenticated login".into()))?;
+        if login.as_deref().is_some_and(|login| login != current_login) {
+            return Err(AppError::InvalidArgument("GitHub account changed during repository discovery; cached repositories retained".into()));
+        }
+        login = Some(current_login.to_owned());
+        let page = &viewer["repositories"];
+        let nodes = page["nodes"].as_array().ok_or_else(|| AppError::InvalidArgument("GitHub response missing owned repositories".into()))?;
+        for node in nodes {
+            repositories.push(github::repository_from_json(serde_json::from_value(node.clone())?));
+        }
+        if repositories.len() >= 10000 {
+            return Err(AppError::InvalidArgument("Repository discovery reached its 10,000 repository limit; cached repositories retained".into()));
+        }
+        let more = page["pageInfo"]["hasNextPage"].as_bool().ok_or_else(|| AppError::InvalidArgument("GitHub response missing repository pageInfo".into()))?;
+        if !more { return Ok((crate::models::GithubUser { login: login.expect("validated login") }, repositories)); }
+        let next = page["pageInfo"]["endCursor"].as_str().filter(|cursor| !cursor.is_empty())
+            .ok_or_else(|| AppError::InvalidArgument("GitHub response missing repository endCursor".into()))?;
+        if after.as_deref() == Some(next) { return Err(AppError::InvalidArgument("GitHub repository pagination cursor did not advance".into())); }
+        after = Some(next.to_owned());
+    }
+    Err(AppError::InvalidArgument("Repository discovery exceeded its 100-page limit; cached repositories retained".into()))
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -166,7 +205,7 @@ fn recover_invalid_cursors(db: &Database, repo: &Repository, feeds: &mut [Feed],
             let (query, variables) = activity_query(repo, feeds, &[index]);
             match graphql(db, &query, variables) {
                 Err(error) if cursor_error(&error) => reset_cursor(db, &mut feeds[index])?,
-                Err(error @ AppError::RateLimited { .. }) => return Err(error),
+                Err(error @ (AppError::RateLimited { .. } | AppError::Authentication)) => return Err(error),
                 _ => (),
             }
         }

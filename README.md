@@ -184,7 +184,7 @@ Activity pages publish their rows, server counts, and pagination checkpoint in o
 
 GitHub activity refreshes batch the pending open/closed PR and issue feeds into one request per round, with independent cursors and a five-page limit per feed. Completed feeds leave subsequent requests. Successful pages remain durable even if a later request fails or quota runs low. Closed issues use GitHub's [updated-since filter](https://docs.github.com/en/graphql/reference/issues#issuefilters), including the same overlap window used locally; filtered cursors retain their exact bound, while legacy cursors finish with their original unfiltered query.
 
-Discovery requests the authenticated login alongside its existing quota check and lists organizations in pages of 100. Authentication checks remain in place; refreshes skip unrelated tool-version checks.
+Discovery requests the authenticated login, quota and owned repositories together, following pages of 100 before publishing complete metadata. It validates account identity and advancing cursors, and retains cached repositories if a page fails or the 10,000-repository/100-page bound is reached. Organizations are still listed in REST pages of 100. Refreshes authenticate through their data requests rather than a separate `gh auth status` request. Missing authentication or HTTP 401 stops the job, preserves already committed pages, and reports login instructions; repository permission errors remain local to that repository. Initial setup still checks authentication and required tools.
 
 Synthetic request-count checks through the real `gh` subprocess boundary show:
 
@@ -194,6 +194,10 @@ Synthetic request-count checks through the real `gh` subprocess boundary show:
 | Four two-page feeds | 6 | 2 |
 
 These counts exclude discovery and authentication and do not claim the same reduction in GraphQL primary-quota points. Run `cargo test --manifest-path src-tauri/Cargo.toml --test sync_scalability` to verify data correctness, independent pagination, same-timestamp CI/state updates, checkpoint recovery, and the request bounds.
+
+Read-only live profiling on 3 October 2026 found another request saved on each refresh by removing the authentication preflight, which took 0.32–1.62 seconds in two samples. Combining identity/quota with owned-repository discovery returned identical metadata for 24 repositories: two requests became one, and elapsed time fell from 2.31 to 1.97 seconds and from 1.77 to 1.39 seconds in two trials. These are small live samples, not latency guarantees.
+
+Cross-repository activity batching was also measured but not adopted. Across three repositories and 101 activity rows, a combined request returned identical data and cost the same 18 GraphQL points as three separate queries. It improved one trial from 8.20 to 4.37 seconds but slowed another from 3.35 to 7.49 seconds. The importer keeps its bounded per-repository batches. A live invalid-cursor probe also confirmed that GitHub nulls the repository response, including otherwise healthy feeds, so the importer retains its conservative checkpoint recovery.
 
 The frontend reuses embedded dashboard history, loads chart code separately, and preserves unchanged records so progress updates can skip inventory rendering. Date and number formatters are shared. The displayed logo uses lossless WebP; its original PNG remains available as the source asset.
 

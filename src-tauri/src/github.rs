@@ -108,7 +108,7 @@ pub fn list_organizations() -> AppResult<Vec<String>> {
         .collect())
 }
 
-fn repository_from_json(repo: GithubRepositoryJson) -> Repository {
+pub(crate) fn repository_from_json(repo: GithubRepositoryJson) -> Repository {
     let (owner, name) = repo.name_with_owner.split_once('/').unwrap_or(("", repo.name.as_str()));
     Repository {
         id: 0,

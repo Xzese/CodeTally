@@ -219,6 +219,9 @@ if args[:2] == ["api", "user"]:
     print("me")
     raise SystemExit(0)
 if "user/orgs" in " ".join(args):
+    if mode == "auth-org":
+        print("gh: Bad credentials (HTTP 401)", file=sys.stderr)
+        raise SystemExit(1)
     raise SystemExit(0)
 if args[:2] == ["repo", "list"]:
     repos = [repository("repo-1", "one")]
@@ -233,6 +236,17 @@ if args[:2] == ["api", "graphql"]:
     with open(log, "r", encoding="utf-8") as stream:
         graphql_calls = sum(line.startswith("api graphql ") for line in stream)
 
+    if mode == "auth-missing":
+        print("To get started with GitHub CLI, please run: gh auth login", file=sys.stderr)
+        raise SystemExit(4)
+    if mode == "auth-expired" or (mode == "auth-late" and variables.get("prOpenAfter", "").startswith("CURSOR_")):
+        print('HTTP/2.0 401 Unauthorized\r\nContent-Type: application/json\r\n\r\n{"message":"Bad credentials"}')
+        print("gh: Bad credentials (HTTP 401)", file=sys.stderr)
+        raise SystemExit(1)
+    if mode == "permission-denied" and variables.get("name") == "one":
+        print("gh: Resource not accessible (HTTP 403)", file=sys.stderr)
+        raise SystemExit(1)
+
     if mode == "rate-first" and graphql_calls >= 2:
         emit({"data": {"rateLimit": {"remaining": 0, "resetAt": "2099-01-01T00:00:00Z"}},
               "errors": [{"type": "RATE_LIMITED", "message": "API rate limit exceeded"}]})
@@ -240,8 +254,18 @@ if args[:2] == ["api", "graphql"]:
 
     aliases = re.findall(r"\b(prOpen|issueOpen|prClosed|issueClosed):(pullRequests|issues)\(", query)
     if not aliases:
+        start = 100 if variables.get("after") == "OWNED_100" else 0
+        if mode == "discovery-failed" and start:
+            print("repository discovery page failed", file=sys.stderr)
+            raise SystemExit(1)
+        repos = [repository("repo-" + str(index + 1), "one" if index == 0 else "two" if index == 1 else "extra" + str(index + 1))
+                 for index in range(start, min(start + 100, repo_count))]
+        if mode == "discovery-failed" and repos:
+            repos[0]["isArchived"] = True
+        more = start + 100 < repo_count
         emit({"data": {"rateLimit": {"remaining": 5000, "resetAt": "2099-01-01T00:00:00Z"},
-                        "viewer": {"login": "me"}}})
+                        "viewer": {"login": "other" if mode == "discovery-account" and start else "me", "repositories": {"nodes": repos,
+                            "pageInfo": {"hasNextPage": more, "endCursor": "OWNED_100" if more else None}}}}})
         raise SystemExit(0)
 
     if mode == "cursor-error" and any(variables.get(alias + "After") == "STALE_CURSOR" for alias, _ in aliases):
@@ -1089,7 +1113,92 @@ fn repository_discovery_is_reused_within_one_hour() {
         "fresh discovery should be reused for one hour: {}",
         fake.calls()
     );
+    assert!(!fake.calls().lines().any(|call| call.starts_with("auth status")), "data requests authenticate the refresh");
 
     let _ = std::fs::remove_dir_all(root);
     let _ = std::fs::remove_file(database_path);
+}
+
+#[test]
+fn owned_discovery_paginates_before_publishing_and_failed_pages_retain_cache() {
+    let root = unique_root("owned-discovery");
+    let fake = FakeGh::new("owned-discovery", "discovery-pages", 101);
+    let (database, database_path) = seed_database(&root, &[repository("repo-1", "one")]);
+    let app = state(database_path, &root);
+    let discovered = fake.with_path(|| sync::discover(&app)).unwrap();
+    assert_eq!(discovered.len(), 101);
+    assert!(discovered.iter().any(|repo| repo.name == "extra101"));
+    let owned = discovered.iter().find(|repo| repo.name == "one").unwrap();
+    assert!(owned.loc_backfill_complete);
+    assert!(owned.local_path.is_some());
+    assert_eq!(database.metadata("github_login").unwrap().as_deref(), Some("me"));
+    let calls = fake.calls();
+    assert_eq!(calls.lines().filter(|call| call.starts_with("api graphql")).count(), 2);
+    assert!(calls.contains("after=OWNED_100"));
+    assert!(!calls.lines().any(|call| call.starts_with("repo list")), "owned repositories share the identity request");
+
+    let before = serde_json::to_value(database.repositories().unwrap()).unwrap();
+    let timestamp = database.metadata("github_discovered_at").unwrap();
+    let failing = FakeGh::new("owned-discovery-failed", "discovery-failed", 101);
+    let error = failing.with_path(|| sync::discover(&app)).unwrap_err();
+    assert!(error.to_string().contains("discovery page failed"));
+    assert_eq!(serde_json::to_value(database.repositories().unwrap()).unwrap(), before, "a partial owned listing must not publish changed metadata");
+    assert_eq!(database.metadata("github_discovered_at").unwrap(), timestamp);
+    assert!(!failing.calls().contains("user/orgs"), "do not continue discovery after an incomplete owned listing");
+    let switched = FakeGh::new("owned-discovery-account", "discovery-account", 101);
+    let error = switched.with_path(|| sync::discover(&app)).unwrap_err();
+    assert!(error.to_string().contains("account changed"));
+    assert_eq!(serde_json::to_value(database.repositories().unwrap()).unwrap(), before);
+    assert_eq!(database.metadata("github_login").unwrap().as_deref(), Some("me"));
+    assert!(!switched.calls().contains("user/orgs"));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn authentication_failures_stop_refresh_and_preserve_committed_pages() {
+    for (mode, cached, full, expected_pages) in [
+        ("auth-missing", false, true, 0),
+        ("auth-org", false, false, 0),
+        ("auth-expired", true, false, 0),
+        ("auth-late", true, false, 1),
+    ] {
+        let root = unique_root(mode);
+        let fake = FakeGh::new(mode, mode, 2);
+        let (database, database_path) = seed_database(&root, &[repository("repo-1", "one"), repository("repo-2", "two")]);
+        if cached { database.set_metadata("github_discovered_at", &Utc::now().to_rfc3339()).unwrap(); }
+        let app = state(database_path, &root);
+        let result = fake.with_path(|| if full { sync::sync_all(&app) } else { sync::sync_activity(&app) }).unwrap();
+        assert!(!result.ok, "{mode}");
+        assert!(result.message.contains("not authenticated"), "{mode}: {result:?}");
+        assert!(result.errors.iter().any(|error| error.contains("gh auth login")));
+        assert!(!app.progress().running);
+        let calls = fake.calls();
+        assert!(!calls.lines().any(|call| call.starts_with("auth status")));
+        assert!(!calls.contains("name=two"), "authentication failure stops subsequent repositories: {calls}");
+        assert!(!calls.lines().any(|call| call.starts_with("repo list")), "failed identity request stops discovery");
+        let one = database.repositories().unwrap().into_iter().find(|repo| repo.name == "one").unwrap();
+        assert_eq!(pull_requests(&database, one.id).len(), expected_pages * 2);
+        assert_eq!(issues(&database, one.id).len(), expected_pages * 2);
+        assert_eq!(result.pull_requests_synced, (expected_pages * 2) as i64);
+        assert_eq!(result.issues_synced, (expected_pages * 2) as i64);
+        if expected_pages > 0 {
+            let checkpoint = database.metadata(&format!("github_activity_v2:{}:pullRequests:true", one.id)).unwrap().unwrap();
+            assert!(checkpoint.contains("CURSOR_prOpen_1"));
+        }
+        assert!(database.metadata(github_sync::PAUSE_KEY).unwrap().is_none(), "login failures must not create a rate-limit cooldown");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    // A per-repository permission failure must not look like a global login failure.
+    let root = unique_root("permission-denied");
+    let fake = FakeGh::new("permission-denied", "permission-denied", 2);
+    let (database, database_path) = seed_database(&root, &[repository("repo-1", "one"), repository("repo-2", "two")]);
+    database.set_metadata("github_discovered_at", &Utc::now().to_rfc3339()).unwrap();
+    let app = state(database_path, &root);
+    let result = fake.with_path(|| sync::sync_activity(&app)).unwrap();
+    assert!(!result.ok);
+    assert!(!result.message.contains("not authenticated"));
+    assert_eq!(result.activity_repositories_synced, 1);
+    assert!(fake.calls().contains("name=two"));
+    std::fs::remove_dir_all(root).unwrap();
 }

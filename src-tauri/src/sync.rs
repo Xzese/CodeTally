@@ -104,26 +104,22 @@ impl AppState {
 pub fn discover(state: &AppState) -> AppResult<Vec<Repository>> {
     let db = state.database();
     github_sync::ensure_available(&db)?;
-    let identity = github_sync::graphql(&db, "query{rateLimit{remaining resetAt} viewer{login}}", serde_json::json!({}))?;
+    let (user, mut discovered) = github_sync::discover_owned(&db)?;
     github_sync::ensure_available(&db)?;
-    let login = identity.pointer("/data/viewer/login").and_then(serde_json::Value::as_str).map(str::trim).filter(|login| !login.is_empty())
-        .ok_or_else(|| AppError::InvalidArgument("GitHub did not return the authenticated login".into()))?;
-    let user = crate::models::GithubUser { login: login.to_string() };
     db.set_metadata("github_login", &user.login)?;
     db.set_metadata("org_discovery_errors", "")?;
-    let mut discovered = github_sync::guarded(&db, || github::list_repositories(&user.login))?;
     let mut org_errors = Vec::new();
     match github_sync::guarded(&db, github::list_organizations) {
         Ok(organizations) => {
             for organization in organizations {
                 match github_sync::guarded(&db, || github::list_repositories_for_owner(&organization)) {
                     Ok(repositories) => discovered.extend(repositories),
-                    Err(error @ AppError::RateLimited { .. }) => return Err(error),
+                    Err(error @ (AppError::RateLimited { .. } | AppError::Authentication)) => return Err(error),
                     Err(error) => org_errors.push(format!("{organization}: {error}")),
                 }
             }
         }
-        Err(error @ AppError::RateLimited { .. }) => return Err(error),
+        Err(error @ (AppError::RateLimited { .. } | AppError::Authentication)) => return Err(error),
         Err(error) => org_errors.push(format!("organization discovery: {error}")),
     }
     if !org_errors.is_empty() {
@@ -141,16 +137,12 @@ pub fn sync_all(state: &AppState) -> AppResult<SyncResult> {
     let mut result = SyncResult { ok: true, message: "Refresh complete".into(), ..SyncResult::default() };
     state.set_progress(SyncProgress { running: true, phase: "discovering".into(), message: "Discovering repositories".into(), ..SyncProgress::default() });
 
-    if github::auth_status().is_err() {
-        result.ok = false;
-        result.message = "GitHub CLI is not authenticated".into();
-        result.errors.push("Run gh auth login, then refresh CodeTally.".into());
-        finish_progress(state, result.errors.first().cloned());
-        return Ok(result);
-    }
-
     let repos = match discover(state) {
         Ok(repos) => repos,
+        Err(AppError::Authentication) => {
+            result.errors.push(AppError::Authentication.to_string());
+            return Ok(finish_authentication_failure(state, result));
+        }
         Err(error) => {
             result.ok = false;
             result.errors.push(error.to_string());
@@ -187,7 +179,7 @@ pub fn sync_all(state: &AppState) -> AppResult<SyncResult> {
         state.database().set_metadata("github_last_attempted_repository", &repo.id.to_string())?;
         state.set_progress(SyncProgress { running: true, phase: "syncing_repository".into(), current: index as i64, total: repository_total, repository_current: index as i64, repository_total, snapshot_current: 0, snapshot_total: 0, repository_name: Some(repo.name_with_owner.clone()), message: format!("Refreshing activity and line counts for {}", repo.name_with_owner), ..SyncProgress::default() });
         match sync_repo_data(state, &repo, true, true) {
-            Ok((prs, issues, snapshots, repo_errors, loc_completed)) => {
+            Ok(RepoSyncOutcome { prs, issues, snapshots, errors: repo_errors, loc_completed, authentication_failed }) => {
                 if repo_errors.is_empty() {
                     result.repositories_synced += 1;
                     result.activity_repositories_synced += 1;
@@ -200,6 +192,7 @@ pub fn sync_all(state: &AppState) -> AppResult<SyncResult> {
                     result.ok = false;
                     result.errors.extend(repo_errors.into_iter().map(|error| format!("{}: {}", repo.name_with_owner, error)));
                 }
+                if authentication_failed { return Ok(finish_authentication_failure(state, result)); }
             }
             Err(error) => {
                 result.ok = false;
@@ -238,17 +231,13 @@ pub fn sync_activity(state: &AppState) -> AppResult<SyncResult> {
     let mut result = SyncResult { ok: true, message: "Activity refresh complete".into(), ..SyncResult::default() };
     state.set_progress(SyncProgress { running: true, phase: "discovering_activity".into(), message: "Discovering repository activity".into(), ..SyncProgress::default() });
 
-    if github::auth_status().is_err() {
-        result.ok = false;
-        result.message = "GitHub CLI is not authenticated".into();
-        result.errors.push("Run gh auth login, then refresh CodeTally.".into());
-        finish_progress(state, result.errors.first().cloned());
-        return Ok(result);
-    }
-
     let cached = state.database().metadata("github_discovered_at")?.and_then(|s| s.parse::<DateTime<Utc>>().ok()).is_some_and(|t| Utc::now() - t < Duration::hours(1));
     let repos = match if cached { state.database().repositories() } else { discover(state) } {
         Ok(repos) => repos,
+        Err(AppError::Authentication) => {
+            result.errors.push(AppError::Authentication.to_string());
+            return Ok(finish_authentication_failure(state, result));
+        }
         Err(error) => {
             result.ok = false;
             result.errors.push(error.to_string());
@@ -295,7 +284,7 @@ pub fn sync_activity(state: &AppState) -> AppResult<SyncResult> {
         }
         state.set_progress(SyncProgress { running: true, phase: if decision.run { "syncing_repository" } else { "syncing_activity" }.into(), current: index as i64, total: repository_total, repository_current: index as i64, repository_total, snapshot_current: 0, snapshot_total: 0, repository_name: Some(repo.name_with_owner.clone()), message: if decision.run { format!("Refreshing activity and line counts for {}", repo.name_with_owner) } else { format!("Refreshing activity for {}", repo.name_with_owner) }, ..SyncProgress::default() });
         match sync_repo_data(state, &repo, decision.run, decision.force_fetch) {
-            Ok((prs, issues, snapshots, repo_errors, loc_completed)) => {
+            Ok(RepoSyncOutcome { prs, issues, snapshots, errors: repo_errors, loc_completed, authentication_failed }) => {
                 if repo_errors.is_empty() {
                     result.repositories_synced += 1;
                     result.activity_repositories_synced += 1;
@@ -310,6 +299,7 @@ pub fn sync_activity(state: &AppState) -> AppResult<SyncResult> {
                     result.ok = false;
                     result.errors.extend(repo_errors.into_iter().map(|error| format!("{}: {}", repo.name_with_owner, error)));
                 }
+                if authentication_failed { return Ok(finish_authentication_failure(state, result)); }
             }
             Err(error) => {
                 result.ok = false;
@@ -348,7 +338,7 @@ pub fn sync_one(state: &AppState, repository_id: i64) -> AppResult<SyncResult> {
     state.set_progress(SyncProgress { running: true, phase: "syncing_repository".into(), current: 0, total: 1, repository_current: 0, repository_total: 1, repository_name: Some(repo.name_with_owner.clone()), message: format!("Refreshing activity and line counts for {}", repo.name_with_owner), ..SyncProgress::default() });
     let mut result = SyncResult { ok: true, message: "Repository refresh complete".into(), ..SyncResult::default() };
     match sync_repo_data(state, &repo, true, true) {
-        Ok((prs, issues, snapshots, repo_errors, loc_completed)) => {
+        Ok(RepoSyncOutcome { prs, issues, snapshots, errors: repo_errors, loc_completed, authentication_failed }) => {
             if repo_errors.is_empty() {
                 result.repositories_synced = 1;
                 result.activity_repositories_synced = 1;
@@ -361,6 +351,7 @@ pub fn sync_one(state: &AppState, repository_id: i64) -> AppResult<SyncResult> {
                 result.ok = false;
                 result.errors.extend(repo_errors);
             }
+            if authentication_failed { return Ok(finish_authentication_failure(state, result)); }
         }
         Err(error) => {
             result.ok = false;
@@ -402,17 +393,38 @@ pub fn backfill_one(state: &AppState, repository_id: i64) -> AppResult<SyncResul
     Ok(result)
 }
 
-fn sync_repo_data(state: &AppState, repo: &Repository, run_loc: bool, force_fetch: bool) -> AppResult<(i64, i64, i64, Vec<String>, bool)> {
+fn finish_authentication_failure(state: &AppState, mut result: SyncResult) -> SyncResult {
+    result.ok = false;
+    result.message = "GitHub CLI is not authenticated".into();
+    finish_progress(state, result.errors.last().cloned());
+    result
+}
+
+struct RepoSyncOutcome {
+    prs: i64,
+    issues: i64,
+    snapshots: i64,
+    errors: Vec<String>,
+    loc_completed: bool,
+    authentication_failed: bool,
+}
+
+fn sync_repo_data(state: &AppState, repo: &Repository, run_loc: bool, force_fetch: bool) -> AppResult<RepoSyncOutcome> {
     let db = state.database();
     github_sync::ensure_available(&db)?;
     let mut counts = [0, 0];
     let mut errors = Vec::new();
+    let mut authentication_failed = false;
     let activity_fetched = match github_sync::sync_activity_reporting(&db, repo, &mut counts) {
         Ok((_, _, complete)) => {
             if !complete { errors.push("Activity import is continuing next cycle".into()); }
             true
         }
-        Err(error) => { errors.push(error.to_string()); false }
+        Err(error) => {
+            authentication_failed = matches!(error, AppError::Authentication);
+            errors.push(error.to_string());
+            false
+        }
     };
     let mut loc_completed = false;
     let mut snapshots = 0;
@@ -428,7 +440,7 @@ fn sync_repo_data(state: &AppState, repo: &Repository, run_loc: bool, force_fetc
     }
     let error_text = if errors.is_empty() { None } else { Some(errors.join("; ")) };
     db.mark_sync(repo.id, error_text.as_deref())?;
-    Ok((counts[0], counts[1], snapshots, errors, loc_completed))
+    Ok(RepoSyncOutcome { prs: counts[0], issues: counts[1], snapshots, errors, loc_completed, authentication_failed })
 }
 
 fn sync_loc(state: &AppState, repo: &Repository, force_fetch: bool) -> AppResult<i64> {
