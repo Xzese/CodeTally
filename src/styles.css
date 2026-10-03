@@ -204,7 +204,7 @@ td:first-child { padding-left: 18px; }
 .sidebar-sticky { position: sticky; top: 0; z-index: 2; padding: 22px 17px 13px; background: var(--panel-2); border-bottom: 1px solid var(--line); }
 .sidebar-heading { display: flex; justify-content: space-between; align-items: start; margin-bottom: 15px; }
 .feed-count { color: var(--blue); font-size: 11px; font-variant-numeric: tabular-nums; background: rgba(104,166,255,.12); padding: 4px 7px; border-radius: 10px; }
-.feed-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-bottom: 12px; }
+.feed-tabs { display: grid; grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr); gap: 4px; margin-bottom: 12px; }
 .feed-tabs button { border: 1px solid var(--line); background: transparent; border-radius: 5px; padding: 7px 4px; cursor: pointer; color: var(--muted); font-size: 11px; font-weight: 650; }
 .feed-tabs button.active { color: #e8f1ff; background: rgba(104,166,255,.14); border-color: rgba(104,166,255,.32); }
 .feed-filters { display: flex; flex-direction: column; gap: 9px; }
@@ -880,7 +880,7 @@ body.kanban-drag-active, body.kanban-drag-active * { cursor: grabbing !important
 .feed-title { font-size: 12px; }
 .feed-item { display: grid; grid-template-columns: 36px minmax(0, 1fr); align-items: start; gap: 12px; }
 .feed-item-content { min-width: 0; }
-.feed-item-icon { display: flex; align-items: center; justify-content: center; width: 36px; height: 36px; margin-top: 2px; border-radius: 9px; color: var(--purple); background: color-mix(in srgb, var(--purple) 12%, transparent); }
+.feed-item-icon { display: flex; align-self: center; align-items: center; justify-content: center; width: 36px; height: 36px; border-radius: 9px; color: var(--purple); background: color-mix(in srgb, var(--purple) 12%, transparent); }
 .feed-item-icon.pr-merged, .feed-item-icon.issue-closed { color: var(--green); background: color-mix(in srgb, var(--green) 12%, transparent); }
 .feed-item-icon.issue-open, .feed-item-icon.pr-closed { color: var(--red); background: color-mix(in srgb, var(--red) 12%, transparent); }
 .combined-menu-preview { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); padding: 15px; max-width: 320px; margin: 16px auto; box-shadow: 0 8px 22px #00102022; }

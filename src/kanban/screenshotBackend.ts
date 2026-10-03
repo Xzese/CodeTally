@@ -49,7 +49,7 @@ export async function screenshotCall(command: string, args: Record<string, unkno
       const kind = args.kind === 'issues' ? 'issue' : 'pr'
       const scope = Array.isArray(args.repository_ids) ? args.repository_ids as number[] : repositories.map((repo) => repo.id)
       const state = String(args.state ?? 'all').toUpperCase()
-      return { kind: args.kind, items: items.filter((row) => row.kind === kind && scope.includes(row.repository_id) && (!args.repository_id || row.repository_id === args.repository_id) && (state === 'ALL' || (state === 'OPEN' ? row.state === 'OPEN' : row.state === state))).map((row) => ({ ...row, kind: row.kind === 'pr' ? 'pull_request' : 'issue' })) }
+      return { kind: args.kind, items: items.filter((row) => row.kind === kind && scope.includes(row.repository_id) && (!args.repository_id || row.repository_id === args.repository_id) && (state === 'ALL' || (state === 'OPEN' ? row.state === 'OPEN' : state === 'CLOSED' && kind === 'pr' ? row.state === 'CLOSED' || row.state === 'MERGED' : row.state === state))).map((row) => ({ ...row, kind: row.kind === 'pr' ? 'pull_request' : 'issue' })) }
     }
     case 'get_kanban_preferences': return preferences
     case 'set_kanban_preferences': preferences = args.preferences as KanbanPreferences; return preferences

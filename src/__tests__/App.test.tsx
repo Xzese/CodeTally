@@ -640,6 +640,9 @@ describe('dashboard UI', () => {
   })
 
   it('switches between PR and issue feeds and applies state and repository filters', async () => {
+    const closedPr: PullRequest = { ...prs[1], number: 9, title: 'Close unused beta experiment', state: 'CLOSED', merged_at: null, updated_at: '2026-09-08T16:00:00Z' }
+    const nativeMergedPr: PullRequest = { ...prs[1], state: 'MERGED' }
+    configureBackend({ activityFeed: (kind) => kind === 'issues' ? issues : [prs[0], nativeMergedPr, closedPr] })
     const user = await renderDashboard()
     const sidebar = () => screen.getByRole('heading', { name: 'Recent activity' }).closest('aside') as HTMLElement
 
@@ -665,9 +668,24 @@ describe('dashboard UI', () => {
     expect(screen.getByText('Fix alpha flow')).toBeInTheDocument()
     expect(screen.getByText('Refactor beta tests')).toBeInTheDocument()
 
-    await user.click(within(sidebar()).getByRole('button', { name: 'Merged' }))
+    await user.click(within(sidebar()).getByRole('button', { name: 'Closed' }))
     expect(screen.getByText('Refactor beta tests')).toBeInTheDocument()
+    expect(screen.getByText('Close unused beta experiment')).toBeInTheDocument()
     expect(screen.queryByText('Fix alpha flow')).not.toBeInTheDocument()
+
+    await user.click(within(sidebar()).getByRole('button', { name: 'Pull requests and issues' }))
+    expect(await screen.findByText('Fix alpha flow')).toBeInTheDocument()
+    expect(await screen.findByText('Alpha issue')).toBeInTheDocument()
+    await user.click(within(sidebar()).getByRole('button', { name: 'All' }))
+    await waitFor(() => expect(within(sidebar()).getAllByText(/Alpha issue|Beta issue|Fix alpha flow|Refactor beta tests|Close unused beta experiment/)).toHaveLength(5))
+    const titles = Array.from(sidebar().querySelectorAll('.feed-title')).map((element) => element.textContent)
+    expect(titles).toEqual(['Fix alpha flow', 'Close unused beta experiment', 'Alpha issue', 'Refactor beta tests', 'Beta issue'])
+    await user.click(within(sidebar()).getByRole('button', { name: 'Closed' }))
+    expect(await screen.findByText('Refactor beta tests')).toBeInTheDocument()
+    expect(screen.getByText('Close unused beta experiment')).toBeInTheDocument()
+    expect(screen.getByText('Beta issue')).toBeInTheDocument()
+    expect(screen.queryByText('Fix alpha flow')).not.toBeInTheDocument()
+    expect(screen.queryByText('Alpha issue')).not.toBeInTheDocument()
   })
 
   it('groups activity scopes and sends owner repository ids while retaining the scope across tabs', async () => {

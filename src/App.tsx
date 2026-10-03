@@ -4,7 +4,7 @@ import { AlertCircle, ArrowDown, ArrowLeft, ArrowUp, CodeXml, Database, FlaskCon
 import { checkDependencies, getActivityFeed, getActivityRefreshAt, getPersonalRefreshAt, getAppSettings, getDashboard, getGithubUser, getLocHistory, getSyncProgress, openExternalUrl, setAppSettings, syncActivity, syncGithubData, syncPersonalWorkItems, syncWorkItems } from './api'
 import type { ActivityRelationship, AppSettings, DashboardData, DependencyStatus, FeedKind, Issue, LocSnapshot, PullRequest, Repository, SyncProgress, TimeRange } from './types'
 import { aggregateHistory, filterIssues, filterPullRequests, isDraft, isMerged, reuseUnchangedRecords, sameFields, sortRepositories, type FeedState } from './model'
-import { activityRepo, exactDate, formatCompact, formatCount, formatSigned, normalizeDashboard, normalizeLabels, relativeTime, repoActivity, repoBaseline30Available, repoChange, repoChangePercent, repoForks, repoLocAvailable, repoName, repoOpenIssues, repoOpenPrs, repoSource, repoStars, repoTests, repoTotal, repositoryId, repositoryLabel } from './utils'
+import { activityRepo, exactDate, formatCompact, formatCount, formatSigned, issueUpdated, normalizeDashboard, normalizeLabels, prUpdated, relativeTime, repoActivity, repoBaseline30Available, repoChange, repoChangePercent, repoForks, repoLocAvailable, repoName, repoOpenIssues, repoOpenPrs, repoSource, repoStars, repoTests, repoTotal, repositoryId, repositoryLabel } from './utils'
 import codetallyMark from './assets/codetally-mark.webp'
 import codetallyAppIcon from '../src-tauri/icons/icon.png'
 import SettingsDrawer from './SettingsDrawer'
@@ -23,6 +23,7 @@ function HistoryChart(props: React.ComponentProps<typeof LocChart>) {
 }
 
 type Screen = 'dashboard' | 'detail' | 'kanban'
+type ActivityView = FeedKind | 'all'
 type RepoSort = 'name' | 'loc' | 'source' | 'tests' | 'growth' | 'prs' | 'issues' | 'stars' | 'forks' | 'activity'
 const NARROW_FEED_WIDTH = 1000
 
@@ -89,7 +90,7 @@ function App() {
   const [detailPrs, setDetailPrs] = useState<PullRequest[]>([])
   const [detailIssues, setDetailIssues] = useState<Issue[]>([])
   const [detailLoading, setDetailLoading] = useState(false)
-  const [feedKind, setFeedKind] = useState<FeedKind>('prs')
+  const [feedKind, setFeedKind] = useState<ActivityView>('prs')
   const [feedState, setFeedState] = useState<FeedState>('open')
   const [feedRepo, setFeedRepo] = useState('all')
   const [feedRevision, setFeedRevision] = useState(0)
@@ -562,7 +563,7 @@ function App() {
     setDetailIssues([])
   }, [])
 
-  const handleFeedKind = useCallback((kind: FeedKind) => {
+  const handleFeedKind = useCallback((kind: ActivityView) => {
     setFeedKind(kind)
     setFeedState('open')
     if (screen === 'detail' && selectedRepo) setFeedRepo(String(repositoryId(selectedRepo)))
@@ -584,27 +585,27 @@ function App() {
     if (!settingsLoaded || busy) return
     const requestId = ++feedRequestRef.current
     let alive = true
-    feedLoadingRef.current[feedKind === 'prs' ? 'prs' : 'issues'] = true
-    if (feedKind === 'prs') setDashboard((current) => ({ ...current, pull_requests: [] }))
-    else setDashboard((current) => ({ ...current, issues: [] }))
-    void getActivityFeed({ kind: feedKind, state: feedState, repositoryId: backendRepositoryId(feedRepo), relationship: feedRelationship, ...(groupedFeedScope ? { repositoryIds: JSON.parse(feedRepositoryIdsKey) as number[] } : {}) }).then((items) => {
+    const kinds: FeedKind[] = feedKind === 'all' ? ['prs', 'issues'] : [feedKind]
+    for (const kind of kinds) feedLoadingRef.current[kind] = true
+    setDashboard((current) => ({ ...current, ...(kinds.includes('prs') ? { pull_requests: [] } : {}), ...(kinds.includes('issues') ? { issues: [] } : {}) }))
+    void Promise.allSettled(kinds.map((kind) => getActivityFeed({ kind, state: feedState, repositoryId: backendRepositoryId(feedRepo), relationship: feedRelationship, ...(groupedFeedScope ? { repositoryIds: JSON.parse(feedRepositoryIdsKey) as number[] } : {}) }))).then((results) => {
       if (!alive || requestId !== feedRequestRef.current) return
-      if (feedKind === 'prs') {
-        feedLoadingRef.current.prs = false
-        setDashboard((current) => ({ ...current, pull_requests: items as PullRequest[] }))
-      } else {
-        feedLoadingRef.current.issues = false
-        setDashboard((current) => ({ ...current, issues: items as Issue[] }))
-      }
-    }).catch((reason) => {
-      if (!alive || requestId !== feedRequestRef.current) return
-      feedLoadingRef.current[feedKind === 'prs' ? 'prs' : 'issues'] = false
-      if (feedKind === 'prs') setDashboard((current) => ({ ...current, pull_requests: [] }))
-      else setDashboard((current) => ({ ...current, issues: [] }))
-      const message = reason instanceof Error ? reason.message : String(reason)
-      setError(`Couldn't load ${feedKind === 'prs' ? 'pull requests' : 'issues'}: ${message}`)
+      const updates: { pull_requests?: PullRequest[]; issues?: Issue[] } = {}
+      const errors: string[] = []
+      results.forEach((result, index) => {
+        const kind = kinds[index]
+        feedLoadingRef.current[kind] = false
+        if (kind === 'prs') updates.pull_requests = result.status === 'fulfilled' ? result.value as PullRequest[] : []
+        else updates.issues = result.status === 'fulfilled' ? result.value as Issue[] : []
+        if (result.status === 'rejected') errors.push(`Couldn't load ${kind === 'prs' ? 'pull requests' : 'issues'}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`)
+      })
+      setDashboard((current) => ({ ...current, ...updates }))
+      if (errors.length) setError(errors.join(' '))
     })
-    return () => { alive = false }
+    return () => {
+      alive = false
+      if (requestId === feedRequestRef.current) for (const kind of kinds) feedLoadingRef.current[kind] = false
+    }
   }, [busy, feedKind, feedRelationship, feedRepo, feedRevision, feedState, groupedFeedScope, feedRepositoryIdsKey, settingsLoaded, login])
 
   const visibleHistory = useMemo(() => aggregateHistory(
@@ -997,7 +998,7 @@ function detailChangeValue(repo: Repository): string {
   return repoLocAvailable(repo) && repoBaseline30Available(repo) ? formatSigned(repoChange(repo), true) : '—'
 }
 
-const ActivitySidebar = memo(function ActivitySidebar({ hidden, asOf, onActivityRefreshed, syncBusy, activityProgress, login, kind, state, relationship, repository, lockedRepository, repositories, prs, issues, onKind, onState, onRelationship, onRepository, onOpenUrl }: { hidden: boolean; asOf?: string | null; onActivityRefreshed: () => void; syncBusy: boolean; activityProgress: SyncProgress | null; login: string; kind: FeedKind; state: FeedState; relationship: ActivityRelationship; repository: string; lockedRepository?: string | null; repositories: Repository[]; prs: PullRequest[]; issues: Issue[]; onKind: (kind: FeedKind) => void; onState: (state: FeedState) => void; onRelationship: (relationship: ActivityRelationship) => void; onRepository: (repository: string) => void; onOpenUrl: (url: string | undefined) => void }) {
+const ActivitySidebar = memo(function ActivitySidebar({ hidden, asOf, onActivityRefreshed, syncBusy, activityProgress, login, kind, state, relationship, repository, lockedRepository, repositories, prs, issues, onKind, onState, onRelationship, onRepository, onOpenUrl }: { hidden: boolean; asOf?: string | null; onActivityRefreshed: () => void; syncBusy: boolean; activityProgress: SyncProgress | null; login: string; kind: ActivityView; state: FeedState; relationship: ActivityRelationship; repository: string; lockedRepository?: string | null; repositories: Repository[]; prs: PullRequest[]; issues: Issue[]; onKind: (kind: ActivityView) => void; onState: (state: FeedState) => void; onRelationship: (relationship: ActivityRelationship) => void; onRepository: (repository: string) => void; onOpenUrl: (url: string | undefined) => void }) {
   const sidebarRef = useRef<HTMLElement>(null)
   useEffect(() => { if (sidebarRef.current) sidebarRef.current.inert = hidden }, [hidden])
   const [refreshing, setRefreshing] = useState(false)
@@ -1016,9 +1017,18 @@ const ActivitySidebar = memo(function ActivitySidebar({ hidden, asOf, onActivity
     finally { setRefreshing(false) }
   }
   const effectiveAsOf = relationship !== 'everyone' && refreshedAt && (!asOf || new Date(refreshedAt).getTime() > new Date(asOf).getTime()) ? refreshedAt : asOf
-  const feed = kind === 'prs' ? prs : issues
+  const feed = useMemo(() => {
+    const pullRequests = prs.map((item) => ({ kind: 'prs' as const, item }))
+    const issueItems = issues.map((item) => ({ kind: 'issues' as const, item }))
+    if (kind === 'prs') return pullRequests
+    if (kind === 'issues') return issueItems
+    return [...pullRequests, ...issueItems].sort((left, right) => {
+      const updated = (entry: typeof left) => new Date(entry.kind === 'prs' ? prUpdated(entry.item) : issueUpdated(entry.item)).getTime() || 0
+      return updated(right) - updated(left)
+    })
+  }, [kind, prs, issues])
   const selectedRepository = lockedRepository ?? repository
-  return <aside id="activity-sidebar" ref={sidebarRef} className="activity-sidebar" aria-hidden={hidden}><div className="sidebar-sticky"><div className="sidebar-heading"><div><p className="eyebrow">Live feed <span className="feed-count">{feed.length}</span></p><h2>Recent activity</h2></div><button className="button primary compact activity-refresh-button" disabled={syncBusy || refreshing} title="Refresh your authored and assigned PRs and issues in tracked repositories without scanning lines of code" onClick={() => void refreshActivity()}>{refreshing ? 'Refreshing…' : 'Refresh Tickets'}</button></div><p className="activity-as-of" title={exactDate(effectiveAsOf)}>{relationship === 'everyone' ? 'All tracked activity' : 'Personal activity'} · As of {effectiveAsOf ? relativeTime(effectiveAsOf) : 'Not recorded'}</p>{refreshing || refreshMessage ? <p className="small-note" role="status">{refreshing && activityProgress?.phase.includes('work_items') ? activityProgress.message : refreshMessage}</p> : null}{refreshError && <p className="activity-refresh-error" role="alert">{refreshError}</p>}<div className="feed-tabs" role="tablist"><button className={kind === 'prs' ? 'active' : ''} onClick={() => onKind('prs')}><GitPullRequest size={14} aria-hidden="true" />Pull requests</button><button className={kind === 'issues' ? 'active' : ''} onClick={() => onKind('issues')}><CircleDot size={14} aria-hidden="true" />Issues</button></div><div className="feed-filters"><div className="filter-pills">{(kind === 'prs' ? (['all', 'open', 'merged'] as FeedState[]) : (['all', 'open', 'closed'] as FeedState[])).map((key) => <button key={key} className={state === key ? 'active' : ''} onClick={() => onState(key)}>{key[0].toUpperCase() + key.slice(1)}</button>)}</div><ActivityInvolvementFilter id="activity-involvement-select" value={relationship} onChange={onRelationship} /><ActivityRepositoryMenu repositories={repositories} login={login} value={selectedRepository} disabled={Boolean(lockedRepository)} onChange={onRepository} /></div></div><div className="feed-list">{feed.length ? feed.map((item) => kind === 'prs' ? <PullRequestItem key={`${activityRepo(item)}-${item.number}`} item={item} onOpen={() => onOpenUrl(item.url)} /> : <IssueItem key={`${activityRepo(item)}-${item.number}`} item={item} onOpen={() => onOpenUrl(item.url)} />) : <div className="feed-empty"><CircleDot size={21} /><p>No {kind === 'prs' ? 'pull requests' : 'issues'} match these filters</p><span>Activity will appear here after the next refresh.</span></div>}</div></aside>
+  return <aside id="activity-sidebar" ref={sidebarRef} className="activity-sidebar" aria-hidden={hidden}><div className="sidebar-sticky"><div className="sidebar-heading"><div><p className="eyebrow">Live feed <span className="feed-count">{feed.length}</span></p><h2>Recent activity</h2></div><button className="button primary compact activity-refresh-button" disabled={syncBusy || refreshing} title="Refresh your authored and assigned PRs and issues in tracked repositories without scanning lines of code" onClick={() => void refreshActivity()}>{refreshing ? 'Refreshing…' : 'Refresh Tickets'}</button></div><p className="activity-as-of" title={exactDate(effectiveAsOf)}>{relationship === 'everyone' ? 'All tracked activity' : 'Personal activity'} · As of {effectiveAsOf ? relativeTime(effectiveAsOf) : 'Not recorded'}</p>{refreshing || refreshMessage ? <p className="small-note" role="status">{refreshing && activityProgress?.phase.includes('work_items') ? activityProgress.message : refreshMessage}</p> : null}{refreshError && <p className="activity-refresh-error" role="alert">{refreshError}</p>}<div className="feed-tabs" role="tablist" aria-label="Activity type"><button className={kind === 'all' ? 'active' : ''} aria-label="Pull requests and issues" aria-pressed={kind === 'all'} onClick={() => onKind('all')}>All</button><button className={kind === 'prs' ? 'active' : ''} onClick={() => onKind('prs')}><GitPullRequest size={14} aria-hidden="true" />Pull requests</button><button className={kind === 'issues' ? 'active' : ''} onClick={() => onKind('issues')}><CircleDot size={14} aria-hidden="true" />Issues</button></div><div className="feed-filters"><div className="filter-pills">{(['all', 'open', 'closed'] as FeedState[]).map((key) => <button key={key} className={state === key ? 'active' : ''} onClick={() => onState(key)}>{key[0].toUpperCase() + key.slice(1)}</button>)}</div><ActivityInvolvementFilter id="activity-involvement-select" value={relationship} onChange={onRelationship} /><ActivityRepositoryMenu repositories={repositories} login={login} value={selectedRepository} disabled={Boolean(lockedRepository)} onChange={onRepository} /></div></div><div className="feed-list">{feed.length ? feed.map((entry) => entry.kind === 'prs' ? <PullRequestItem key={`pr-${activityRepo(entry.item)}-${entry.item.number}`} item={entry.item} onOpen={() => onOpenUrl(entry.item.url)} /> : <IssueItem key={`issue-${activityRepo(entry.item)}-${entry.item.number}`} item={entry.item} onOpen={() => onOpenUrl(entry.item.url)} />) : <div className="feed-empty"><CircleDot size={21} /><p>No {kind === 'all' ? 'pull requests or issues' : kind === 'prs' ? 'pull requests' : 'issues'} match these filters</p><span>Activity will appear here after the next refresh.</span></div>}</div></aside>
 })
 
 function PullRequestItem({ item, onOpen }: { item: PullRequest; onOpen: () => void }) {

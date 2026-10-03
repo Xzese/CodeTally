@@ -736,7 +736,11 @@ impl Database {
         let relationship_filter = relationship_filter("p", relationship);
         let conn = self.connect()?;
         let repository_filter = if repository_id.is_some() { " AND p.repository_id=?1" } else { "" };
-        let state_filter = if state.is_some() { " AND lower(p.state)=lower(?2)" } else { "" };
+        let state_filter = match state {
+            Some(value) if value.eq_ignore_ascii_case("closed") => " AND (lower(p.state) IN ('closed','merged') OR p.merged_at IS NOT NULL)",
+            Some(_) => " AND lower(p.state)=lower(?2)",
+            None => "",
+        };
         let query = format!("SELECT p.repository_id,r.name_with_owner,p.number,p.title,p.state,p.is_draft,p.created_at,p.updated_at,p.merged_at,p.closed_at,p.url,p.author,p.assignees_json,p.additions,p.deletions,p.changed_files,p.ci_state FROM pull_requests p JOIN repositories r ON r.id=p.repository_id WHERE r.is_archived=0 AND r.id IN (SELECT value FROM json_each(?4)){repository_filter}{state_filter} AND ({relationship_filter}) ORDER BY p.updated_at DESC LIMIT ?3");
         let mut stmt = conn.prepare(&query)?;
         let rows = stmt.query_map(params![repository_id, state, limit as i64, self.activity_repository_ids_json(scope)?, login], pull_request_from_row)?;

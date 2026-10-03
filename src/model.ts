@@ -14,7 +14,7 @@ export function isDraft(pr: PullRequest): boolean {
 export function filterPullRequests(items: PullRequest[], state: FeedState, repository = 'all'): PullRequest[] {
   return items
     .filter((pr) => repository === 'all' || String(pr.repository_id ?? pr.repositoryId ?? '') === repository || activityRepo(pr) === repository)
-    .filter((pr) => state === 'all' || (state === 'merged' ? isMerged(pr) : state === 'open' ? !isMerged(pr) && String(pr.state).toLowerCase() === 'open' : String(pr.state).toLowerCase() === state))
+    .filter((pr) => state === 'all' || (state === 'merged' ? isMerged(pr) : state === 'closed' ? isMerged(pr) || String(pr.state).toLowerCase() === 'closed' : !isMerged(pr) && String(pr.state).toLowerCase() === 'open'))
     .sort((a, b) => new Date(prUpdated(b)).getTime() - new Date(prUpdated(a)).getTime())
 }
 
