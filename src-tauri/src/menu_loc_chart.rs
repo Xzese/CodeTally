@@ -5,7 +5,7 @@ use crate::models::{HistoryPoint, LocChartRange, MenuBarMetric};
 use chrono::{Duration, Months, NaiveDate};
 use objc2::{AnyThread, MainThreadMarker};
 use objc2_app_kit::{NSImage, NSImageView};
-use objc2_foundation::{NSData, NSSize};
+use objc2_foundation::{NSData, NSSize, NSString};
 use tauri::tray::TrayIcon;
 
 const DAYS: usize = 30;
@@ -134,7 +134,7 @@ fn chart_png(data: &ChartData) -> Option<Vec<u8>> {
     Some(output)
 }
 
-/// Replace the chart placeholder (the second native menu row) with an image
+/// Replace the named chart placeholder with an image
 /// view. `with_inner_tray_icon` runs this closure on AppKit's main thread.
 pub fn attach(tray: &TrayIcon<tauri::Wry>, data: &ChartData) {
     let Some(bytes) = chart_png(data) else {
@@ -150,7 +150,7 @@ pub fn attach(tray: &TrayIcon<tauri::Wry>, data: &ChartData) {
         let Some(menu) = status_item.menu(mtm) else {
             return;
         };
-        let Some(menu_item) = menu.itemAtIndex(1) else {
+        let Some(menu_item) = menu.itemWithTitle(&NSString::from_str("LOC chart")) else {
             return;
         };
         let Some(image) = NSImage::initWithData(NSImage::alloc(), &NSData::with_bytes(&bytes))

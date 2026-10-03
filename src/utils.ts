@@ -91,7 +91,7 @@ export const normalizeMetrics = (data: DashboardData): NormalizedMetrics => {
     total_loc: source.total_loc ?? source.totalLoc ?? repositories.reduce((sum, repo) => sum + repoTotal(repo), 0),
     source_loc: source.source_loc ?? source.sourceLoc ?? repositories.reduce((sum, repo) => sum + repoSource(repo), 0),
     test_loc: source.test_loc ?? source.testLoc ?? repositories.reduce((sum, repo) => sum + repoTests(repo), 0),
-    loc_30d_change: source.loc_30d_change ?? source.loc30dChange ?? repositories.reduce((sum, repo) => sum + repoChange(repo), 0),
+    loc_30d_change: source.loc_change_30d ?? source.loc_30d_change ?? source.loc30dChange ?? repositories.reduce((sum, repo) => sum + repoChange(repo), 0),
     open_prs: source.open_prs ?? source.openPrs ?? repositories.reduce((sum, repo) => sum + repoOpenPrs(repo), 0),
     open_issues: source.open_issues ?? source.openIssues ?? repositories.reduce((sum, repo) => sum + repoOpenIssues(repo), 0)
   }

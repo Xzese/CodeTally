@@ -165,6 +165,7 @@ export interface DashboardMetrics {
   sourceLoc?: number
   test_loc?: number
   testLoc?: number
+  loc_change_30d?: number
   loc_30d_change?: number
   loc30dChange?: number
   open_prs?: number
@@ -252,6 +253,7 @@ export interface AppSettings {
   loc_chart_range: TimeRange
   menu_bar_metrics: MenuBarMetric[]
   menu_bar_compact_metrics: MenuBarMetric[]
+  menu_bar_combined: boolean
   show_menu_bar: boolean
   personal_refresh_minutes: number
   activity_refresh_minutes: number

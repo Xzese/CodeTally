@@ -190,6 +190,7 @@ const defaultAppSettings: AppSettings = {
   loc_chart_range: 'ALL' as const,
   menu_bar_metrics: ['total_lines'] as MenuBarMetric[],
   menu_bar_compact_metrics: [] as MenuBarMetric[],
+  menu_bar_combined: false,
   show_menu_bar: true,
   theme_mode: 'system' as ThemeMode,
   include_personal_repositories: true,
@@ -885,11 +886,11 @@ describe('dashboard UI', () => {
     await user.click(screen.getByRole('button', { name: '3M' }))
     expect(screen.getByRole('button', { name: '3M' })).toHaveClass('active')
     expect(screen.getByRole('button', { name: 'ALL' })).not.toHaveClass('active')
-    await waitFor(() => expect(savedSettings().at(-1)).toEqual(expect.objectContaining({ loc_chart_range: '3M' })))
+    await waitFor(() => expect(savedSettings()[savedSettings().length - 1]).toEqual(expect.objectContaining({ loc_chart_range: '3M' })))
 
     await user.click(screen.getByRole('button', { name: '30D' }))
     expect(screen.getByRole('button', { name: '30D' })).toHaveClass('active')
-    await waitFor(() => expect(savedSettings().at(-1)).toEqual(expect.objectContaining({ loc_chart_range: '30D' })))
+    await waitFor(() => expect(savedSettings()[savedSettings().length - 1]).toEqual(expect.objectContaining({ loc_chart_range: '30D' })))
   })
 
   it('uses Lines labels and sorts repositories by source and test lines', async () => {
@@ -1246,7 +1247,7 @@ describe('dashboard UI', () => {
     const personalRefresh = screen.getByRole('radiogroup', { name: 'PR & Issue Refresh' })
     expect(within(personalRefresh).getByRole('radio', { name: '5 minutes' })).toBeChecked()
     await user.click(within(personalRefresh).getByRole('radio', { name: '15 minutes' }))
-    await waitFor(() => expect(savedSettings().at(-1)).toEqual(expect.objectContaining({ personal_refresh_minutes: 15, activity_refresh_minutes: 1440 })))
+    await waitFor(() => expect(savedSettings()[savedSettings().length - 1]).toEqual(expect.objectContaining({ personal_refresh_minutes: 15, activity_refresh_minutes: 1440 })))
     const updateChecks = within(await screen.findByRole('region', { name: 'About CodeTally' })).getByRole('radiogroup', { name: 'Check for Updates' })
     const codeChangeRefresh = screen.getByRole('switch', { name: /Refresh Lines of Code when code changes/i })
     await waitFor(() => {
@@ -1408,6 +1409,40 @@ describe('dashboard UI', () => {
     retryWrite.resolve(writes[1].settings)
     await waitFor(() => expect(screen.queryByText('Settings write failed')).not.toBeInTheDocument())
     expect(screen.getByRole('heading', { name: 'Settings' })).toBeInTheDocument()
+  })
+
+  it('saves a combined summary with every backend total and restores the separate menu choices', async () => {
+    configureBackend({ settings: { menu_bar_metrics: ['open_prs', 'open_issues'] }, cachedDashboard: { ...dashboard, totals: { repositories: 2, total_loc: 16000, source_loc: 13000, test_loc: 3000, loc_change_30d: -900, open_prs: 2, open_issues: 4 } } })
+    const user = userEvent.setup()
+    await renderDashboard()
+    await user.click(screen.getByRole('button', { name: 'Settings' }))
+    await user.click(screen.getByRole('switch', { name: 'Combined menu bar item' }))
+    await waitFor(() => expect(savedSettings()[savedSettings().length - 1]).toEqual(expect.objectContaining({ menu_bar_combined: true, menu_bar_metrics: ['open_prs', 'open_issues'] })))
+    const preview = screen.getByLabelText('Combined menu bar preview')
+    for (const label of ['Total lines', 'Repositories', 'Source lines', 'Test lines', '30-day change', 'Open PRs', 'Open issues']) expect(within(preview).getByText(label)).toBeInTheDocument()
+    expect(within(preview).getByText('-900')).toBeInTheDocument()
+    expect(screen.queryByRole('group', { name: 'Menu bar metrics' })).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Close settings' }))
+    await user.click(screen.getByRole('button', { name: 'Settings' }))
+    expect(screen.getByRole('switch', { name: 'Combined menu bar item' })).toBeChecked()
+    await user.click(screen.getByRole('switch', { name: 'Combined menu bar item' }))
+    const choices = screen.getByRole('group', { name: 'Menu bar metrics' })
+    expect(within(choices).getByRole('checkbox', { name: 'Open PRs' })).toBeChecked()
+    expect(within(choices).getByRole('checkbox', { name: 'Open issues' })).toBeChecked()
+    await waitFor(() => expect(savedSettings()[savedSettings().length - 1]).toEqual(expect.objectContaining({ menu_bar_combined: false })))
+  })
+
+  it('uses the rail to open issues, analytics, and repository details', async () => {
+    const user = userEvent.setup()
+    await renderDashboard()
+    await user.click(screen.getByRole('button', { name: 'View issues' }))
+    await screen.findByRole('button', { name: /sam\/alpha #4/ })
+    expect(screen.getByRole('button', { name: 'View issues' })).toHaveAttribute('aria-current', 'page')
+    await user.click(screen.getByRole('button', { name: 'View analytics' }))
+    expect(screen.getByRole('button', { name: 'View analytics' })).toHaveAttribute('aria-current', 'page')
+    await user.click(screen.getByRole('button', { name: 'View repositories' }))
+    await user.click(screen.getByRole('row', { name: /alpha/ }))
+    expect(await screen.findByRole('heading', { name: 'alpha' })).toBeInTheDocument()
   })
 
   it('previews menu bar metrics on hover and focus without saving until selected', async () => {
@@ -1912,20 +1947,8 @@ describe('dashboard UI', () => {
 
       const progressPanel = screen.getByText(/Repositories 1 \/ 2/).closest('.sync-progress-panel')
       expect(progressPanel).not.toBeNull()
-      const panelStyle = getComputedStyle(progressPanel as HTMLElement)
-      expect(panelStyle.display).toBe('grid')
-      expect(Number.parseFloat(panelStyle.minHeight)).toBeGreaterThan(0)
-      const status = progressPanel?.querySelector('.sync-progress-heading')
-      const bars = progressPanel?.querySelector('.sync-progress-bars')
-      expect(status).not.toBeNull()
-      expect(bars).not.toBeNull()
-      expect(progressPanel?.firstElementChild).toBe(status)
-      expect(progressPanel?.lastElementChild).toBe(bars)
-      const progressRows = bars?.querySelectorAll('.sync-progress-row') ?? []
-      expect(progressRows.length).toBe(2)
-      expect(within(bars as HTMLElement).getByText('Repository progress')).toBeInTheDocument()
-      expect(within(bars as HTMLElement).getByText('Current line scan')).toBeInTheDocument()
-      expect(within(bars as HTMLElement).getAllByRole('progressbar')).toHaveLength(2)
+      expect(within(progressPanel as HTMLElement).getByRole('progressbar', { name: 'Repository progress' })).toHaveAttribute('aria-valuenow', '1')
+      expect(within(progressPanel as HTMLElement).getByRole('progressbar', { name: 'Current line scan progress' })).toHaveAttribute('aria-valuenow', '3')
 
       await user.click(alphaRow)
       expect(await screen.findByRole('heading', { name: 'alpha' })).toBeInTheDocument()

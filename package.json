@@ -12,7 +12,8 @@
     "screenshots": "swift scripts/capture-screenshots.swift",
     "tauri": "node scripts/tauri-run.mjs",
     "tauri:dev": "node scripts/tauri-run.mjs dev",
-    "tauri:build": "node scripts/tauri-run.mjs build"
+    "tauri:build": "node scripts/tauri-run.mjs build",
+    "screenshots:fixtures": "node scripts/generate-screenshots.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.8.0",

@@ -308,6 +308,19 @@ Run `cargo test --manifest-path src-tauri/Cargo.toml --test backend_logic large_
 
 ## Development commands
 
+### Fixture screenshot generator (macOS)
+
+```sh
+npm run screenshots:fixtures
+npm run screenshots:fixtures -- --output-dir /tmp/codetally-gallery
+```
+
+The generator builds a separate **CodeTally Screenshot Fixture** app with its own bundle identifier, seeds temporary databases with fictional repositories, tickets, and line history, and captures the real app and native menu bar menus. It covers the overview, repository details, analytics, PR and issue feeds, Kanban, Settings, the combined summary, and each separate metric menu. A JSON manifest lists the generated PNGs.
+
+The fixture app does not read your regular CodeTally database or refresh GitHub. It stops after capture and removes its temporary build and databases on success. If capture fails after building, it prints the retained temporary directory for diagnosis. Cargo dependencies must already be available locally because the build runs offline. The command requires macOS Accessibility and Screen Recording access for the terminal or host app, and checks these before building; see `npm run screenshots:fixtures -- --help`.
+
+In **Settings → Appearance & menu bar**, enable **Combined menu bar item** for one icon containing all seven dashboard metrics and the LOC line chart. Disable it to restore your separate metric selections. The dashboard uses a left navigation rail, four primary metric cards, and a source/test/change breakdown; lines of code remain a line chart.
+
 ### README screenshots (macOS)
 
 Open the installed app to the view you want, close unrelated overlays, and run the capture helper from this repository:

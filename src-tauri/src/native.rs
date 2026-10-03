@@ -5,7 +5,7 @@ use chrono::Utc;
 #[cfg(any(test, not(target_os = "macos")))]
 use chrono::{Duration as ChronoDuration, NaiveDate};
 use std::time::{Duration, Instant};
-use tauri::{menu::{Menu, MenuBuilder, MenuItem}, tray::TrayIconBuilder, AppHandle, Emitter, Manager};
+use tauri::{menu::{Menu, MenuBuilder, MenuItem}, tray::{TrayIconBuilder, TrayIconEvent, TrayIcon}, AppHandle, Emitter, Manager};
 
 const TRAY_ID: &str = "codetally";
 const GITHUB_MENU_PREFIX: &str = "open-github:";
@@ -154,7 +154,6 @@ fn loc_value(point: &HistoryPoint, metric: MenuBarMetric) -> i64 {
     }
 }
 
-#[cfg(target_os = "macos")]
 fn formatted_lines(value: i64) -> String {
     let digits = value.unsigned_abs().to_string();
     let grouped = digits.chars().rev().enumerate().map(|(index, digit)| {
@@ -197,10 +196,54 @@ fn loc_sparkline(history: &[HistoryPoint], metric: MenuBarMetric, today: NaiveDa
     Some((graph, last_recorded.to_string()))
 }
 
-fn tray_menu(app: &AppHandle, state: Option<&AppState>, metric: MenuBarMetric, history: Option<&[HistoryPoint]>) -> tauri::Result<Menu<tauri::Wry>> {
+/// Complete dashboard values, independent of which separate metrics are selected.
+pub fn summary_rows(totals: &DashboardTotals) -> Vec<(&'static str, String)> {
+    vec![
+        ("total_lines", format!("{} total lines", formatted_lines(totals.total_loc))),
+        ("repositories", format!("{} repositories", formatted_lines(totals.repositories))),
+        ("source_lines", format!("{} source lines", formatted_lines(totals.source_loc))),
+        ("test_lines", format!("{} test lines", formatted_lines(totals.test_loc))),
+        ("change", format!("{}{} lines · 30-day change", if totals.loc_change_30d >= 0 { "+" } else { "" }, formatted_lines(totals.loc_change_30d))),
+        ("open_prs", format!("{} open PRs", formatted_lines(totals.open_prs))),
+        ("open_issues", format!("{} open issues", formatted_lines(totals.open_issues))),
+    ]
+}
+
+/// The combined item has one stable icon and always displays the total LOC trend.
+pub fn visible_menu_metrics(settings: &AppSettings) -> Vec<MenuBarMetric> {
+    if settings.menu_bar_combined { vec![MenuBarMetric::TotalLines] } else { settings.effective_menu_bar_metrics() }
+}
+
+fn tray_menu(app: &AppHandle, state: Option<&AppState>, metric: MenuBarMetric, history: Option<&[HistoryPoint]>, summary: Option<&DashboardTotals>) -> tauri::Result<Menu<tauri::Wry>> {
     let mut builder = MenuBuilder::new(app);
+    let settings = state.and_then(|state| sync::app_settings(&state.database()).ok()).unwrap_or_default();
+
+    if let Some(totals) = summary {
+        builder = builder.item(&MenuItem::with_id(app, "summary-heading", "CodeTally", false, None::<&str>)?);
+        if let Some(state) = state {
+            let progress = state.progress();
+            let dashboard = state.dashboard().ok();
+            let status = if progress.running {
+                format!("Refreshing · {}", progress.message)
+            } else if let Some(date) = dashboard.as_ref().and_then(|data| data.last_full_refresh_at.as_deref()).and_then(|date| chrono::DateTime::parse_from_rfc3339(date).ok()) {
+                format!("Repositories refreshed {}", date.with_timezone(&chrono::Local).format("%b %-d, %H:%M"))
+            } else { "No full refresh recorded".into() };
+            builder = builder.item(&MenuItem::with_id(app, "summary-status", status, false, None::<&str>)?);
+            if let Some(date) = dashboard.as_ref().and_then(|data| data.last_personal_refresh_at.as_deref().into_iter().chain(data.last_activity_refresh_at.as_deref()).max()).and_then(|date| chrono::DateTime::parse_from_rfc3339(date).ok()) {
+                builder = builder.item(&MenuItem::with_id(app, "summary-activity", format!("Tickets refreshed {}", date.with_timezone(&chrono::Local).format("%b %-d, %H:%M")), false, None::<&str>)?);
+            }
+            if dashboard.as_ref().is_some_and(|data| data.repositories.iter().any(|repo| !repo.is_archived && (settings.include_forks_in_totals || !repo.is_fork) && !repo.loc_available)) {
+                builder = builder.item(&MenuItem::with_id(app, "summary-partial", "Partial line counts", false, None::<&str>)?);
+            }
+        }
+        builder = builder.separator();
+        for (key, label) in summary_rows(totals) {
+            builder = builder.item(&MenuItem::with_id(app, format!("summary-{key}"), label, false, None::<&str>)?);
+        }
+        builder = builder.separator();
+    }
     let mut activity_count = 0;
-    let range = state.and_then(|state| sync::app_settings(&state.database()).ok()).map(|settings| settings.loc_chart_range).unwrap_or_default();
+    let range = settings.loc_chart_range;
     let range_label = if cfg!(target_os = "macos") { range.label() } else { "30 days" };
     if matches!(metric, MenuBarMetric::TotalLines | MenuBarMetric::SourceLines | MenuBarMetric::TestLines) {
         let label = match metric {
@@ -259,16 +302,27 @@ fn tray_menu(app: &AppHandle, state: Option<&AppState>, metric: MenuBarMetric, h
         }
         builder = builder.separator();
     }
-    builder.text("show", "Show CodeTally").text("quit", "Quit CodeTally").build()
+    builder.text("show", "Open CodeTally").text("settings", "Settings…").text("quit", "Quit CodeTally").build()
 }
 
-fn build_metric_tray(app: &AppHandle, state: Option<&AppState>, id: &str, metric: MenuBarMetric, title: &str, tooltip: &str, history: Option<&[HistoryPoint]>) -> tauri::Result<()> {
+fn refresh_combined_on_interaction(tray: &TrayIcon, event: TrayIconEvent) {
+    if !matches!(event, TrayIconEvent::Enter { .. } | TrayIconEvent::Click { .. }) { return; }
+    let app = tray.app_handle();
+    if let Some(state) = app.try_state::<AppState>() {
+        if sync::app_settings(&state.database()).is_ok_and(|settings| settings.menu_bar_combined) {
+            refresh_menu(app, &state);
+        }
+    }
+}
+
+fn build_metric_tray(app: &AppHandle, state: Option<&AppState>, id: &str, metric: MenuBarMetric, title: &str, tooltip: &str, history: Option<&[HistoryPoint]>, summary: Option<&DashboardTotals>) -> tauri::Result<()> {
     let tray = TrayIconBuilder::with_id(id)
         .icon(metric_icon(metric))
         .icon_as_template(true)
+        .on_tray_icon_event(refresh_combined_on_interaction)
         .title(title)
         .tooltip(tooltip)
-        .menu(&tray_menu(app, state, metric, history)?)
+        .menu(&tray_menu(app, state, metric, history, summary)?)
         .build(app)?;
     #[cfg(target_os = "macos")]
     if let Some(points) = history.filter(|_| matches!(metric, MenuBarMetric::TotalLines | MenuBarMetric::SourceLines | MenuBarMetric::TestLines)) {
@@ -287,24 +341,28 @@ pub fn refresh_menu(app: &AppHandle, state: &AppState) {
         for (_, id) in METRIC_TRAYS { drop(app.remove_tray_by_id(id)); }
         return;
     }
-    let Ok(summaries) = db.summaries() else { return; };
-    let Ok(totals) = db.totals(&summaries) else { return; };
-    let metrics = settings.effective_menu_bar_metrics();
+    let Ok(dashboard) = state.dashboard() else { return; };
+    let totals = &dashboard.totals;
+    let metrics = visible_menu_metrics(&settings);
+    let summary = settings.menu_bar_combined.then_some(totals);
     let history = if metrics.iter().any(|metric| matches!(metric, MenuBarMetric::TotalLines | MenuBarMetric::SourceLines | MenuBarMetric::TestLines)) {
-        db.history(None).unwrap_or_default()
+        dashboard.history.clone()
     } else { Vec::new() };
     let titles = menu_titles_with_compact(&metrics, &settings.menu_bar_compact_metrics, &totals);
     let combined_title = menu_titles(&metrics, &totals).join(" · ");
-    let tooltip = format!("CodeTally — {combined_title}");
+    let tooltip = if settings.menu_bar_combined {
+        format!("CodeTally — {}", summary_rows(totals).iter().map(|(_, label)| label.as_str()).collect::<Vec<_>>().join(" · "))
+    } else { format!("CodeTally — {combined_title}") };
+    let primary_title = if settings.menu_bar_combined { "" } else { &titles[0] };
     if app.tray_by_id(TRAY_ID).is_none() {
-        let _ = build_metric_tray(app, Some(state), TRAY_ID, metrics[0], &titles[0], &tooltip, Some(&history));
+        let _ = build_metric_tray(app, Some(state), TRAY_ID, metrics[0], primary_title, &tooltip, Some(&history), summary);
     }
     let Some(tray) = app.tray_by_id(TRAY_ID) else { return; };
     let _ = tray.set_icon(Some(metric_icon(metrics[0])));
     let _ = tray.set_icon_as_template(true);
-    let _ = tray.set_title(Some(&titles[0]));
+    let _ = tray.set_title(Some(primary_title));
     let _ = tray.set_tooltip(Some(&tooltip));
-    if let Ok(menu) = tray_menu(app, Some(state), metrics[0], Some(&history)) {
+    if let Ok(menu) = tray_menu(app, Some(state), metrics[0], Some(&history), summary) {
         let _ = tray.set_menu(Some(menu));
         #[cfg(target_os = "macos")]
         if matches!(metrics[0], MenuBarMetric::TotalLines | MenuBarMetric::SourceLines | MenuBarMetric::TestLines) {
@@ -319,7 +377,7 @@ pub fn refresh_menu(app: &AppHandle, state: &AppState) {
                 let _ = metric_tray.set_icon_as_template(true);
                 let _ = metric_tray.set_title(Some(&titles[index]));
                 let _ = metric_tray.set_tooltip(Some(&tooltip));
-                if let Ok(menu) = tray_menu(app, Some(state), metric, Some(&history)) {
+                if let Ok(menu) = tray_menu(app, Some(state), metric, Some(&history), None) {
                     let _ = metric_tray.set_menu(Some(menu));
                     #[cfg(target_os = "macos")]
                     if matches!(metric, MenuBarMetric::TotalLines | MenuBarMetric::SourceLines | MenuBarMetric::TestLines) {
@@ -327,7 +385,7 @@ pub fn refresh_menu(app: &AppHandle, state: &AppState) {
                     }
                 }
             } else {
-                let _ = build_metric_tray(app, Some(state), id, metric, &titles[index], &tooltip, Some(&history));
+                let _ = build_metric_tray(app, Some(state), id, metric, &titles[index], &tooltip, Some(&history), None);
             }
         } else {
             drop(app.remove_tray_by_id(id));
@@ -337,9 +395,10 @@ pub fn refresh_menu(app: &AppHandle, state: &AppState) {
 
 pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     if app.tray_by_id(TRAY_ID).is_some() { return Ok(()); }
-    let menu = tray_menu(app, None, MenuBarMetric::TotalLines, None)?;
+    let menu = tray_menu(app, None, MenuBarMetric::TotalLines, None, None)?;
     app.on_menu_event(|app, event| match event.id.as_ref() {
         "show" => show_window(app),
+        "settings" => { show_window(app); let _ = app.emit("open-settings", ()); },
         "quit" => app.exit(0),
         id if id.starts_with(GITHUB_MENU_PREFIX) => {
             let url = &id[GITHUB_MENU_PREFIX.len()..];
@@ -350,6 +409,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(metric_icon(MenuBarMetric::TotalLines))
         .icon_as_template(true)
+        .on_tray_icon_event(refresh_combined_on_interaction)
         .title("CodeTally")
         .tooltip("CodeTally")
         .menu(&menu)
@@ -421,6 +481,16 @@ mod tests {
     use crate::models::{AppSettings, HistoryPoint, MenuBarMetric};
     use chrono::NaiveDate;
     use std::time::Duration;
+
+    #[test]
+    fn combined_menu_keeps_all_totals_and_restores_separate_selection() {
+        let mut settings = AppSettings { menu_bar_metrics: vec![MenuBarMetric::OpenPrs, MenuBarMetric::OpenIssues], menu_bar_combined: true, ..AppSettings::default() };
+        assert_eq!(super::visible_menu_metrics(&settings), vec![MenuBarMetric::TotalLines]);
+        let totals = crate::models::DashboardTotals { repositories: 8, total_loc: 12428, source_loc: 10000, test_loc: 2428, loc_change_30d: -1200, open_prs: 3, open_issues: 5 };
+        assert_eq!(super::summary_rows(&totals).into_iter().map(|(_, row)| row).collect::<Vec<_>>(), vec!["12,428 total lines", "8 repositories", "10,000 source lines", "2,428 test lines", "-1,200 lines · 30-day change", "3 open PRs", "5 open issues"]);
+        settings.menu_bar_combined = false;
+        assert_eq!(super::visible_menu_metrics(&settings), vec![MenuBarMetric::OpenPrs, MenuBarMetric::OpenIssues]);
+    }
 
     #[test]
     fn dock_icon_is_hidden_only_when_background_and_menu_bar_are_enabled() {

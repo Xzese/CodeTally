@@ -5,7 +5,7 @@ import { AlertCircle, ArrowRight, Check, ChevronDown, ChevronUp, Coffee, Externa
 import { checkForUpdates, getAppInfo, getDatabaseLocation, getRepositorySelection, installAppUpdate, openExternalUrl, revealDatabase, type AppInfo, type AppUpdate } from './api'
 import type { AppSettings, MenuBarMetric, RepositorySelection, ThemeMode, UpdateCheckInterval } from './types'
 import type { NormalizedMetrics } from './utils'
-import codetallyMark from './assets/codetally-mark.png'
+import codetallyMark from './assets/codetally-mark.webp'
 
 const METRICS: { key: MenuBarMetric; label: string; field: keyof NormalizedMetrics; suffix: string }[] = [
   { key: 'total_lines', label: 'Total lines', field: 'total_loc', suffix: 'lines' },
@@ -108,7 +108,7 @@ function OpenAtLoginControl() {
     setLoading(true)
     setError(null)
     try {
-      if (import.meta.env.VITE_CODETALLY_SCREENSHOT_MODE === '1' && !('__TAURI_INTERNALS__' in window)) {
+      if (import.meta.env.VITE_CODETALLY_SCREENSHOT_MODE === '1') {
         setEnabled(false)
         return
       }
@@ -126,6 +126,7 @@ function OpenAtLoginControl() {
     setChanging(true)
     setError(null)
     try {
+      if (import.meta.env.VITE_CODETALLY_SCREENSHOT_MODE === '1') { setEnabled(next); return }
       if (next) await enableAutostart()
       else await disableAutostart()
       setEnabled(next)
@@ -369,9 +370,11 @@ export default function SettingsDrawer({ login, settings, loaded, metrics, savin
     <section className="settings-section" id="settings-appearance"><SectionHeading title="Appearance & menu bar" help="Choose the metrics you want to see in the macOS menu bar. Hover or focus a metric to preview it. Values come from your saved dashboard data." />
       <div className="settings-theme-options" role="radiogroup" aria-label="Appearance">{THEME_OPTIONS.map((option) => { const Icon = option.icon; return <label key={option.key} className={`settings-theme-option${settings.theme_mode === option.key ? ' selected' : ''}`}><input type="radio" name="appearance" aria-label={option.label} checked={settings.theme_mode === option.key} onChange={() => onChange((current) => ({ ...current, theme_mode: option.key }))} /><Icon size={18} aria-hidden="true" /><span>{option.label}</span></label> })}</div>
       <div className="settings-row settings-menu-visibility"><div className="settings-row-label">Show in menu bar<Help label="Show in menu bar">Show your selected metrics in the macOS menu bar. If you hide them, open CodeTally from Applications or the Dock.</Help></div><input className="mac-switch" role="switch" type="checkbox" aria-label="Show CodeTally in the menu bar" checked={settings.show_menu_bar} onChange={(event) => { const checked = event.target.checked; onChange((current) => ({ ...current, show_menu_bar: checked })) }} /></div>
+      <div className="settings-row"><div className="settings-row-label">Combined menu bar item<Help label="Combined menu bar item">Use one CodeTally icon. Open it for all dashboard metrics and the lines-of-code trend. Turn this off to show your selected metrics as separate items.</Help></div><input className="mac-switch" role="switch" type="checkbox" aria-label="Combined menu bar item" checked={settings.menu_bar_combined} onChange={(event) => { const checked = event.target.checked; onChange((current) => ({ ...current, menu_bar_combined: checked })) }} /></div>
+      {settings.menu_bar_combined ? <div className="combined-menu-preview" aria-label="Combined menu bar preview"><div className="combined-preview-heading"><strong>CodeTally</strong><ChartNoAxesColumnIncreasing size={16} /></div><span className="combined-preview-status"><i /> Dashboard summary</span>{[{ label: 'Total lines', value: metrics.total_loc, icon: CodeXml }, { label: 'Repositories', value: metrics.repositories, icon: HardDrive }, { label: 'Source lines', value: metrics.source_loc, icon: CodeXml }, { label: 'Test lines', value: metrics.test_loc, icon: FlaskConical }, { label: '30-day change', value: metrics.loc_30d_change, icon: ChartNoAxesColumnIncreasing }, { label: 'Open PRs', value: metrics.open_prs, icon: GitPullRequest }, { label: 'Open issues', value: metrics.open_issues, icon: CircleDot }].map(({ label, value, icon: Icon }) => <div className="combined-preview-row" key={label}><Icon size={15} /><strong>{label === '30-day change' && value >= 0 ? '+' : ''}{value.toLocaleString()}</strong><span>{label}</span></div>)}<div className="combined-preview-footer">Open CodeTally <ArrowRight size={14} /></div></div> : <>
       <div className="settings-menu-preview"><div className="settings-menu-preview-strip" tabIndex={0} aria-label="Scroll menu bar preview horizontally"><span className="settings-preview-value" aria-label="Menu bar preview">{previewMetrics.map((option) => { const Icon = METRIC_ICONS[option.key]; const fullTitle = menuBarTitle(option.key, metrics); const compact = compactMetrics.includes(option.key); return <span className={`settings-preview-metric${selectedMetrics.includes(option.key) ? '' : ' is-exploratory'}`} key={option.key} aria-label={compact ? `${fullTitle}, compact` : fullTitle} title={fullTitle}><Icon size={13} aria-hidden="true" /><span>{menuBarTitle(option.key, metrics, compact)}</span></span> })}</span></div><span className="settings-preview-caption">{exploratoryMetric && !selectedMetrics.includes(exploratoryMetric) ? 'Preview · select to add' : 'Your menu bar'}</span></div>
       <div className="settings-metric-options" role="group" aria-label="Menu bar metrics">{METRICS.map((option) => { const selected = selectedMetrics.includes(option.key); const Icon = METRIC_ICONS[option.key]; return <div key={option.key} className="settings-metric-choice" onMouseEnter={() => setHoverMetric(option.key)} onMouseLeave={() => setHoverMetric(null)} onFocusCapture={() => setFocusMetric(option.key)} onBlurCapture={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocusMetric(null) }}><label className="settings-metric-compact-control"><span>Compact</span><input className="mac-switch" role="switch" type="checkbox" aria-label={`Compact ${option.label} in menu bar`} checked={compactMetrics.includes(option.key)} onChange={() => toggleCompactMetric(option.key)} /></label><label className={`settings-metric-option${selected ? ' selected' : ''}`}><input type="checkbox" aria-label={option.label} checked={selected} aria-disabled={selected && selectedMetrics.length === 1} onChange={() => toggleMetric(option.key)} /><Icon className="settings-metric-icon" size={18} aria-hidden="true" /><span className="settings-metric-copy"><strong>{option.label}</strong><small>{menuBarTitle(option.key, metrics)}</small></span><span className="settings-metric-indicator" aria-hidden="true">{selected && <Check size={12} />}</span></label></div> })}</div>
-      <p className="settings-metric-hint">Choose the metrics you want to see. Keep at least one selected.</p>
+      <p className="settings-metric-hint">Choose the metrics you want to see. Keep at least one selected.</p></>}
     </section>
     <section className="settings-section"><SectionHeading title="Kanban" help="Combine pull requests and issues from your tracked repositories on one board. Manual columns, priorities, and notes stay on this Mac and do not update GitHub." />
       <div className="settings-row"><label htmlFor="kanban-enabled">Enable Kanban board</label><input id="kanban-enabled" className="mac-switch" role="switch" type="checkbox" checked={settings.kanban_enabled} onChange={(event) => { const checked = event.target.checked; onChange((current) => ({ ...current, kanban_enabled: checked })) }} /></div>
