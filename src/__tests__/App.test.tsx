@@ -453,8 +453,11 @@ describe('dashboard UI', () => {
     })
     const user = await renderDashboard()
     const navigation = screen.getByRole('navigation', { name: 'Main navigation' })
+    expect(within(navigation).getAllByRole('button')).toHaveLength(2)
+    expect(within(navigation).getByRole('button', { name: 'Overview' })).toHaveAttribute('aria-current', 'page')
     await user.click(within(navigation).getByRole('button', { name: /Kanban Board/ }))
     await screen.findByRole('heading', { name: 'Kanban' })
+    expect(within(navigation).getByRole('button', { name: /Kanban Board/ })).toHaveAttribute('aria-current', 'page')
     expect(screen.getAllByRole('button', { name: 'Back to dashboard' })).toHaveLength(1)
     expect(within(navigation).getByRole('button', { name: 'Back to dashboard' })).toBeInTheDocument()
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('get_kanban_page', expect.objectContaining({ kind: 'prs' })))
@@ -477,7 +480,7 @@ describe('dashboard UI', () => {
 
     expect(screen.queryByRole('button', { name: /Kanban Board/ })).not.toBeInTheDocument()
     expect(invokeMock.mock.calls.some(([command]) => String(command).includes('kanban'))).toBe(false)
-    expect(screen.getByText('CodeTally')).toBeInTheDocument()
+    expect(screen.getByRole('img', { name: 'CodeTally' })).toBeInTheDocument()
     expect(screen.getByText('16,000')).toBeInTheDocument()
     expect(screen.getAllByText('Your repositories')).toHaveLength(2)
     expect(await screen.findByRole('heading', { name: 'Total Lines' })).toBeInTheDocument()
@@ -1432,17 +1435,19 @@ describe('dashboard UI', () => {
     await waitFor(() => expect(savedSettings()[savedSettings().length - 1]).toEqual(expect.objectContaining({ menu_bar_combined: false })))
   })
 
-  it('uses the rail to open issues, analytics, and repository details', async () => {
+  it('keeps dashboard sections within Overview and returns from repository details', async () => {
     const user = userEvent.setup()
     await renderDashboard()
-    await user.click(screen.getByRole('button', { name: 'View issues' }))
+    const navigation = screen.getByRole('navigation', { name: 'Main navigation' })
+    expect(within(navigation).getAllByRole('button')).toHaveLength(1)
+    const sidebar = screen.getByRole('heading', { name: 'Recent activity' }).closest('aside') as HTMLElement
+    await user.click(within(sidebar).getByRole('button', { name: 'Issues' }))
     await screen.findByRole('button', { name: /sam\/alpha #4/ })
-    expect(screen.getByRole('button', { name: 'View issues' })).toHaveAttribute('aria-current', 'page')
-    await user.click(screen.getByRole('button', { name: 'View analytics' }))
-    expect(screen.getByRole('button', { name: 'View analytics' })).toHaveAttribute('aria-current', 'page')
-    await user.click(screen.getByRole('button', { name: 'View repositories' }))
     await user.click(screen.getByRole('row', { name: /alpha/ }))
     expect(await screen.findByRole('heading', { name: 'alpha' })).toBeInTheDocument()
+    expect(within(navigation).getByRole('button', { name: 'Overview' })).toHaveAttribute('aria-current', 'page')
+    await user.click(within(navigation).getByRole('button', { name: 'Overview' }))
+    expect(await screen.findByRole('heading', { name: 'Code at a glance' })).toBeInTheDocument()
   })
 
   it('previews menu bar metrics on hover and focus without saving until selected', async () => {

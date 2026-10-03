@@ -1,6 +1,6 @@
 import { listen } from '@tauri-apps/api/event'
 import { lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
-import { AlertCircle, ArrowDown, ArrowLeft, ArrowUp, BarChart3, CodeXml, Database, FlaskConical, Home, PanelsTopLeft, Check, ChevronDown, ChevronUp, CircleDot, ExternalLink, GitBranch, GitPullRequest, Github, HardDrive, ListFilter, LoaderCircle, PanelRightClose, PanelRightOpen, Settings, Terminal, X, Zap } from 'lucide-react'
+import { AlertCircle, ArrowDown, ArrowLeft, ArrowUp, CodeXml, Database, FlaskConical, Home, PanelsTopLeft, Check, ChevronDown, ChevronUp, CircleDot, ExternalLink, GitBranch, GitPullRequest, Github, HardDrive, ListFilter, LoaderCircle, PanelRightClose, PanelRightOpen, Settings, Terminal, X, Zap } from 'lucide-react'
 import { checkDependencies, getActivityFeed, getActivityRefreshAt, getPersonalRefreshAt, getAppSettings, getDashboard, getGithubUser, getLocHistory, getSyncProgress, openExternalUrl, setAppSettings, syncActivity, syncGithubData, syncPersonalWorkItems, syncWorkItems } from './api'
 import type { ActivityRelationship, AppSettings, DashboardData, DependencyStatus, FeedKind, Issue, LocSnapshot, PullRequest, Repository, SyncProgress, TimeRange } from './types'
 import { aggregateHistory, filterIssues, filterPullRequests, isDraft, isMerged, reuseUnchangedRecords, sameFields, sortRepositories, type FeedState } from './model'
@@ -83,7 +83,6 @@ function App() {
   const [importStep, setImportStep] = useState('Preparing import')
   const [syncProgress, setSyncProgress] = useState<SyncProgress | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [navigation, setNavigation] = useState('overview')
   const [screen, setScreen] = useState<Screen>('dashboard')
   const [selectedRepo, setSelectedRepo] = useState<Repository | null>(null)
   const [detailHistory, setDetailHistory] = useState<LocSnapshot[] | null>(null)
@@ -705,35 +704,24 @@ function App() {
   const handleOpenUrl = useCallback((url: string | undefined) => { void openUrl(url, setError) }, [])
 
   const navigate = (destination: string) => {
-    setNavigation(destination)
     if (destination === 'kanban') { setScreen('kanban'); return }
-    if (screen !== 'dashboard') backToDashboard()
-    if (destination === 'prs' || destination === 'issues') {
-      handleFeedKind(destination)
-      if (narrowFeed) setNarrowFeedOpen(true)
-      else setWideFeedOpen(true)
-    }
+    backToDashboard()
     requestAnimationFrame(() => {
-      const selector = destination === 'repositories' ? '.repos-panel' : destination === 'analytics' ? '.chart-panel' : '.page-heading'
-      document.querySelector(selector)?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })
+      document.querySelector('.page-heading')?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })
     })
   }
   const navItems = [
     { key: 'overview', label: 'Overview', icon: Home, aria: screen === 'kanban' ? 'Back to dashboard' : 'Overview' },
-    { key: 'repositories', label: 'Repositories', icon: Database, aria: 'View repositories' },
-    { key: 'issues', label: 'Issues', icon: CircleDot, aria: 'View issues' },
-    { key: 'prs', label: 'Pull requests', icon: GitPullRequest, aria: 'View pull requests' },
-    ...(appSettings.kanban_enabled ? [{ key: 'kanban', label: 'Kanban', icon: PanelsTopLeft, aria: 'Kanban Board' }] : []),
-    { key: 'analytics', label: 'Analytics', icon: BarChart3, aria: 'View analytics' }
+    ...(appSettings.kanban_enabled ? [{ key: 'kanban', label: 'Kanban', icon: PanelsTopLeft, aria: 'Kanban Board' }] : [])
   ]
-  const activeNavigation = screen === 'kanban' ? 'kanban' : screen === 'detail' ? 'repositories' : navigation === 'kanban' ? 'overview' : navigation
+  const activeNavigation = screen === 'kanban' ? 'kanban' : 'overview'
 
   return (
     <div className={lightMode ? 'app-shell light' : 'app-shell'}>
       <aside className="navigation-rail">
-        <div className="rail-brand"><img src={codetallyAppIcon} alt="" /><span>CodeTally</span></div>
+        <div className="rail-brand" title="CodeTally"><img src={codetallyAppIcon} alt="CodeTally" /></div>
         <nav aria-label="Main navigation">{navItems.map(({ key, label, icon: Icon, aria }) => <button key={key} type="button" aria-label={aria} title={label} aria-current={activeNavigation === key ? 'page' : undefined} className={activeNavigation === key ? 'active' : ''} disabled={isSetup || (busy && !dashboard.repositories.length)} onClick={() => navigate(key)}><Icon size={17} aria-hidden="true" /><span>{label}</span></button>)}</nav>
-        <div className="rail-footer"><button className="rail-settings" title="Settings" aria-label="Settings" onClick={() => setSettingsOpen(true)}><Settings size={17} /><span>Settings</span></button><div className="rail-account"><span className="account-avatar">{(login || 'C').slice(0, 1).toUpperCase()}</span><span><strong>{login || 'Local workspace'}</strong><small>Saved on this Mac</small></span></div></div>
+        <div className="rail-footer"><button className="rail-settings" title="Settings" aria-label="Settings" onClick={() => setSettingsOpen(true)}><Settings size={17} /></button></div>
       </aside>
       <div className="workspace-shell">
       <header className="topbar">
