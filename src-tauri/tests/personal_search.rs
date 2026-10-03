@@ -61,6 +61,7 @@ fn personal_refresh_updates_authoritative_menu_totals_even_without_search_matche
         db_path:f.root.join("db.sqlite"),cache_dir:f.root.join("cache"),
         progress:std::sync::Arc::new(Mutex::new(Default::default())),
         job_lock:std::sync::Arc::new(Mutex::new(())),
+        dashboard_cache:std::sync::Arc::new(Mutex::new(Default::default())),
     };
     for (prs,issues) in [(21,17),(0,0)] {
         f.responses(vec![empty(),empty(),empty(),empty(),json!({"data":{"r0":{"id":"R1","openPRs":{"totalCount":prs},"openIssues":{"totalCount":issues}}}})]);

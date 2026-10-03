@@ -1,12 +1,13 @@
 use crate::error::AppResult;
 use crate::models::{
-    ActivityItem, ClassificationConfig, DashboardTotals, HistoryPoint, Issue, PullRequest,
+    ActivityItem, ClassificationConfig, Dashboard, DashboardTotals, GithubUser, HistoryPoint, Issue, PullRequest,
     Repository, RepositorySummary, Snapshot,
 };
-use chrono::{Duration, Utc};
-use rusqlite::{params, Connection, OptionalExtension, Row};
-use std::collections::{BTreeSet, HashMap};
-use std::path::Path;
+use chrono::{DateTime, Duration, NaiveDate, Utc};
+use rusqlite::{params, Connection, OptionalExtension, OpenFlags, Row};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 const LOC_ANALYSIS_VERSION: &str = "3";
 const HISTORY_SAMPLING_VERSION: &str = "1";
@@ -14,6 +15,21 @@ const ACTIVITY_ACTOR_FIELDS_VERSION: &str = "1";
 
 pub struct Database {
     path: std::path::PathBuf,
+}
+
+/// The observer must remain open: SQLite data_version is comparable only on
+/// the same connection. Normal writers use separate connections.
+#[derive(Default)]
+pub struct DashboardCache {
+    observer: Option<(PathBuf, Connection)>,
+    cached: Option<CachedDashboard>,
+}
+
+struct CachedDashboard {
+    version: i64,
+    built_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+    dashboard: Arc<Dashboard>,
 }
 
 impl Database {
@@ -127,12 +143,18 @@ impl Database {
                 value TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_snapshots_repo_date ON code_snapshots(repository_id, snapshot_date);
+            CREATE INDEX IF NOT EXISTS idx_snapshots_date ON code_snapshots(snapshot_date);
+            CREATE INDEX IF NOT EXISTS idx_observations_date ON loc_observations(observed_at);
             CREATE INDEX IF NOT EXISTS idx_snapshots_commit ON code_snapshots(commit_sha);
             CREATE INDEX IF NOT EXISTS idx_observations_repo_date ON loc_observations(repository_id, observed_at);
             CREATE INDEX IF NOT EXISTS idx_prs_updated ON pull_requests(updated_at);
             CREATE INDEX IF NOT EXISTS idx_prs_repo_state ON pull_requests(repository_id, state);
             CREATE INDEX IF NOT EXISTS idx_issues_updated ON issues(updated_at);
             CREATE INDEX IF NOT EXISTS idx_issues_repo_state ON issues(repository_id, state);
+            CREATE INDEX IF NOT EXISTS idx_prs_repo_updated ON pull_requests(repository_id, updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_issues_repo_updated ON issues(repository_id, updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_prs_state_updated ON pull_requests(lower(state), updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_issues_state_updated ON issues(lower(state), updated_at DESC);
             "#,
         )?;
         // Keep databases created by an early development build usable.
@@ -300,7 +322,7 @@ impl Database {
 
     pub fn set_metadata(&self, key: &str, value: &str) -> AppResult<()> {
         let conn = self.connect()?;
-        conn.execute("INSERT INTO app_metadata(key,value) VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![key, value])?;
+        conn.execute("INSERT INTO app_metadata(key,value) VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE app_metadata.value IS NOT excluded.value", params![key, value])?;
         Ok(())
     }
 
@@ -312,17 +334,32 @@ impl Database {
     pub fn upsert_repository(&self, repo: &Repository) -> AppResult<i64> {
         let mut conn = self.connect()?;
         let tx = conn.transaction()?;
+        Self::upsert_repository_on(&tx, repo)?;
+        let id = tx.query_row("SELECT id FROM repositories WHERE github_id=?1", [&repo.github_id], |row| row.get(0))?;
+        tx.commit()?;
+        Ok(id)
+    }
+
+    pub fn upsert_repositories(&self, repositories: &[Repository]) -> AppResult<()> {
+        let mut conn = self.connect()?;
+        let tx = conn.transaction()?;
+        for repo in repositories { Self::upsert_repository_on(&tx, repo)?; }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn upsert_repository_on(conn: &Connection, repo: &Repository) -> AppResult<()> {
         // A deleted repository can be recreated under the same owner/name with
         // a new GitHub ID. Keep the old row and its snapshots/activity attached
         // to that old identity, but retire its display name before inserting the
         // new repository. Names are reusable; GitHub IDs are the cache key.
-        let displaced_id: Option<i64> = tx.query_row(
+        let displaced_id: Option<i64> = conn.query_row(
             "SELECT id FROM repositories WHERE name_with_owner=?1 AND github_id<>?2",
             params![repo.name_with_owner, repo.github_id],
             |row| row.get(0),
         ).optional()?;
         if let Some(id) = displaced_id {
-            tx.execute(
+            conn.execute(
                 "UPDATE repositories SET name_with_owner=?1,is_archived=1,last_error=?2 WHERE id=?3",
                 params![
                     format!("{} [replaced local #{id}]", repo.name_with_owner),
@@ -331,7 +368,7 @@ impl Database {
                 ],
             )?;
         }
-        tx.execute(
+        conn.prepare_cached(
             r#"INSERT INTO repositories
                (github_id, owner, name, name_with_owner, url, ssh_url, default_branch,
                 primary_language, is_private, is_fork, is_archived, star_count, fork_count, created_at,
@@ -352,8 +389,8 @@ impl Database {
                  open_pr_count=repositories.open_pr_count,
                  open_issue_count=repositories.open_issue_count,
                  open_counts_synced=repositories.open_counts_synced,
-                 last_fetched_pushed_at=repositories.last_fetched_pushed_at"#,
-            params![
+                 last_fetched_pushed_at=repositories.last_fetched_pushed_at
+               WHERE repositories.owner IS NOT excluded.owner OR repositories.name IS NOT excluded.name OR repositories.name_with_owner IS NOT excluded.name_with_owner OR repositories.url IS NOT excluded.url OR repositories.ssh_url IS NOT excluded.ssh_url OR repositories.default_branch IS NOT excluded.default_branch OR repositories.primary_language IS NOT excluded.primary_language OR repositories.is_private IS NOT excluded.is_private OR repositories.is_fork IS NOT excluded.is_fork OR repositories.is_archived IS NOT excluded.is_archived OR repositories.created_at IS NOT excluded.created_at OR repositories.star_count IS NOT excluded.star_count OR repositories.fork_count IS NOT excluded.fork_count OR repositories.github_updated_at IS NOT excluded.github_updated_at OR repositories.pushed_at IS NOT excluded.pushed_at OR repositories.local_path IS NOT COALESCE(excluded.local_path,repositories.local_path) OR repositories.last_sync_at IS NOT COALESCE(excluded.last_sync_at,repositories.last_sync_at) OR repositories.last_error IS NOT COALESCE(excluded.last_error,repositories.last_error)"#)?.execute(params![
                 repo.github_id,
                 repo.owner,
                 repo.name,
@@ -378,15 +415,8 @@ impl Database {
                 repo.open_issue_count,
                 repo.open_counts_synced,
                 repo.last_fetched_pushed_at,
-            ],
-        )?;
-        let id = tx.query_row(
-            "SELECT id FROM repositories WHERE github_id=?1",
-            [&repo.github_id],
-            |row| row.get(0),
-        )?;
-        tx.commit()?;
-        Ok(id)
+            ])?;
+        Ok(())
     }
 
     pub fn repository(&self, id: i64) -> AppResult<Option<Repository>> {
@@ -402,6 +432,10 @@ impl Database {
 
     pub fn repositories(&self) -> AppResult<Vec<Repository>> {
         let conn = self.connect()?;
+        Self::repositories_on(&conn)
+    }
+
+    fn repositories_on(conn: &Connection) -> AppResult<Vec<Repository>> {
         let mut stmt = conn.prepare("SELECT id,github_id,owner,name,name_with_owner,url,ssh_url,default_branch,primary_language,is_private,is_fork,is_archived,star_count,fork_count,created_at,github_updated_at,pushed_at,local_path,last_sync_at,last_error,loc_backfill_complete,open_pr_count,open_issue_count,open_counts_synced,last_fetched_pushed_at FROM repositories ORDER BY name_with_owner COLLATE NOCASE")?;
         let rows = stmt.query_map([], repository_from_row)?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -606,8 +640,12 @@ impl Database {
 
     pub fn measurement_at_or_before(&self, repository_id: i64, date: &str) -> AppResult<Option<Snapshot>> {
         let conn = self.connect()?;
-        let snapshot: Option<Snapshot> = conn.query_row("SELECT id,repository_id,commit_sha,commit_date,snapshot_date,total_loc,source_loc,test_loc,created_at FROM code_snapshots WHERE repository_id=?1 AND snapshot_date<=?2 ORDER BY snapshot_date DESC, id DESC LIMIT 1", params![repository_id, date], snapshot_from_row).optional()?;
-        let observation: Option<Snapshot> = conn.query_row("SELECT id,repository_id,commit_sha,observed_at,observed_at,total_loc,source_loc,test_loc,observed_at FROM loc_observations WHERE repository_id=?1 AND observed_at<=?2 ORDER BY observed_at DESC, id DESC LIMIT 1", params![repository_id, date], snapshot_from_row).optional()?;
+        Self::measurement_on(&conn, repository_id, date)
+    }
+
+    fn measurement_on(conn: &Connection, repository_id: i64, date: &str) -> AppResult<Option<Snapshot>> {
+        let snapshot: Option<Snapshot> = conn.prepare_cached("SELECT id,repository_id,commit_sha,commit_date,snapshot_date,total_loc,source_loc,test_loc,created_at FROM code_snapshots WHERE repository_id=?1 AND snapshot_date<=?2 ORDER BY snapshot_date DESC, id DESC LIMIT 1")?.query_row(params![repository_id, date], snapshot_from_row).optional()?;
+        let observation: Option<Snapshot> = conn.prepare_cached("SELECT id,repository_id,commit_sha,observed_at,observed_at,total_loc,source_loc,test_loc,observed_at FROM loc_observations WHERE repository_id=?1 AND observed_at<=?2 ORDER BY observed_at DESC, id DESC LIMIT 1")?.query_row(params![repository_id, date], snapshot_from_row).optional()?;
         Ok(match (snapshot, observation) {
             (Some(snapshot), Some(observation)) => if observation.snapshot_date >= snapshot.snapshot_date { Some(observation) } else { Some(snapshot) },
             (Some(snapshot), None) => Some(snapshot),
@@ -639,25 +677,49 @@ impl Database {
 
     pub fn upsert_pull_request(&self, item: &PullRequest) -> AppResult<()> {
         let conn = self.connect()?;
-        conn.execute(
+        Self::upsert_pull_request_on(&conn, item)
+    }
+
+    fn upsert_pull_request_on(conn: &Connection, item: &PullRequest) -> AppResult<()> {
+        conn.prepare_cached(
             r#"INSERT INTO pull_requests
                (repository_id,number,title,state,is_draft,created_at,updated_at,merged_at,closed_at,url,author,assignees_json,additions,deletions,changed_files,ci_state)
                VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
-               ON CONFLICT(repository_id,number) DO UPDATE SET title=excluded.title,state=excluded.state,is_draft=excluded.is_draft,created_at=excluded.created_at,updated_at=excluded.updated_at,merged_at=excluded.merged_at,closed_at=excluded.closed_at,url=excluded.url,author=excluded.author,assignees_json=excluded.assignees_json,additions=excluded.additions,deletions=excluded.deletions,changed_files=excluded.changed_files,ci_state=excluded.ci_state"#,
-            params![item.repository_id,item.number,item.title,item.state,item.is_draft,item.created_at,item.updated_at,item.merged_at,item.closed_at,item.url,item.author,serde_json::to_string(&item.assignees)?,item.additions,item.deletions,item.changed_files,item.ci_state],
-        )?;
+               ON CONFLICT(repository_id,number) DO UPDATE SET title=excluded.title,state=excluded.state,is_draft=excluded.is_draft,created_at=excluded.created_at,updated_at=excluded.updated_at,merged_at=excluded.merged_at,closed_at=excluded.closed_at,url=excluded.url,author=excluded.author,assignees_json=excluded.assignees_json,additions=excluded.additions,deletions=excluded.deletions,changed_files=excluded.changed_files,ci_state=excluded.ci_state
+               WHERE pull_requests.title IS NOT excluded.title OR pull_requests.state IS NOT excluded.state OR pull_requests.is_draft IS NOT excluded.is_draft OR pull_requests.created_at IS NOT excluded.created_at OR pull_requests.updated_at IS NOT excluded.updated_at OR pull_requests.merged_at IS NOT excluded.merged_at OR pull_requests.closed_at IS NOT excluded.closed_at OR pull_requests.url IS NOT excluded.url OR pull_requests.additions IS NOT excluded.additions OR pull_requests.deletions IS NOT excluded.deletions OR pull_requests.changed_files IS NOT excluded.changed_files OR pull_requests.ci_state IS NOT excluded.ci_state OR pull_requests.author IS NOT excluded.author OR pull_requests.assignees_json IS NOT excluded.assignees_json"#)?.execute(params![item.repository_id,item.number,item.title,item.state,item.is_draft,item.created_at,item.updated_at,item.merged_at,item.closed_at,item.url,item.author,serde_json::to_string(&item.assignees)?,item.additions,item.deletions,item.changed_files,item.ci_state])?;
         Ok(())
     }
 
     pub fn upsert_issue(&self, item: &Issue) -> AppResult<()> {
         let conn = self.connect()?;
-        conn.execute(
+        Self::upsert_issue_on(&conn, item)
+    }
+
+    fn upsert_issue_on(conn: &Connection, item: &Issue) -> AppResult<()> {
+        conn.prepare_cached(
             r#"INSERT INTO issues
                (repository_id,number,title,state,created_at,updated_at,closed_at,url,author,labels_json,assignees_json)
                VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
-               ON CONFLICT(repository_id,number) DO UPDATE SET title=excluded.title,state=excluded.state,created_at=excluded.created_at,updated_at=excluded.updated_at,closed_at=excluded.closed_at,url=excluded.url,author=excluded.author,labels_json=excluded.labels_json,assignees_json=excluded.assignees_json"#,
-            params![item.repository_id,item.number,item.title,item.state,item.created_at,item.updated_at,item.closed_at,item.url,item.author,serde_json::to_string(&item.labels)?,serde_json::to_string(&item.assignees)?],
-        )?;
+               ON CONFLICT(repository_id,number) DO UPDATE SET title=excluded.title,state=excluded.state,created_at=excluded.created_at,updated_at=excluded.updated_at,closed_at=excluded.closed_at,url=excluded.url,author=excluded.author,labels_json=excluded.labels_json,assignees_json=excluded.assignees_json
+               WHERE issues.title IS NOT excluded.title OR issues.state IS NOT excluded.state OR issues.created_at IS NOT excluded.created_at OR issues.updated_at IS NOT excluded.updated_at OR issues.closed_at IS NOT excluded.closed_at OR issues.url IS NOT excluded.url OR issues.author IS NOT excluded.author OR issues.labels_json IS NOT excluded.labels_json OR issues.assignees_json IS NOT excluded.assignees_json"#)?.execute(params![item.repository_id,item.number,item.title,item.state,item.created_at,item.updated_at,item.closed_at,item.url,item.author,serde_json::to_string(&item.labels)?,serde_json::to_string(&item.assignees)?])?;
+        Ok(())
+    }
+
+    /// Publish a validated feed page and its checkpoint together. A failed
+    /// commit leaves both data and cursor unchanged, so replay remains safe.
+    pub fn apply_activity_page(&self, prs: &[PullRequest], issues: &[Issue], repository_id: i64, open_prs: i64, open_issues: i64, cursor_key: &str, cursor: &str) -> AppResult<()> {
+        self.apply_activity_page_with_identities(prs, issues, repository_id, open_prs, open_issues, cursor_key, cursor, |_| Ok(()))
+    }
+
+    pub(crate) fn apply_activity_page_with_identities(&self, prs: &[PullRequest], issues: &[Issue], repository_id: i64, open_prs: i64, open_issues: i64, cursor_key: &str, cursor: &str, update_identities: impl FnOnce(&Connection) -> AppResult<()>) -> AppResult<()> {
+        let mut conn = self.connect()?;
+        let tx = conn.transaction()?;
+        for item in prs { Self::upsert_pull_request_on(&tx, item)?; }
+        for item in issues { Self::upsert_issue_on(&tx, item)?; }
+        update_identities(&tx)?;
+        tx.execute("UPDATE repositories SET open_pr_count=?1, open_issue_count=?2, open_counts_synced=1 WHERE id=?3 AND (open_counts_synced<>1 OR open_pr_count<>?1 OR open_issue_count<>?2)", params![open_prs, open_issues, repository_id])?;
+        tx.execute("INSERT INTO app_metadata(key,value) VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE app_metadata.value IS NOT excluded.value", params![cursor_key, cursor])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -673,7 +735,13 @@ impl Database {
         let relationship = normalize_relationship(relationship)?;
         let relationship_filter = relationship_filter("p", relationship);
         let conn = self.connect()?;
-        let query = format!("SELECT p.repository_id,r.name_with_owner,p.number,p.title,p.state,p.is_draft,p.created_at,p.updated_at,p.merged_at,p.closed_at,p.url,p.author,p.assignees_json,p.additions,p.deletions,p.changed_files,p.ci_state FROM pull_requests p JOIN repositories r ON r.id=p.repository_id WHERE r.is_archived=0 AND r.id IN (SELECT value FROM json_each(?4)) AND (?1 IS NULL OR p.repository_id=?1) AND (?2 IS NULL OR lower(p.state)=lower(?2)) AND ({relationship_filter}) ORDER BY p.updated_at DESC LIMIT ?3");
+        let repository_filter = if repository_id.is_some() { " AND p.repository_id=?1" } else { "" };
+        let state_filter = match state {
+            Some(value) if value.eq_ignore_ascii_case("closed") => " AND (lower(p.state) IN ('closed','merged') OR p.merged_at IS NOT NULL)",
+            Some(_) => " AND lower(p.state)=lower(?2)",
+            None => "",
+        };
+        let query = format!("SELECT p.repository_id,r.name_with_owner,p.number,p.title,p.state,p.is_draft,p.created_at,p.updated_at,p.merged_at,p.closed_at,p.url,p.author,p.assignees_json,p.additions,p.deletions,p.changed_files,p.ci_state FROM pull_requests p JOIN repositories r ON r.id=p.repository_id WHERE r.is_archived=0 AND r.id IN (SELECT value FROM json_each(?4)){repository_filter}{state_filter} AND ({relationship_filter}) ORDER BY p.updated_at DESC LIMIT ?3");
         let mut stmt = conn.prepare(&query)?;
         let rows = stmt.query_map(params![repository_id, state, limit as i64, self.activity_repository_ids_json(scope)?, login], pull_request_from_row)?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -691,34 +759,46 @@ impl Database {
         let relationship = normalize_relationship(relationship)?;
         let relationship_filter = relationship_filter("i", relationship);
         let conn = self.connect()?;
-        let query = format!("SELECT i.repository_id,r.name_with_owner,i.number,i.title,i.state,i.created_at,i.updated_at,i.closed_at,i.url,i.author,i.labels_json,i.assignees_json FROM issues i JOIN repositories r ON r.id=i.repository_id WHERE r.is_archived=0 AND r.id IN (SELECT value FROM json_each(?4)) AND (?1 IS NULL OR i.repository_id=?1) AND (?2 IS NULL OR lower(i.state)=lower(?2)) AND ({relationship_filter}) ORDER BY i.updated_at DESC LIMIT ?3");
+        let repository_filter = if repository_id.is_some() { " AND i.repository_id=?1" } else { "" };
+        let state_filter = if state.is_some() { " AND lower(i.state)=lower(?2)" } else { "" };
+        let query = format!("SELECT i.repository_id,r.name_with_owner,i.number,i.title,i.state,i.created_at,i.updated_at,i.closed_at,i.url,i.author,i.labels_json,i.assignees_json FROM issues i JOIN repositories r ON r.id=i.repository_id WHERE r.is_archived=0 AND r.id IN (SELECT value FROM json_each(?4)){repository_filter}{state_filter} AND ({relationship_filter}) ORDER BY i.updated_at DESC LIMIT ?3");
         let mut stmt = conn.prepare(&query)?;
         let rows = stmt.query_map(params![repository_id, state, limit as i64, self.activity_repository_ids_json(scope)?, login], issue_from_row)?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     pub fn summaries(&self) -> AppResult<Vec<RepositorySummary>> {
-        let repos = self.selected_repositories()?;
-        let now = Utc::now();
+        self.summaries_at(Utc::now())
+    }
+
+    fn summaries_at(&self, now: DateTime<Utc>) -> AppResult<Vec<RepositorySummary>> {
+        let settings = crate::sync::app_settings(self)?;
+        let login = self.metadata("github_login")?.unwrap_or_default();
+        let conn = self.connect()?;
+        let tx = conn.unchecked_transaction()?;
+        let repos: Vec<_> = Self::repositories_on(&tx)?.into_iter().filter(|repo| repository_selected(repo, &settings, &login)).collect();
         let day_7 = (now - Duration::days(7)).to_rfc3339();
         let day_30 = (now - Duration::days(30)).to_rfc3339();
         let day_90 = (now - Duration::days(90)).to_rfc3339();
+        let now = now.to_rfc3339();
         let mut output = Vec::with_capacity(repos.len());
         for repo in repos {
-            let now = Utc::now().to_rfc3339();
-            let current = self.measurement_at_or_before(repo.id, &now)?;
-            let old_7 = self.measurement_at_or_before(repo.id, &day_7)?;
-            let old_30 = self.measurement_at_or_before(repo.id, &day_30)?;
-            let old_90 = self.measurement_at_or_before(repo.id, &day_90)?;
+            let current = Self::measurement_on(&tx, repo.id, &now)?;
+            let old_7 = Self::measurement_on(&tx, repo.id, &day_7)?;
+            let old_30 = Self::measurement_on(&tx, repo.id, &day_30)?;
+            let old_90 = Self::measurement_on(&tx, repo.id, &day_90)?;
             let loc_available = current.is_some();
             let (total, source, tests) = current.as_ref().map(|x| (x.total_loc, x.source_loc, x.test_loc)).unwrap_or_default();
             let base_7 = old_7.as_ref().map(|x| x.total_loc).unwrap_or_default();
             let base_30 = old_30.as_ref().map(|x| x.total_loc).unwrap_or_default();
             let base_90 = old_90.as_ref().map(|x| x.total_loc).unwrap_or_default();
             let change_30 = if loc_available && old_30.is_some() { total - base_30 } else { 0 };
-            let conn = self.connect()?;
-            let latest_pr: Option<String> = conn.query_row("SELECT MAX(updated_at) FROM pull_requests WHERE repository_id=?1", [repo.id], |row| row.get(0))?;
-            let latest_issue: Option<String> = conn.query_row("SELECT MAX(updated_at) FROM issues WHERE repository_id=?1", [repo.id], |row| row.get(0))?;
+            let (latest_pr, latest_issue, open_prs, open_issues): (Option<String>, Option<String>, i64, i64) = tx.prepare_cached(
+                "SELECT (SELECT MAX(updated_at) FROM pull_requests WHERE repository_id=?1),
+                        (SELECT MAX(updated_at) FROM issues WHERE repository_id=?1),
+                        CASE WHEN ?2 THEN ?3 ELSE (SELECT count(*) FROM pull_requests WHERE repository_id=?1 AND upper(state)='OPEN') END,
+                        CASE WHEN ?2 THEN ?4 ELSE (SELECT count(*) FROM issues WHERE repository_id=?1 AND upper(state)='OPEN') END"
+            )?.query_row(params![repo.id, repo.open_counts_synced, repo.open_pr_count, repo.open_issue_count], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?;
             let last_activity = [repo.pushed_at.clone(), repo.github_updated_at.clone(), latest_pr, latest_issue].into_iter().flatten().max();
             output.push(RepositorySummary {
                 id: repo.id,
@@ -740,8 +820,8 @@ impl Database {
                 loc_change_30d: change_30,
                 loc_change_90d: if loc_available && old_90.is_some() { total - base_90 } else { 0 },
                 loc_change_30d_percent: if loc_available && base_30 > 0 && old_30.is_some() { change_30 as f64 / base_30 as f64 * 100.0 } else { 0.0 },
-                open_prs: if repo.open_counts_synced { repo.open_pr_count } else { self.count_open_prs(repo.id)? },
-                open_issues: if repo.open_counts_synced { repo.open_issue_count } else { self.count_open_issues(repo.id)? },
+                open_prs,
+                open_issues,
                 last_activity,
                 last_sync_at: repo.last_sync_at,
                 last_error: repo.last_error,
@@ -754,14 +834,73 @@ impl Database {
         Ok(output)
     }
 
-    fn count_open_prs(&self, repository_id: i64) -> AppResult<i64> {
-        let conn = self.connect()?;
-        Ok(conn.query_row("SELECT count(*) FROM pull_requests WHERE repository_id=?1 AND upper(state)='OPEN'", [repository_id], |row| row.get(0))?)
+    pub fn dashboard_cached(&self, cache: &mut DashboardCache) -> AppResult<Arc<Dashboard>> {
+        self.dashboard_cached_at(cache, Utc::now())
     }
 
-    fn count_open_issues(&self, repository_id: i64) -> AppResult<i64> {
-        let conn = self.connect()?;
-        Ok(conn.query_row("SELECT count(*) FROM issues WHERE repository_id=?1 AND upper(state)='OPEN'", [repository_id], |row| row.get(0))?)
+    pub fn dashboard_cached_at(&self, cache: &mut DashboardCache, now: DateTime<Utc>) -> AppResult<Arc<Dashboard>> {
+        if cache.observer.as_ref().map(|(path, _)| path) != Some(&self.path) {
+            let observer = Connection::open_with_flags(&self.path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            observer.busy_timeout(std::time::Duration::from_secs(10))?;
+            cache.observer = Some((self.path.clone(), observer));
+            cache.cached = None;
+        }
+        let observer = &cache.observer.as_ref().expect("observer initialized").1;
+        let version: i64 = observer.query_row("PRAGMA data_version", [], |row| row.get(0))?;
+        if let Some(cached) = &cache.cached {
+            if cached.version == version && now >= cached.built_at && now < cached.expires_at {
+                return Ok(Arc::clone(&cached.dashboard));
+            }
+        }
+        let repositories: Vec<_> = self.summaries_at(now)?.into_iter().filter(|repo| !repo.is_archived).collect();
+        let dashboard = Arc::new(Dashboard {
+            totals: self.totals(&repositories)?,
+            history: self.history(None)?,
+            last_sync_at: repositories.iter().filter_map(|repo| repo.last_sync_at.clone()).max(),
+            user: self.metadata("github_login")?.map(|login| GithubUser { login }),
+            errors: self.metadata("org_discovery_errors")?.filter(|_| crate::sync::app_settings(self).map(|settings| settings.include_company_repositories).unwrap_or(false)).map(|value| value.lines().map(str::to_string).collect()).unwrap_or_default(),
+            last_lines_refresh_at: self.metadata(crate::sync::LAST_LOC_REFRESH_METADATA_KEY)?,
+            last_full_refresh_at: self.metadata(crate::sync::LAST_FULL_REFRESH_METADATA_KEY)?,
+            last_activity_refresh_at: self.metadata(crate::sync::LAST_ACTIVITY_REFRESH_METADATA_KEY)?,
+            last_personal_refresh_at: self.metadata(crate::sync::LAST_PERSONAL_REFRESH_METADATA_KEY)?,
+            repositories,
+        });
+        let expires_at = Self::dashboard_expiry(observer, now)?;
+        let after: i64 = observer.query_row("PRAGMA data_version", [], |row| row.get(0))?;
+        // A concurrent page commit may span our independent reads. Do not admit
+        // that result to the cache; the next poll will rebuild from fresh data.
+        cache.cached = if version == after {
+            Some(CachedDashboard { version, built_at: now, expires_at, dashboard: Arc::clone(&dashboard) })
+        } else { None };
+        Ok(dashboard)
+    }
+
+    fn dashboard_expiry(conn: &Connection, now: DateTime<Utc>) -> AppResult<DateTime<Utc>> {
+        // Baselines move without writes. Expire at the next measurement crossing
+        // any cutoff, with a short upper bound for unusual imported timestamps.
+        let mut expires = now + Duration::minutes(1);
+        for days in [0, 7, 30, 90] {
+            let cutoff = (now - Duration::days(days)).to_rfc3339();
+            for (table, column) in [("code_snapshots", "snapshot_date"), ("loc_observations", "observed_at")] {
+                let query = format!("SELECT {column} FROM {table} WHERE {column}>?1 ORDER BY {column} LIMIT 1");
+                let value: Option<String> = conn.prepare_cached(&query)?.query_row([&cutoff], |row| row.get(0)).optional()?;
+                if let Some(value) = value {
+                    let timestamp = value.parse::<DateTime<Utc>>().ok().or_else(|| {
+                        NaiveDate::parse_from_str(&value, "%Y-%m-%d").ok().map(|date| date.and_hms_opt(0, 0, 0).unwrap().and_utc())
+                    });
+                    let boundary = timestamp.map(|time| time + Duration::days(days));
+                    // Raw SQLite date ordering can keep a Z timestamp excluded
+                    // for the rest of its second versus a +00:00 cutoff. In
+                    // that ambiguous second, keep rebuilding rather than reuse.
+                    let next = match boundary {
+                        Some(time) if time > now => time,
+                        _ => now,
+                    };
+                    expires = expires.min(next);
+                }
+            }
+        }
+        Ok(expires)
     }
 
     pub fn totals(&self, summaries: &[RepositorySummary]) -> AppResult<DashboardTotals> {
@@ -783,40 +922,41 @@ impl Database {
     pub fn history(&self, repository_id: Option<i64>) -> AppResult<Vec<HistoryPoint>> {
         let settings = crate::sync::app_settings(self)?;
         let repos: Vec<Repository> = self.selected_repositories()?.into_iter().filter(|repo| repository_id.map(|id| repo.id == id).unwrap_or(settings.include_forks_in_totals || !repo.is_fork)).collect();
-        let allowed: std::collections::HashSet<i64> = repos.iter().map(|repo| repo.id).collect();
+        let allowed = serde_json::to_string(&repos.iter().map(|repo| repo.id).collect::<Vec<_>>())?;
         let conn = self.connect()?;
-        let mut dates = BTreeSet::new();
-        let mut snapshots: HashMap<i64, Vec<Snapshot>> = HashMap::new();
-        let mut stmt = conn.prepare("SELECT id,repository_id,commit_sha,commit_date,snapshot_date,total_loc,source_loc,test_loc,created_at FROM code_snapshots ORDER BY snapshot_date")?;
-        for row in stmt.query_map([], snapshot_from_row)? {
-            let snapshot = row?;
-            if allowed.contains(&snapshot.repository_id) { dates.insert(snapshot.snapshot_date.get(..10).unwrap_or(&snapshot.snapshot_date).to_string()); snapshots.entry(snapshot.repository_id).or_default().push(snapshot); }
-        }
-        let mut observations: HashMap<i64, Vec<Snapshot>> = HashMap::new();
-        let mut stmt = conn.prepare("SELECT id,repository_id,commit_sha,observed_at,observed_at,total_loc,source_loc,test_loc,observed_at FROM loc_observations ORDER BY observed_at")?;
-        for row in stmt.query_map([], snapshot_from_row)? {
-            let observation = row?;
-            if allowed.contains(&observation.repository_id) { dates.insert(observation.snapshot_date.get(..10).unwrap_or(&observation.snapshot_date).to_string()); observations.entry(observation.repository_id).or_default().push(observation); }
-        }
-        let mut points = Vec::with_capacity(dates.len());
-        for date in dates {
-            let mut point = HistoryPoint { snapshot_date: date.clone(), ..HistoryPoint::default() };
-            for repo in &repos {
-                let mut measurement: Option<&Snapshot> = None;
-                if let Some(items) = snapshots.get(&repo.id) { measurement = items.iter().filter(|item| item.snapshot_date.get(..10).unwrap_or(&item.snapshot_date) <= date.as_str()).max_by(|a, b| a.snapshot_date.cmp(&b.snapshot_date)); }
-                if let Some(items) = observations.get(&repo.id) {
-                    if let Some(candidate) = items.iter().filter(|item| item.snapshot_date.get(..10).unwrap_or(&item.snapshot_date) <= date.as_str()).max_by(|a, b| a.snapshot_date.cmp(&b.snapshot_date)) {
-                        if measurement.map(|item| candidate.snapshot_date.get(..10).unwrap_or(&candidate.snapshot_date) >= item.snapshot_date.get(..10).unwrap_or(&item.snapshot_date)).unwrap_or(true) { measurement = Some(candidate); }
-                    }
-                }
-                if let Some(snapshot) = measurement {
-                    point.total_loc += snapshot.total_loc;
-                    point.source_loc += snapshot.source_loc;
-                    point.test_loc += snapshot.test_loc;
-                }
+        // Scope in SQLite, then sweep measurements once. Observations win over
+        // commit samples on the same day, even if their timestamp is earlier.
+        let scope = "r.id IN (SELECT value FROM json_each(?1))";
+        let query = format!(
+            "SELECT day,repository_id,total_loc,source_loc,test_loc FROM (
+                SELECT substr(s.snapshot_date,1,10) AS day,s.repository_id,s.total_loc,s.source_loc,s.test_loc,
+                       0 AS observation,s.snapshot_date AS measured_at,s.id
+                FROM code_snapshots s JOIN repositories r ON r.id=s.repository_id WHERE {scope}
+                UNION ALL
+                SELECT substr(o.observed_at,1,10),o.repository_id,o.total_loc,o.source_loc,o.test_loc,
+                       1,o.observed_at,o.id
+                FROM loc_observations o JOIN repositories r ON r.id=o.repository_id WHERE {scope}
+             ) ORDER BY day,repository_id,observation,measured_at,id"
+        );
+        let mut stmt = conn.prepare(&query)?;
+        let mut rows = stmt.query([allowed])?;
+        let mut latest = HashMap::<i64, (i64, i64, i64)>::new();
+        let mut current = HistoryPoint::default();
+        let mut points = Vec::new();
+        while let Some(row) = rows.next()? {
+            let day: String = row.get(0)?;
+            if current.snapshot_date != day {
+                if !current.snapshot_date.is_empty() { points.push(current.clone()); }
+                current.snapshot_date = day;
             }
-            points.push(point);
+            let repo_id: i64 = row.get(1)?;
+            let counts = (row.get::<_, i64>(2)?, row.get::<_, i64>(3)?, row.get::<_, i64>(4)?);
+            let previous = latest.insert(repo_id, counts).unwrap_or_default();
+            current.total_loc += counts.0 - previous.0;
+            current.source_loc += counts.1 - previous.1;
+            current.test_loc += counts.2 - previous.2;
         }
+        if !current.snapshot_date.is_empty() { points.push(current); }
         Ok(points)
     }
 

@@ -18,6 +18,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   menu_bar_metrics: ['total_lines'],
   menu_bar_compact_metrics: [],
   show_menu_bar: true,
+  menu_bar_combined: false,
   theme_mode: 'system',
   include_personal_repositories: true,
   include_company_repositories: true,

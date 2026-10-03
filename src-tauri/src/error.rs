@@ -3,6 +3,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum AppError {
+    #[error("GitHub CLI is not authenticated. Run gh auth login, then refresh CodeTally.")]
+    Authentication,
     #[error("GitHub requests paused until {until}: {reason}")]
     RateLimited { until: String, reason: String },
     #[error("database error: {0}")]
@@ -31,6 +33,9 @@ pub fn command_error(program: &str, output: std::process::Output) -> AppError {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let message = if !stderr.trim().is_empty() { stderr } else { stdout };
+    if program == "gh" && (output.status.code() == Some(4) || message.contains("(HTTP 401)")) {
+        return AppError::Authentication;
+    }
     AppError::Command {
         program: program.to_string(),
         message: message.trim().to_string(),

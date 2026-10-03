@@ -99,9 +99,7 @@ fn seed_database(root: &Path, repositories: &[Repository]) -> (Database, PathBuf
         repo.local_path = Some(local_path.to_string_lossy().into_owned());
         repo.loc_backfill_complete = true;
         repo.last_fetched_pushed_at = repo.pushed_at.clone();
-        database
-            .upsert_repository(&repo)
-            .expect("seed repository");
+        database.upsert_repository(&repo).expect("seed repository");
     }
     (database, database_path)
 }
@@ -111,6 +109,7 @@ fn state(database_path: PathBuf, root: &Path) -> AppState {
         db_path: database_path,
         cache_dir: root.join("cache"),
         progress: Arc::new(Mutex::new(SyncProgress::default())),
+        dashboard_cache: Arc::new(Mutex::new(Default::default())),
         job_lock: Arc::new(Mutex::new(())),
     }
 }
@@ -147,11 +146,12 @@ impl FakeGh {
         std::fs::create_dir_all(&bin).expect("fake gh directory");
         let log = root.join("gh.log");
         let gh = bin.join("gh");
-        std::fs::write(&gh, fake_gh_script())
-            .expect("fake gh script");
+        std::fs::write(&gh, fake_gh_script()).expect("fake gh script");
         #[cfg(unix)]
         {
-            let mut permissions = std::fs::metadata(&gh).expect("fake gh metadata").permissions();
+            let mut permissions = std::fs::metadata(&gh)
+                .expect("fake gh metadata")
+                .permissions();
             permissions.set_mode(0o755);
             std::fs::set_permissions(&gh, permissions).expect("fake gh executable");
         }
@@ -181,10 +181,7 @@ impl FakeGh {
         if let Some(path) = original_path.as_ref() {
             paths.extend(std::env::split_paths(path));
         }
-        std::env::set_var(
-            "PATH",
-            std::env::join_paths(paths).expect("fake gh PATH"),
-        );
+        std::env::set_var("PATH", std::env::join_paths(paths).expect("fake gh PATH"));
         std::env::set_var("CODETALLY_FAKE_GH_LOG", &self.log);
         std::env::set_var("CODETALLY_FAKE_GH_SCENARIO", &self.scenario);
 
@@ -217,133 +214,223 @@ fn restore_env(name: &str, value: Option<std::ffi::OsString>) {
 }
 
 fn fake_gh_script() -> &'static str {
-    r##"#!/bin/sh
-set -eu
+    r##"#!/usr/bin/env python3
+import datetime
+import json
+import os
+import re
+import shlex
+import sys
 
-log="${CODETALLY_FAKE_GH_LOG:?}"
-scenario="${CODETALLY_FAKE_GH_SCENARIO:-pages:1}"
-mode="${scenario%%:*}"
-repo_count="${scenario##*:}"
-printf '%s\n' "$*" >> "$log"
+args = sys.argv[1:]
+log = os.environ["CODETALLY_FAKE_GH_LOG"]
+scenario = os.environ.get("CODETALLY_FAKE_GH_SCENARIO", "pages:1")
+mode, _, repo_count = scenario.partition(":")
+repo_count = int(repo_count or "1")
+with open(log, "a", encoding="utf-8") as stream:
+    stream.write(shlex.join(args) + "\n")
 
-if [ "${1:-}" = "--version" ]; then
-  printf 'gh version 2.0.0\n'
-  exit 0
-fi
-if [ "${1:-}" = "auth" ] && [ "${2:-}" = "status" ]; then
-  exit 0
-fi
-if [ "${1:-}" = "api" ] && [ "${2:-}" = "user" ]; then
-  printf 'me\n'
-  exit 0
-fi
-if printf '%s' "$*" | grep -q 'user/orgs'; then
-  exit 0
-fi
-if [ "${1:-}" = "repo" ] && [ "${2:-}" = "list" ]; then
-  if [ "$repo_count" = "2" ]; then
-    printf '%s\n' '[{"id":"repo-1","name":"one","nameWithOwner":"me/one","url":"https://github.com/me/one","sshUrl":"git@github.com:me/one.git","isPrivate":false,"isFork":false,"isArchived":false,"stargazerCount":0,"forkCount":0,"defaultBranchRef":{"name":"main"},"createdAt":"2024-01-01T00:00:00Z","updatedAt":"2026-09-10T00:00:00Z","pushedAt":"2026-09-10T00:00:00Z"},{"id":"repo-2","name":"two","nameWithOwner":"me/two","url":"https://github.com/me/two","sshUrl":"git@github.com:me/two.git","isPrivate":false,"isFork":false,"isArchived":false,"stargazerCount":0,"forkCount":0,"defaultBranchRef":{"name":"main"},"createdAt":"2024-01-01T00:00:00Z","updatedAt":"2026-09-10T00:00:00Z","pushedAt":"2026-09-10T00:00:00Z"}]'
-  else
-    printf '%s\n' '[{"id":"repo-1","name":"one","nameWithOwner":"me/one","url":"https://github.com/me/one","sshUrl":"git@github.com:me/one.git","isPrivate":false,"isFork":false,"isArchived":false,"stargazerCount":0,"forkCount":0,"defaultBranchRef":{"name":"main"},"createdAt":"2024-01-01T00:00:00Z","updatedAt":"2026-09-10T00:00:00Z","pushedAt":"2026-09-10T00:00:00Z"}]'
-  fi
-  exit 0
-fi
+def emit(value):
+    print(json.dumps(value, separators=(",", ":")))
 
-if [ "${1:-}" = "api" ] && [ "${2:-}" = "graphql" ]; then
-  graphql_calls=$(grep -c '^api graphql' "$log" || true)
-  if [ "$mode" = "transient" ] && [ "$graphql_calls" -le 2 ]; then
-    printf '%s\n' 'operation timed out' >&2
-    exit 1
-  fi
-  if [ "$mode" = "retry-exhausted" ]; then
-    printf '%s\n' 'connection reset by peer' >&2
-    exit 1
-  fi
-  if [ "$mode" = "missing-repository" ] && printf '%s' "$*" | grep -q 'name=one'; then
-    printf '%s\n' '{"data":{"repository":null},"errors":[{"type":"NOT_FOUND","path":["repository"],"message":"Repository not found"}]}'
-    printf '%s\n' "gh: Could not resolve to a Repository with the name 'me/one'." >&2
-    exit 1
-  fi
-  if [ "$mode" = "permanent" ]; then
-    printf '%s\n' 'permission denied' >&2
-    exit 1
-  fi
-  if [ "$mode" = "rate-first" ] && [ "$graphql_calls" = "2" ]; then
-    printf '%s\n' '{"data":{"rateLimit":{"remaining":0,"resetAt":"2099-01-01T00:00:00Z"}},"errors":[{"type":"RATE_LIMITED","message":"API rate limit exceeded"}]}'
-    exit 0
-  fi
-  if [ "$mode" = "fail-page" ] && printf '%s' "$*" | grep -q 'AFTER_PR_OPEN_1'; then
-    printf '%s\n' 'pagination page failed' >&2
-    exit 1
-  fi
-  if [ "$mode" = "cursor-error" ] && printf '%s' "$*" | grep -q 'STALE_CURSOR'; then
-    printf '%s\n' 'Invalid cursor' >&2
-    exit 1
-  fi
+def repository(repo_id, name):
+    return {
+        "id": repo_id, "name": name, "nameWithOwner": "me/" + name,
+        "url": "https://github.com/me/" + name,
+        "sshUrl": "git@github.com:me/" + name + ".git",
+        "isPrivate": False, "isFork": False, "isArchived": False,
+        "stargazerCount": 0, "forkCount": 0,
+        "defaultBranchRef": {"name": "main"},
+        "createdAt": "2024-01-01T00:00:00Z",
+        "updatedAt": "2026-09-10T00:00:00Z",
+        "pushedAt": "2026-09-10T00:00:00Z",
+    }
 
-  page=1
-  if printf '%s' "$*" | grep -Eq 'AFTER_(PR|ISSUE)_(OPEN|CLOSED)_1'; then
-    page=2
-  fi
-  is_pr=0
-  if printf '%s' "$*" | grep -q 'items:pullRequests'; then is_pr=1; fi
-  scope=OPEN
-  if ! printf '%s' "$*" | grep -q 'states:\[OPEN\]'; then scope=CLOSED; fi
-  cursor="AFTER_ISSUE_${scope}_1"
-  if [ "$is_pr" = "1" ]; then cursor="AFTER_PR_${scope}_1"; fi
-  rate_field=
-  if [ "$mode" = "low-final" ] && [ "$page" = "1" ] && [ "$is_pr" = "1" ]; then
-    rate_field='"rateLimit":{"remaining":0,"resetAt":"2099-01-01T00:00:00Z"},'
-  fi
-  if [ "$mode" = "incremental" ]; then
-    if [ "$is_pr" = "1" ]; then
-      node='{"number":2,"title":"overlap refreshed","state":"OPEN","isDraft":false,"createdAt":"2026-09-01T00:00:00Z","updatedAt":"2026-09-09T00:00:00Z","mergedAt":null,"closedAt":null,"url":"https://github.com/me/one/pull/2","additions":2,"deletions":1,"changedFiles":1,"commits":{"nodes":[]}}'
-      node2='{"number":3,"title":"new update","state":"OPEN","isDraft":false,"createdAt":"2026-09-09T00:00:00Z","updatedAt":"2026-09-10T00:00:00Z","mergedAt":null,"closedAt":null,"url":"https://github.com/me/one/pull/3","additions":3,"deletions":0,"changedFiles":1,"commits":{"nodes":[]}}'
-      sibling='{"nodes":[{"number":2,"title":"overlap refreshed","state":"OPEN","createdAt":"2026-09-01T00:00:00Z","updatedAt":"2026-09-09T00:00:00Z","closedAt":null,"url":"https://github.com/me/one/issues/2","author":{"login":"octocat"},"labels":{"nodes":[]},"assignees":{"nodes":[]}},{"number":3,"title":"new update","state":"OPEN","createdAt":"2026-09-09T00:00:00Z","updatedAt":"2026-09-10T00:00:00Z","closedAt":null,"url":"https://github.com/me/one/issues/3","author":{"login":"octocat"},"labels":{"nodes":[]},"assignees":{"nodes":[]}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}'
-    else
-      node='{"number":2,"title":"overlap refreshed","state":"OPEN","createdAt":"2026-09-01T00:00:00Z","updatedAt":"2026-09-09T00:00:00Z","closedAt":null,"url":"https://github.com/me/one/issues/2","author":{"login":"octocat"},"labels":{"nodes":[]},"assignees":{"nodes":[]}}'
-      node2='{"number":3,"title":"new update","state":"OPEN","createdAt":"2026-09-09T00:00:00Z","updatedAt":"2026-09-10T00:00:00Z","closedAt":null,"url":"https://github.com/me/one/issues/3","author":{"login":"octocat"},"labels":{"nodes":[]},"assignees":{"nodes":[]}}'
-      sibling=null
-    fi
-    printf '{"data":{%s"repository":{"openPRs":{"totalCount":17},"openIssues":{"totalCount":23},"sibling":%s,"items":{"nodes":[%s,%s],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}\n' "${rate_field:-}" "${sibling:-null}" "$node" "$node2"
-    exit 0
-  fi
-  sibling=null
-  sibling_more=true
-  if [ "$mode" = "low-final" ]; then sibling_more=false; fi
-  if [ "$is_pr" = "1" ]; then
-    if [ "$page" = "2" ]; then
-      node='{"number":2,"title":"second page pull request","state":"OPEN","isDraft":false,"createdAt":"2026-09-01T00:00:00Z","updatedAt":"2026-09-08T00:00:00Z","mergedAt":null,"closedAt":null,"url":"https://github.com/me/one/pull/2","additions":2,"deletions":1,"changedFiles":1,"commits":{"nodes":[]}}'
-      more=false
-    else
-      node='{"number":1,"title":"first page pull request","state":"OPEN","isDraft":false,"createdAt":"2026-09-01T00:00:00Z","updatedAt":"2026-09-09T00:00:00Z","mergedAt":null,"closedAt":null,"url":"https://github.com/me/one/pull/1","additions":1,"deletions":0,"changedFiles":1,"commits":{"nodes":[]}}'
-      more=true
-    fi
-  else
-    if [ "$page" = "2" ]; then
-      node='{"number":2,"title":"second page issue","state":"OPEN","createdAt":"2026-09-01T00:00:00Z","updatedAt":"2026-09-08T00:00:00Z","closedAt":null,"url":"https://github.com/me/one/issues/2","author":{"login":"octocat"},"labels":{"nodes":[]},"assignees":{"nodes":[]}}'
-      more=false
-    else
-      node='{"number":1,"title":"first page issue","state":"OPEN","createdAt":"2026-09-01T00:00:00Z","updatedAt":"2026-09-09T00:00:00Z","closedAt":null,"url":"https://github.com/me/one/issues/1","author":{"login":"octocat"},"labels":{"nodes":[]},"assignees":{"nodes":[]}}'
-      more=true
-    fi
-  fi
-  if printf '%s' "$*" | grep -q 'sibling:issues'; then
-    sibling='{"nodes":[{"number":1,"title":"first page issue","state":"OPEN","createdAt":"2026-09-01T00:00:00Z","updatedAt":"2026-09-09T00:00:00Z","closedAt":null,"url":"https://github.com/me/one/issues/1","author":{"login":"octocat"},"labels":{"nodes":[]},"assignees":{"nodes":[]}}],"pageInfo":{"hasNextPage":'"$sibling_more"',"endCursor":"AFTER_ISSUE_'"$scope"'_1"}}'
-  fi
-  if [ "$mode" = "low-final" ] && [ "$page" = "1" ] && [ "$is_pr" = "1" ]; then
-    more=false
-  fi
-  printf '{"data":{%s"repository":{"openPRs":{"totalCount":17},"openIssues":{"totalCount":23},"sibling":%s,"items":{"nodes":[%s],"pageInfo":{"hasNextPage":%s,"endCursor":"%s"}}}}}\n' "${rate_field:-}" "${sibling:-null}" "$node" "$more" "$cursor"
-  exit 0
-fi
+def variables_from_args():
+    values = {}
+    for index, value in enumerate(args[:-1]):
+        if value in ("-f", "-F") and "=" in args[index + 1]:
+            key, raw = args[index + 1].split("=", 1)
+            values[key] = raw
+    return values
 
-printf 'unexpected fake gh invocation: %s\n' "$*" >&2
-exit 1
+if args == ["--version"]:
+    print("gh version 2.0.0")
+    raise SystemExit(0)
+if args[:2] == ["auth", "status"]:
+    raise SystemExit(0)
+if args[:2] == ["api", "user"]:
+    print("me")
+    raise SystemExit(0)
+if "user/orgs" in " ".join(args):
+    if mode == "auth-org":
+        print("gh: Bad credentials (HTTP 401)", file=sys.stderr)
+        raise SystemExit(1)
+    raise SystemExit(0)
+if args[:2] == ["repo", "list"]:
+    repos = [repository("repo-1", "one")]
+    if repo_count == 2:
+        repos.append(repository("repo-2", "two"))
+    emit(repos)
+    raise SystemExit(0)
+
+if args[:2] == ["api", "graphql"]:
+    query = next((item.split("=", 1)[1] for item in args if item.startswith("query=")), "")
+    variables = variables_from_args()
+    with open(log, "r", encoding="utf-8") as stream:
+        graphql_calls = sum(line.startswith("api graphql ") for line in stream)
+
+    if mode == "transient" and graphql_calls <= 2:
+        print("operation timed out", file=sys.stderr)
+        raise SystemExit(1)
+    if mode == "retry-exhausted":
+        print("connection reset by peer", file=sys.stderr)
+        raise SystemExit(1)
+    if mode == "permanent":
+        print("permission denied", file=sys.stderr)
+        raise SystemExit(1)
+    if mode == "missing-repository" and variables.get("name") == "one":
+        emit({"data": {"repository": None}, "errors": [{"type": "NOT_FOUND", "path": ["repository"], "message": "Repository not found"}]})
+        print("gh: Could not resolve to a Repository with the name 'me/one'.", file=sys.stderr)
+        raise SystemExit(1)
+
+    if mode == "auth-missing":
+        print("To get started with GitHub CLI, please run: gh auth login", file=sys.stderr)
+        raise SystemExit(4)
+    if mode == "auth-expired" or (mode == "auth-late" and variables.get("prOpenAfter", "").startswith("CURSOR_")):
+        print('HTTP/2.0 401 Unauthorized\r\nContent-Type: application/json\r\n\r\n{"message":"Bad credentials"}')
+        print("gh: Bad credentials (HTTP 401)", file=sys.stderr)
+        raise SystemExit(1)
+    if mode == "permission-denied" and variables.get("name") == "one":
+        print("gh: Resource not accessible (HTTP 403)", file=sys.stderr)
+        raise SystemExit(1)
+
+    if mode == "rate-first" and graphql_calls >= 2:
+        emit({"data": {"rateLimit": {"remaining": 0, "resetAt": "2099-01-01T00:00:00Z"}},
+              "errors": [{"type": "RATE_LIMITED", "message": "API rate limit exceeded"}]})
+        raise SystemExit(0)
+
+    aliases = re.findall(r"\b(prOpen|issueOpen|prClosed|issueClosed):(pullRequests|issues)\(", query)
+    if not aliases:
+        start = 100 if variables.get("after") == "OWNED_100" else 0
+        if mode == "discovery-failed" and start:
+            print("repository discovery page failed", file=sys.stderr)
+            raise SystemExit(1)
+        repos = [repository("repo-" + str(index + 1), "one" if index == 0 else "two" if index == 1 else "extra" + str(index + 1))
+                 for index in range(start, min(start + 100, repo_count))]
+        if mode == "discovery-failed" and repos:
+            repos[0]["isArchived"] = True
+        more = start + 100 < repo_count
+        emit({"data": {"rateLimit": {"remaining": 5000, "resetAt": "2099-01-01T00:00:00Z"},
+                        "viewer": {"login": "other" if mode == "discovery-account" and start else "me", "repositories": {"nodes": repos,
+                            "pageInfo": {"hasNextPage": more, "endCursor": "OWNED_100" if more else None}}}}})
+        raise SystemExit(0)
+
+    if mode == "cursor-error" and any(variables.get(alias + "After") == "STALE_CURSOR" for alias, _ in aliases):
+        emit({"data": {"rateLimit": {"remaining": 5000, "resetAt": "2099-01-01T00:00:00Z"}},
+              "errors": [{"type": "INVALID_CURSOR", "message": "Invalid cursor", "path": ["repository", "prOpen"]}]})
+        raise SystemExit(0)
+    if mode == "cursor-no-path" and any(variables.get(alias + "After") == "STALE_CURSOR" for alias, _ in aliases):
+        print("Invalid cursor", file=sys.stderr)
+        raise SystemExit(1)
+    if mode == "fail-page" and variables.get("prOpenAfter") == "CURSOR_prOpen_1":
+        print("pagination page failed", file=sys.stderr)
+        raise SystemExit(1)
+
+    timestamp = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    fixed_timestamp = "2026-09-10T00:00:00Z"
+
+    def make_node(alias, kind, number, title, state, updated, ci=None):
+        closed = alias.endswith("Closed")
+        node = {
+            "id": ("PR_NODE_" if kind == "pr" else "ISSUE_NODE_") + str(number),
+            "stateReason": "COMPLETED" if kind == "issue" else None,
+            "author": {"login": "octocat"}, "assignees": {"nodes": []},
+            "number": number, "title": title, "state": state,
+            "createdAt": "2026-09-01T00:00:00Z", "updatedAt": updated,
+            "closedAt": updated if closed else None,
+            "url": "https://github.com/me/one/" + ("pull" if kind == "pr" else "issues") + "/" + str(number),
+        }
+        if kind == "pr":
+            node.update({"isDraft": False, "mergedAt": None, "additions": number,
+                         "deletions": 0, "changedFiles": 1,
+                         "commits": {"nodes": [{"commit": {"statusCheckRollup": {"state": ci or "SUCCESS"}}}]}})
+        else:
+            node.update({"author": {"login": "octocat"}, "labels": {"nodes": []},
+                         "assignees": {"nodes": []}})
+        return node
+
+    def filter_nodes(alias, nodes):
+        since = variables.get("issueClosedSince") if alias == "issueClosed" else None
+        if since:
+            cutoff = datetime.datetime.fromisoformat(since.replace("Z", "+00:00"))
+            return [node for node in nodes if datetime.datetime.fromisoformat(
+                node["updatedAt"].replace("Z", "+00:00")) >= cutoff]
+        return nodes
+
+    def page_for(alias):
+        after = variables.get(alias + "After", "")
+        cursor_match = re.fullmatch(r"CURSOR_" + re.escape(alias) + r"_(\d+)", after)
+        page_number = int(cursor_match.group(1)) + 1 if cursor_match else 1
+        kind = "pr" if alias.startswith("pr") else "issue"
+        closed = alias.endswith("Closed")
+        base = 100 if closed and kind == "pr" else 200 if closed else 0
+
+        if mode == "incremental":
+            if alias == "prOpen":
+                records = [(8, "same timestamp CI refresh", "OPEN", fixed_timestamp, "FAILURE"),
+                           (9, "new pull request", "OPEN", timestamp, "SUCCESS")]
+            elif alias == "prClosed":
+                records = [(7, "transitioned to closed", "CLOSED", fixed_timestamp, "SUCCESS")]
+            elif alias == "issueOpen":
+                records = [(2, "same timestamp issue refresh", "OPEN", fixed_timestamp, None),
+                           (3, "new issue", "OPEN", timestamp, None)]
+            elif alias == "issueClosed":
+                records = [(51, "recent closed issue refresh", "CLOSED", timestamp, None)]
+            else:
+                records = []
+            nodes = [make_node(alias, kind, number, title, state, updated, ci)
+                     for number, title, state, updated, ci in records]
+            return filter_nodes(alias, nodes), False, None
+
+        if mode == "low-final":
+            more = alias == "prOpen"
+            nodes = [make_node(alias, kind, base + 1, "low quota durable page", "CLOSED" if closed else "OPEN", timestamp)]
+            return filter_nodes(alias, nodes), more, "CURSOR_" + alias + "_1" if more else None
+
+        if mode == "asym":
+            last_page = {"prOpen": 2, "issueOpen": 2, "prClosed": 1, "issueClosed": 2}[alias]
+            more = page_number < last_page
+        elif mode == "many":
+            more = page_number < 7
+        elif mode in ("single", "cursor-error"):
+            more = False
+        else:
+            more = page_number < 2
+
+        number = base + page_number
+        nodes = [make_node(alias, kind, number, alias + " page " + str(page_number),
+                           "CLOSED" if closed else "OPEN", timestamp)]
+        return filter_nodes(alias, nodes), more, "CURSOR_" + alias + "_" + str(page_number) if more else None
+
+    data = {"rateLimit": {"remaining": 0 if mode == "low-final" else 5000,
+                          "resetAt": "2099-01-01T00:00:00Z"},
+            "repository": {"openPRs": {"totalCount": 17}, "openIssues": {"totalCount": 23}}}
+    for alias, _connection in aliases:
+        nodes, more, cursor = page_for(alias)
+        data["repository"][alias] = {"nodes": nodes,
+                                     "pageInfo": {"hasNextPage": more, "endCursor": cursor}}
+    emit({"data": data})
+    raise SystemExit(0)
+
+print("unexpected fake gh invocation: " + shlex.join(args), file=sys.stderr)
+raise SystemExit(1)
 "##
 }
-
-fn pull_requests(database: &Database, repository_id: i64) -> Vec<codetally_lib::models::PullRequest> {
+fn pull_requests(
+    database: &Database,
+    repository_id: i64,
+) -> Vec<codetally_lib::models::PullRequest> {
     database
         .pull_requests(Some(repository_id), None, 100)
         .expect("pull requests")
@@ -353,6 +440,24 @@ fn issues(database: &Database, repository_id: i64) -> Vec<codetally_lib::models:
     database
         .issues(Some(repository_id), None, 100)
         .expect("issues")
+}
+
+fn activity_calls(fake: &FakeGh) -> Vec<String> {
+    fake.calls()
+        .lines()
+        .filter(|call| {
+            call.starts_with("api graphql ")
+                && [
+                    "prOpen:pullRequests",
+                    "issueOpen:issues",
+                    "prClosed:pullRequests",
+                    "issueClosed:issues",
+                ]
+                .iter()
+                .any(|alias| call.contains(alias))
+        })
+        .map(str::to_owned)
+        .collect()
 }
 
 #[test]
@@ -372,16 +477,52 @@ fn paginated_activity_import_keeps_all_pages_and_preserves_server_counts() {
         assert!(imported.2, "the two-page feeds should finish in one cycle");
     });
 
-    assert_eq!(pull_requests(&database, stored.id).len(), 2);
-    assert_eq!(issues(&database, stored.id).len(), 2);
-    assert_eq!(stored.id, database.repositories().expect("repositories")[0].id);
+    assert_eq!(
+        pull_requests(&database, stored.id).len(),
+        4,
+        "open and closed PR feeds must both persist"
+    );
+    assert_eq!(
+        issues(&database, stored.id).len(),
+        4,
+        "open and closed issue feeds must both persist"
+    );
+    assert_eq!(
+        stored.id,
+        database.repositories().expect("repositories")[0].id
+    );
     let refreshed = database
         .repository(stored.id)
         .expect("repository lookup")
         .expect("stored repository");
-    assert_eq!(refreshed.open_pr_count, 17, "feed totals must not be replaced by page length");
-    assert_eq!(refreshed.open_issue_count, 23, "feed totals must not be replaced by page length");
-    assert!(fake.calls().matches("api graphql").count() >= 4, "both paginated feeds should be requested: {}", fake.calls());
+    assert_eq!(
+        refreshed.open_pr_count, 17,
+        "feed totals must not be replaced by page length"
+    );
+    assert_eq!(
+        refreshed.open_issue_count, 23,
+        "feed totals must not be replaced by page length"
+    );
+    let calls = activity_calls(&fake);
+    assert_eq!(
+        calls.len(),
+        2,
+        "all four two-page feeds should share exactly two request waves: {}",
+        fake.calls()
+    );
+    for call in &calls {
+        for alias in [
+            "prOpen:pullRequests",
+            "issueOpen:issues",
+            "prClosed:pullRequests",
+            "issueClosed:issues",
+        ] {
+            assert!(
+                call.contains(alias),
+                "each wave should include every unfinished feed ({alias}): {call}"
+            );
+        }
+    }
 
     let _ = std::fs::remove_dir_all(root);
     let _ = std::fs::remove_file(database_path);
@@ -399,9 +540,9 @@ fn transient_graphql_failures_are_retried_before_activity_import_fails() {
         github_sync::sync_activity(&database, &stored).expect("transient GraphQL failures should be retried")
     });
     assert!(imported.2, "activity feeds should finish after transient retries");
-    assert_eq!(pull_requests(&database, stored.id).len(), 2);
-    assert_eq!(issues(&database, stored.id).len(), 2);
-    assert!(fake.calls().matches("api graphql").count() >= 6, "the fake should record two retries before the paginated feeds: {}", fake.calls());
+    assert_eq!(pull_requests(&database, stored.id).len(), 4);
+    assert_eq!(issues(&database, stored.id).len(), 4);
+    assert_eq!(fake.calls().matches("api graphql").count(), 4, "the fake should record two retries before the paginated feeds: {}", fake.calls());
 
     let _ = std::fs::remove_dir_all(root);
     let _ = std::fs::remove_file(database_path);
@@ -423,8 +564,8 @@ fn exhausted_transient_graphql_retries_preserve_cached_activity() {
     });
     assert!(error.to_string().contains("connection reset by peer"));
     assert_eq!(fake.calls().matches("api graphql").count(), 4, "retry exhaustion should make one initial request and three retries: {}", fake.calls());
-    assert_eq!(pull_requests(&database, stored.id).len(), 2, "cached pull requests should survive retry exhaustion");
-    assert_eq!(issues(&database, stored.id).len(), 2, "cached issues should survive retry exhaustion");
+    assert_eq!(pull_requests(&database, stored.id).len(), 4, "cached pull requests should survive retry exhaustion");
+    assert_eq!(issues(&database, stored.id).len(), 4, "cached issues should survive retry exhaustion");
 
     let _ = std::fs::remove_dir_all(root);
     let _ = std::fs::remove_file(database_path);
@@ -446,34 +587,146 @@ fn permanent_graphql_failure_is_not_retried_and_preserves_cached_activity() {
     });
     assert!(error.to_string().contains("permission denied"));
     assert_eq!(fake.calls().matches("api graphql").count(), 1, "permanent failures should not be retried: {}", fake.calls());
-    assert_eq!(pull_requests(&database, stored.id).len(), 2, "cached pull requests should survive a permanent failure");
-    assert_eq!(issues(&database, stored.id).len(), 2, "cached issues should survive a permanent failure");
+    assert_eq!(pull_requests(&database, stored.id).len(), 4, "cached pull requests should survive a permanent failure");
+    assert_eq!(issues(&database, stored.id).len(), 4, "cached issues should survive a permanent failure");
 
     let _ = std::fs::remove_dir_all(root);
     let _ = std::fs::remove_file(database_path);
 }
 
 #[test]
-fn incremental_refresh_replays_overlap_and_keeps_new_updates() {
+fn single_page_incremental_refresh_imports_state_and_ci_changes_at_the_same_timestamp() {
     let root = unique_root("incremental");
-    let mut fake = FakeGh::new("incremental", "pages", 1);
+    let fake = FakeGh::new("incremental", "incremental", 1);
     let repo = repository("repo-1", "one");
     let (database, database_path) = seed_database(&root, std::slice::from_ref(&repo));
     let stored = database.repositories().expect("repositories").remove(0);
 
-    fake.with_path(|| github_sync::sync_activity(&database, &stored).expect("initial import"));
-    fake.scenario = "incremental:1".into();
-    fake.clear_calls();
+    let same_update = "2026-09-10T00:00:00Z".to_string();
+    database
+        .upsert_pull_request(&codetally_lib::models::PullRequest {
+            repository_id: stored.id,
+            number: 7,
+            title: "will transition to closed".into(),
+            state: "OPEN".into(),
+            updated_at: same_update.clone(),
+            ci_state: Some("success".into()),
+            ..Default::default()
+        })
+        .expect("seed transitioning PR");
+    database
+        .upsert_pull_request(&codetally_lib::models::PullRequest {
+            repository_id: stored.id,
+            number: 8,
+            title: "existing CI result".into(),
+            state: "OPEN".into(),
+            updated_at: same_update.clone(),
+            ci_state: Some("success".into()),
+            ..Default::default()
+        })
+        .expect("seed CI refresh PR");
+    database
+        .upsert_issue(&codetally_lib::models::Issue {
+            repository_id: stored.id,
+            number: 2,
+            title: "existing issue".into(),
+            state: "OPEN".into(),
+            updated_at: same_update.clone(),
+            ..Default::default()
+        })
+        .expect("seed refreshed issue");
+    database
+        .upsert_issue(&codetally_lib::models::Issue {
+            repository_id: stored.id,
+            number: 50,
+            title: "cached older closed issue".into(),
+            state: "CLOSED".into(),
+            updated_at: "2020-01-01T00:00:00Z".into(),
+            ..Default::default()
+        })
+        .expect("seed older cached closed issue");
+    database
+        .upsert_issue(&codetally_lib::models::Issue {
+            repository_id: stored.id,
+            number: 51,
+            title: "open issue transitioning to closed".into(),
+            state: "OPEN".into(),
+            updated_at: same_update,
+            ..Default::default()
+        })
+        .expect("seed transitioning issue");
+
     fake.with_path(|| github_sync::sync_activity(&database, &stored).expect("incremental import"));
 
     let refreshed_prs = pull_requests(&database, stored.id);
-    assert_eq!(refreshed_prs.len(), 3, "the new item must not be lost behind the watermark");
     assert_eq!(
-        refreshed_prs.iter().find(|item| item.number == 2).expect("overlap item").title,
-        "overlap refreshed"
+        refreshed_prs.len(),
+        3,
+        "new and transitioned PRs should coexist"
     );
-    assert_eq!(issues(&database, stored.id).len(), 3);
-    assert!(fake.calls().matches("api graphql").count() > 0);
+    assert_eq!(
+        refreshed_prs
+            .iter()
+            .find(|item| item.number == 7)
+            .expect("transitioned PR")
+            .state,
+        "CLOSED"
+    );
+    let ci_refresh = refreshed_prs
+        .iter()
+        .find(|item| item.number == 8)
+        .expect("CI refresh PR");
+    assert_eq!(
+        ci_refresh.updated_at, "2026-09-10T00:00:00Z",
+        "the API timestamp is unchanged"
+    );
+    assert_eq!(
+        ci_refresh.ci_state.as_deref(),
+        Some("failure"),
+        "the CI-only update must still be stored"
+    );
+    assert!(
+        refreshed_prs.iter().any(|item| item.number == 9),
+        "the new PR must be imported"
+    );
+
+    let refreshed_issues = issues(&database, stored.id);
+    assert_eq!(refreshed_issues.len(), 4);
+    assert_eq!(
+        refreshed_issues
+            .iter()
+            .find(|item| item.number == 2)
+            .expect("updated issue")
+            .title,
+        "same timestamp issue refresh"
+    );
+    assert_eq!(
+        refreshed_issues
+            .iter()
+            .find(|item| item.number == 51)
+            .expect("recent closure")
+            .state,
+        "CLOSED"
+    );
+    assert!(
+        refreshed_issues
+            .iter()
+            .any(|item| item.number == 50 && item.title == "cached older closed issue"),
+        "an old cached closed issue must remain available"
+    );
+
+    let calls = activity_calls(&fake);
+    assert_eq!(
+        calls.len(),
+        1,
+        "all four single-page feeds should complete in one request: {}",
+        fake.calls()
+    );
+    assert!(
+        calls[0].contains("issueClosedSince="),
+        "new closed-issue imports should use the persisted since filter: {}",
+        calls[0]
+    );
 
     let _ = std::fs::remove_dir_all(root);
     let _ = std::fs::remove_file(database_path);
@@ -489,24 +742,264 @@ fn failed_page_leaves_page_cursor_durable_and_retryable() {
 
     fake.with_path(|| {
         let error = github_sync::sync_activity(&database, &stored)
-            .expect_err("page two failure must be reported");
+            .expect_err("the next request wave failure must be reported");
         assert!(error.to_string().contains("pagination page failed"));
     });
-    let key = format!("github_activity_v2:{}:pullRequests:true", stored.id);
-    let checkpoint = database.metadata(&key).expect("checkpoint metadata").expect("page one checkpoint");
-    assert!(checkpoint.contains("AFTER_PR_OPEN_1"));
-    let checkpoint: serde_json::Value = serde_json::from_str(&checkpoint).expect("checkpoint JSON");
-    assert_eq!(checkpoint["after"], "AFTER_PR_OPEN_1");
-    assert!(checkpoint["completed_at"].is_null(), "a failed page must not mark the feed complete");
+    for (connection, alias) in [
+        ("pullRequests:true", "prOpen"),
+        ("issues:true", "issueOpen"),
+        ("pullRequests:false", "prClosed"),
+        ("issues:false", "issueClosed"),
+    ] {
+        let key = format!("github_activity_v2:{}:{connection}", stored.id);
+        let checkpoint = database
+            .metadata(&key)
+            .expect("checkpoint metadata")
+            .expect("durable page one checkpoint");
+        let checkpoint: serde_json::Value =
+            serde_json::from_str(&checkpoint).expect("checkpoint JSON");
+        assert_eq!(
+            checkpoint["after"],
+            format!("CURSOR_{alias}_1"),
+            "each feed advances independently before the next wave fails"
+        );
+    }
+    assert_eq!(
+        pull_requests(&database, stored.id).len(),
+        2,
+        "both first-wave PR pages must persist"
+    );
+    assert_eq!(
+        issues(&database, stored.id).len(),
+        2,
+        "both first-wave issue pages must persist"
+    );
 
+    let key = format!("github_activity_v2:{}:pullRequests:true", stored.id);
+    let checkpoint = database
+        .metadata(&key)
+        .expect("checkpoint metadata")
+        .expect("page one checkpoint");
+    let checkpoint: serde_json::Value = serde_json::from_str(&checkpoint).expect("checkpoint JSON");
+    assert_eq!(checkpoint["after"], "CURSOR_prOpen_1");
+    assert!(
+        checkpoint["completed_at"].is_null(),
+        "a failed page must not mark the feed complete"
+    );
+
+    let conn = rusqlite::Connection::open(&database_path).unwrap();
+    let first_node: String = conn.query_row("SELECT node_id FROM pull_requests WHERE repository_id=?1 AND number=1", [stored.id], |row| row.get(0)).unwrap();
+    assert_eq!(first_node, "PR_NODE_1", "new page rows retain their Kanban identity");
+    conn.execute_batch("CREATE TRIGGER reject_identity BEFORE UPDATE OF node_id ON pull_requests WHEN NEW.number=2 BEGIN SELECT RAISE(ABORT, 'identity write failed'); END;").unwrap();
     fake.scenario = "pages:1".into();
+    fake.with_path(|| assert!(github_sync::sync_activity(&database, &stored).unwrap_err().to_string().contains("identity write failed")));
+    assert_eq!(pull_requests(&database, stored.id).len(), 2, "identity failure rolls back the newly inserted page");
+    let unchanged: serde_json::Value = serde_json::from_str(&database.metadata(&key).unwrap().unwrap()).unwrap();
+    assert_eq!(unchanged["after"], "CURSOR_prOpen_1", "identity failure preserves the durable cursor");
+    conn.execute_batch("DROP TRIGGER reject_identity").unwrap();
     fake.clear_calls();
-    fake.with_path(|| github_sync::sync_activity(&database, &stored).expect("retry after failed page"));
-    assert!(fake.calls().contains("AFTER_PR_OPEN_1"), "retry should resume at the durable page cursor");
-    assert_eq!(pull_requests(&database, stored.id).len(), 2);
+    fake.with_path(|| {
+        github_sync::sync_activity(&database, &stored).expect("retry after failed page")
+    });
+    let retry_calls = activity_calls(&fake);
+    assert_eq!(
+        retry_calls.len(),
+        1,
+        "all four feeds resume together from their own cursors: {}",
+        fake.calls()
+    );
+    for alias in [
+        "prOpenAfter=CURSOR_prOpen_1",
+        "issueOpenAfter=CURSOR_issueOpen_1",
+        "prClosedAfter=CURSOR_prClosed_1",
+        "issueClosedAfter=CURSOR_issueClosed_1",
+    ] {
+        assert!(
+            retry_calls[0].contains(alias),
+            "retry should include the saved cursor {alias}: {}",
+            retry_calls[0]
+        );
+    }
+    assert_eq!(pull_requests(&database, stored.id).len(), 4);
+    assert_eq!(issues(&database, stored.id).len(), 4);
+    let issue_identity: (String, String) = conn.query_row("SELECT node_id,completion_reason FROM issues WHERE repository_id=?1 AND number=1", [stored.id], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+    assert_eq!(issue_identity, ("ISSUE_NODE_1".into(), "COMPLETED".into()));
+    drop(conn);
 
     let _ = std::fs::remove_dir_all(root);
     let _ = std::fs::remove_file(database_path);
+}
+
+#[test]
+fn asymmetric_resume_requests_only_the_unfinished_feed_on_the_next_wave() {
+    let root = unique_root("asymmetric-resume");
+    let fake = FakeGh::new("asymmetric-resume", "asym", 1);
+    let (database, _) = seed_database(&root, &[repository("repo-1", "one")]);
+    let stored = database.repositories().unwrap().remove(0);
+    database
+        .upsert_pull_request(&codetally_lib::models::PullRequest {
+            repository_id: stored.id,
+            number: 1,
+            title: "saved open PR page one".into(),
+            state: "OPEN".into(),
+            updated_at: "2026-09-10T00:00:00Z".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    database
+        .upsert_issue(&codetally_lib::models::Issue {
+            repository_id: stored.id,
+            number: 1,
+            title: "saved open issue page one".into(),
+            state: "OPEN".into(),
+            updated_at: "2026-09-10T00:00:00Z".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    for (connection, alias) in [
+        ("pullRequests:true", "prOpen"),
+        ("issues:true", "issueOpen"),
+    ] {
+        let key = format!("github_activity_v2:{}:{connection}", stored.id);
+        database
+            .set_metadata(
+                &key,
+                &format!(r#"{{"after":"CURSOR_{alias}_1","started_at":"2026-09-10T00:00:00Z"}}"#),
+            )
+            .unwrap();
+    }
+    fake.with_path(|| github_sync::sync_activity(&database, &stored).unwrap());
+    let calls = activity_calls(&fake);
+    assert_eq!(
+        calls.len(),
+        2,
+        "one feed continues to a second page after the other three finish: {}",
+        fake.calls()
+    );
+    for alias in [
+        "prOpen:pullRequests",
+        "issueOpen:issues",
+        "prClosed:pullRequests",
+        "issueClosed:issues",
+    ] {
+        assert!(
+            calls[0].contains(alias),
+            "the first wave should include every pending feed: {}",
+            calls[0]
+        );
+    }
+    assert!(calls[0].contains("prOpenAfter=CURSOR_prOpen_1"));
+    assert!(calls[0].contains("issueOpenAfter=CURSOR_issueOpen_1"));
+    assert!(
+        calls[0].contains("issueClosedSince="),
+        "new closed-issue cursors carry their filter bound"
+    );
+    assert!(
+        calls[1].contains("issueClosed:issues"),
+        "only the unfinished closed-issue feed should continue: {}",
+        calls[1]
+    );
+    for alias in [
+        "prOpen:pullRequests",
+        "issueOpen:issues",
+        "prClosed:pullRequests",
+    ] {
+        assert!(
+            !calls[1].contains(alias),
+            "completed feeds should be absent from later waves: {}",
+            calls[1]
+        );
+    }
+    let closed_issue_key = format!("github_activity_v2:{}:issues:false", stored.id);
+    let checkpoint: serde_json::Value =
+        serde_json::from_str(&database.metadata(&closed_issue_key).unwrap().unwrap()).unwrap();
+    assert!(checkpoint["after"].is_null());
+    assert!(checkpoint["completed_at"].is_string());
+    assert_eq!(
+        pull_requests(&database, stored.id).len(),
+        3,
+        "saved first page plus resumed open and closed items remain"
+    );
+    assert_eq!(
+        issues(&database, stored.id).len(),
+        4,
+        "saved first page plus open and two closed issue pages remain"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn five_page_limit_persists_closed_issue_filter_and_retry_finishes_remaining_pages() {
+    let root = unique_root("five-page-cap");
+    let fake = FakeGh::new("five-page-cap", "many", 1);
+    let (database, _) = seed_database(&root, &[repository("repo-1", "one")]);
+    let stored = database.repositories().unwrap().remove(0);
+
+    let first_cycle =
+        fake.with_path(|| github_sync::sync_activity(&database, &stored).expect("five page cycle"));
+    assert!(
+        !first_cycle.2,
+        "feeds with more pages must remain retryable after the per-cycle cap"
+    );
+    let first_calls = activity_calls(&fake);
+    assert_eq!(
+        first_calls.len(),
+        5,
+        "the cycle should issue five shared request waves: {}",
+        fake.calls()
+    );
+    assert_eq!(
+        pull_requests(&database, stored.id).len(),
+        10,
+        "five pages each for open and closed PRs should be durable"
+    );
+    assert_eq!(
+        issues(&database, stored.id).len(),
+        10,
+        "five pages each for open and closed issues should be durable"
+    );
+
+    let issue_key = format!("github_activity_v2:{}:issues:false", stored.id);
+    let first_checkpoint: serde_json::Value =
+        serde_json::from_str(&database.metadata(&issue_key).unwrap().unwrap()).unwrap();
+    assert_eq!(first_checkpoint["after"], "CURSOR_issueClosed_5");
+    let since = first_checkpoint["since"]
+        .as_str()
+        .expect("persisted issue filter bound")
+        .to_owned();
+    assert!(
+        first_calls[0].contains(&format!("issueClosedSince={since}")),
+        "initial request sends the closed issue cutoff"
+    );
+
+    fake.clear_calls();
+    let second_cycle = fake.with_path(|| {
+        github_sync::sync_activity(&database, &stored).expect("retry remaining pages")
+    });
+    assert!(
+        second_cycle.2,
+        "the retry should finish the remaining two pages"
+    );
+    let retry_calls = activity_calls(&fake);
+    assert_eq!(
+        retry_calls.len(),
+        2,
+        "only pages six and seven should be fetched on retry: {}",
+        fake.calls()
+    );
+    assert!(retry_calls[0].contains("issueClosedAfter=CURSOR_issueClosed_5"));
+    assert!(
+        retry_calls[0].contains(&format!("issueClosedSince={since}")),
+        "retry must preserve the exact filter cutoff"
+    );
+    assert_eq!(pull_requests(&database, stored.id).len(), 14);
+    assert_eq!(issues(&database, stored.id).len(), 14);
+    let completed: serde_json::Value =
+        serde_json::from_str(&database.metadata(&issue_key).unwrap().unwrap()).unwrap();
+    assert!(completed["after"].is_null());
+    assert!(completed["completed_at"].is_string());
+
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -517,12 +1010,29 @@ fn invalid_cursor_clears_only_the_stale_cursor_before_retrying_from_watermark() 
     let (database, database_path) = seed_database(&root, std::slice::from_ref(&repo));
     let stored = database.repositories().expect("repositories").remove(0);
     let key = format!("github_activity_v2:{}:pullRequests:true", stored.id);
+    let legacy_key = format!("github_activity_v2:{}:issues:false", stored.id);
     database
         .set_metadata(
             &key,
             r#"{"started_at":"2026-09-09T00:00:00Z","after":"STALE_CURSOR","completed_at":null}"#,
         )
         .expect("stale cursor checkpoint");
+    database
+        .set_metadata(
+            &legacy_key,
+            r#"{"started_at":"2026-09-09T00:00:00Z","after":"CURSOR_issueClosed_1"}"#,
+        )
+        .expect("legacy closed issue cursor");
+    database
+        .upsert_issue(&codetally_lib::models::Issue {
+            repository_id: stored.id,
+            number: 201,
+            title: "saved first closed issue page".into(),
+            state: "CLOSED".into(),
+            updated_at: "2026-09-10T00:00:00Z".into(),
+            ..Default::default()
+        })
+        .expect("seed legacy closed issue page");
 
     fake.with_path(|| {
         let error = github_sync::sync_activity(&database, &stored)
@@ -530,26 +1040,102 @@ fn invalid_cursor_clears_only_the_stale_cursor_before_retrying_from_watermark() 
         assert!(error.to_string().contains("Invalid cursor"));
     });
     let reset: serde_json::Value = serde_json::from_str(
-        &database.metadata(&key).expect("checkpoint metadata").expect("reset checkpoint"),
+        &database
+            .metadata(&key)
+            .expect("checkpoint metadata")
+            .expect("reset checkpoint"),
     )
     .expect("reset checkpoint JSON");
-    assert!(reset["after"].is_null(), "the invalid cursor must not be retried forever");
+    assert!(
+        reset["after"].is_null(),
+        "the invalid cursor must not be retried forever"
+    );
     assert_eq!(
-        reset["started_at"],
-        "2026-09-09T00:00:00Z",
+        reset["started_at"], "2026-09-09T00:00:00Z",
         "the initial cycle start must survive cursor recovery"
+    );
+    let legacy: serde_json::Value =
+        serde_json::from_str(&database.metadata(&legacy_key).unwrap().unwrap()).unwrap();
+    assert_eq!(
+        legacy["after"], "CURSOR_issueClosed_1",
+        "the healthy legacy cursor must survive the error"
+    );
+    assert!(
+        legacy.get("since").is_none(),
+        "legacy cursors finish without introducing a new server filter"
+    );
+
+    let stale_checkpoint =
+        r#"{"started_at":"2026-09-09T00:00:00Z","after":"STALE_CURSOR","completed_at":null}"#;
+    database
+        .set_metadata(&key, stale_checkpoint)
+        .expect("restore stale cursor for pathless error");
+    fake.scenario = "cursor-no-path:1".into();
+    fake.clear_calls();
+    fake.with_path(|| {
+        let error = github_sync::sync_activity(&database, &stored)
+            .expect_err("pathless cursor failure should trigger bounded single-feed probes");
+        assert!(error.to_string().contains("Invalid cursor"));
+    });
+    let probe_calls = activity_calls(&fake);
+    assert_eq!(
+        probe_calls.len(),
+        3,
+        "one failed batch plus two single-feed probes are expected: {}",
+        fake.calls()
+    );
+    assert!(probe_calls[0].contains("prOpen:pullRequests"));
+    assert!(probe_calls[0].contains("issueClosed:issues"));
+    assert!(probe_calls[0].contains("prOpenAfter=STALE_CURSOR"));
+    assert!(probe_calls[0].contains("issueClosedAfter=CURSOR_issueClosed_1"));
+    assert!(probe_calls[1].contains("prOpen:pullRequests"));
+    assert!(!probe_calls[1].contains("issueClosed:issues"));
+    assert!(probe_calls[1].contains("prOpenAfter=STALE_CURSOR"));
+    assert!(probe_calls[2].contains("issueClosed:issues"));
+    assert!(!probe_calls[2].contains("prOpen:pullRequests"));
+    assert!(probe_calls[2].contains("issueClosedAfter=CURSOR_issueClosed_1"));
+
+    let reset: serde_json::Value =
+        serde_json::from_str(&database.metadata(&key).unwrap().unwrap()).unwrap();
+    assert!(
+        reset["after"].is_null(),
+        "only the stale cursor should be reset after probing"
+    );
+    assert_eq!(
+        reset["started_at"], "2026-09-09T00:00:00Z",
+        "cursor recovery keeps the original watermark"
+    );
+    assert_eq!(
+        database.metadata(&legacy_key).unwrap().unwrap(),
+        r#"{"started_at":"2026-09-09T00:00:00Z","after":"CURSOR_issueClosed_1"}"#,
+        "the healthy cursor metadata should remain byte-for-byte unchanged"
+    );
+    assert_eq!(
+        issues(&database, stored.id).len(),
+        1,
+        "diagnostic probes must not commit response pages"
     );
 
     fake.scenario = "pages:1".into();
     fake.clear_calls();
-    fake.with_path(|| github_sync::sync_activity(&database, &stored).expect("retry from watermark"));
-    let calls = fake.calls();
-    let first_call = calls
-        .lines()
-        .find(|call| call.starts_with("api graphql"))
-        .expect("retry GraphQL call");
-    assert!(!first_call.contains("STALE_CURSOR"));
-    assert_eq!(pull_requests(&database, stored.id).len(), 2);
+    fake.with_path(|| {
+        github_sync::sync_activity(&database, &stored).expect("retry from watermark")
+    });
+    let retry_calls = activity_calls(&fake);
+    assert_eq!(
+        retry_calls.len(),
+        2,
+        "reset and valid legacy feeds resume in shared waves: {}",
+        fake.calls()
+    );
+    assert!(!retry_calls[0].contains("STALE_CURSOR"));
+    assert!(retry_calls[0].contains("issueClosedAfter=CURSOR_issueClosed_1"));
+    assert!(
+        !retry_calls[0].contains("issueClosedSince="),
+        "legacy cursor query must remain unfiltered"
+    );
+    assert_eq!(pull_requests(&database, stored.id).len(), 4);
+    assert_eq!(issues(&database, stored.id).len(), 4);
 
     let _ = std::fs::remove_dir_all(root);
     let _ = std::fs::remove_file(database_path);
@@ -568,10 +1154,37 @@ fn low_quota_final_page_keeps_fetched_counts_but_skips_loc_work() {
         .with_path(|| sync::sync_one(&sync_state, stored.id))
         .expect("sync result should preserve a partial low-quota import");
     assert!(!result.ok);
-    assert_eq!(result.pull_requests_synced, 1, "durable PR page count should be reported");
-    assert_eq!(result.issues_synced, 1, "durable sibling issue page count should be reported");
-    assert_eq!(result.loc_repositories_synced, 0, "a paused final response must not start LOC work");
-    assert!(result.errors.iter().any(|error| error.contains("paused until")));
+    assert_eq!(
+        result.pull_requests_synced, 2,
+        "open and closed durable PR feeds should be reported"
+    );
+    assert_eq!(
+        result.issues_synced, 2,
+        "open and closed durable issue feeds should be reported"
+    );
+    assert_eq!(
+        result.loc_repositories_synced, 0,
+        "a paused final response must not start LOC work"
+    );
+    assert!(result
+        .errors
+        .iter()
+        .any(|error| error.contains("paused until")));
+    assert_eq!(
+        pull_requests(&database, stored.id).len(),
+        2,
+        "all successful PR feed pages must commit before quota pause"
+    );
+    assert_eq!(
+        issues(&database, stored.id).len(),
+        2,
+        "all successful issue feed pages must commit before quota pause"
+    );
+    assert_eq!(
+        activity_calls(&fake).len(),
+        1,
+        "the low-quota response is committed before the next page request is blocked"
+    );
 
     let _ = std::fs::remove_dir_all(root);
     let _ = std::fs::remove_file(database_path);
@@ -592,8 +1205,14 @@ fn rate_limit_stops_following_repositories_and_pause_survives_restart() {
     };
     assert!(first_message.to_ascii_lowercase().contains("paused"));
     let calls = fake.calls();
-    assert!(calls.lines().any(|call| call.contains("name=one")), "first repository should reach GraphQL");
-    assert!(!calls.lines().any(|call| call.contains("name=two")), "rate limit must prevent following repositories: {calls}");
+    assert!(
+        calls.lines().any(|call| call.contains("name=one")),
+        "first repository should reach GraphQL"
+    );
+    assert!(
+        !calls.lines().any(|call| call.contains("name=two")),
+        "rate limit must prevent following repositories: {calls}"
+    );
     assert!(database
         .metadata(github_sync::PAUSE_KEY)
         .expect("pause metadata")
@@ -604,7 +1223,11 @@ fn rate_limit_stops_following_repositories_and_pause_survives_restart() {
     let paused = fake.with_path(|| sync::sync_activity(&restarted_state));
     let paused_error = paused.expect_err("restart should remain paused");
     assert!(paused_error.to_string().contains("paused until"));
-    assert!(fake.calls().is_empty(), "a paused refresh must not invoke gh: {}", fake.calls());
+    assert!(
+        fake.calls().is_empty(),
+        "a paused refresh must not invoke gh: {}",
+        fake.calls()
+    );
 
     let _ = std::fs::remove_dir_all(root);
     let _ = std::fs::remove_file(database_path);
@@ -621,10 +1244,129 @@ fn repository_discovery_is_reused_within_one_hour() {
     fake.with_path(|| sync::sync_activity(&first_state).expect("initial refresh"));
     fake.clear_calls();
     fake.with_path(|| sync::sync_activity(&first_state).expect("cached discovery refresh"));
-    assert!(!fake.calls().lines().any(|call| call.starts_with("repo list")), "fresh discovery should be reused for one hour: {}", fake.calls());
+    assert!(
+        !fake
+            .calls()
+            .lines()
+            .any(|call| call.starts_with("repo list")),
+        "fresh discovery should be reused for one hour: {}",
+        fake.calls()
+    );
+    assert!(!fake.calls().lines().any(|call| call.starts_with("auth status")), "data requests authenticate the refresh");
 
     let _ = std::fs::remove_dir_all(root);
     let _ = std::fs::remove_file(database_path);
+}
+
+#[test]
+fn owned_discovery_paginates_before_publishing_and_failed_pages_retain_cache() {
+    let root = unique_root("owned-discovery");
+    let fake = FakeGh::new("owned-discovery", "discovery-pages", 101);
+    let (database, database_path) = seed_database(&root, &[repository("repo-1", "one")]);
+    let app = state(database_path, &root);
+    let discovered = fake.with_path(|| sync::discover(&app)).unwrap();
+    assert_eq!(discovered.len(), 101);
+    assert!(discovered.iter().any(|repo| repo.name == "extra101"));
+    let owned = discovered.iter().find(|repo| repo.name == "one").unwrap();
+    assert!(owned.loc_backfill_complete);
+    assert!(owned.local_path.is_some());
+    assert_eq!(database.metadata("github_login").unwrap().as_deref(), Some("me"));
+    let calls = fake.calls();
+    assert_eq!(calls.lines().filter(|call| call.starts_with("api graphql")).count(), 2);
+    assert!(calls.contains("after=OWNED_100"));
+    assert!(!calls.lines().any(|call| call.starts_with("repo list")), "owned repositories share the identity request");
+
+    let before = serde_json::to_value(database.repositories().unwrap()).unwrap();
+    let timestamp = database.metadata("github_discovered_at").unwrap();
+    let failing = FakeGh::new("owned-discovery-failed", "discovery-failed", 101);
+    let error = failing.with_path(|| sync::discover(&app)).unwrap_err();
+    assert!(error.to_string().contains("discovery page failed"));
+    assert_eq!(serde_json::to_value(database.repositories().unwrap()).unwrap(), before, "a partial owned listing must not publish changed metadata");
+    assert_eq!(database.metadata("github_discovered_at").unwrap(), timestamp);
+    assert!(!failing.calls().contains("user/orgs"), "do not continue discovery after an incomplete owned listing");
+    let switched = FakeGh::new("owned-discovery-account", "discovery-account", 101);
+    let error = switched.with_path(|| sync::discover(&app)).unwrap_err();
+    assert!(error.to_string().contains("account changed"));
+    assert_eq!(serde_json::to_value(database.repositories().unwrap()).unwrap(), before);
+    assert_eq!(database.metadata("github_login").unwrap().as_deref(), Some("me"));
+    assert!(!switched.calls().contains("user/orgs"));
+
+    let scoped = FakeGh::new("owned-discovery-selection", "single", 1);
+    for (personal, company) in [(false, true), (true, false), (false, false)] {
+        sync::save_app_settings(&database, &AppSettings { include_personal_repositories: personal, include_company_repositories: company, ..AppSettings::default() }).unwrap();
+        scoped.clear_calls();
+        scoped.with_path(|| sync::discover(&app)).unwrap();
+        let calls = scoped.calls();
+        assert_eq!(calls.contains("ownerAffiliations:[OWNER]"), personal, "owned listing follows group selection: {calls}");
+        assert_eq!(calls.contains("user/orgs"), company, "organization listing follows group selection: {calls}");
+        assert_eq!(calls.lines().filter(|call| call.starts_with("api graphql")).count(), usize::from(personal || company));
+        assert!(!calls.lines().any(|call| call.starts_with("api user") || call.starts_with("auth status")), "identity shares the discovery request: {calls}");
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn authentication_failures_stop_refresh_and_preserve_committed_pages() {
+    for (mode, cached, refresh, expected_pages) in [
+        ("auth-missing", false, "all", 0),
+        ("auth-org", false, "activity", 0),
+        ("auth-expired", true, "activity", 0),
+        ("auth-late", true, "activity", 1),
+        ("auth-org", false, "work", 0),
+        ("auth-expired", true, "work", 0),
+        ("auth-late", true, "work", 1),
+        ("auth-expired", true, "personal", 0),
+    ] {
+        let root = unique_root(mode);
+        let fake = FakeGh::new(mode, mode, 2);
+        let (database, database_path) = seed_database(&root, &[repository("repo-1", "one"), repository("repo-2", "two")]);
+        if cached { database.set_metadata("github_discovered_at", &Utc::now().to_rfc3339()).unwrap(); }
+        database.set_metadata("github_login", "me").unwrap();
+        kanban::remember_repository(&database, "repo-1").unwrap();
+        kanban::remember_repository(&database, "repo-2").unwrap();
+        let app = state(database_path, &root);
+        let result = fake.with_path(|| match refresh {
+            "all" => sync::sync_all(&app),
+            "work" => sync::sync_work_items(&app),
+            "personal" => sync::sync_personal_work_items(&app),
+            _ => sync::sync_activity(&app),
+        }).unwrap();
+        assert!(!result.ok, "{mode}");
+        assert!(result.message.contains("not authenticated"), "{mode}: {result:?}");
+        assert!(result.errors.iter().any(|error| error.contains("gh auth login")));
+        assert!(!app.progress().running);
+        let calls = fake.calls();
+        assert!(!calls.lines().any(|call| call.starts_with("auth status")));
+        if refresh == "personal" {
+            assert_eq!(calls.lines().filter(|call| call.starts_with("api graphql")).count(), 1, "authentication failure skips totals refresh");
+        }
+        assert!(!calls.contains("name=two"), "authentication failure stops subsequent repositories: {calls}");
+        assert!(!calls.lines().any(|call| call.starts_with("repo list")), "failed identity request stops discovery");
+        let one = database.repositories().unwrap().into_iter().find(|repo| repo.name == "one").unwrap();
+        assert_eq!(pull_requests(&database, one.id).len(), expected_pages * 2);
+        assert_eq!(issues(&database, one.id).len(), expected_pages * 2);
+        assert_eq!(result.pull_requests_synced, (expected_pages * 2) as i64);
+        assert_eq!(result.issues_synced, (expected_pages * 2) as i64);
+        if expected_pages > 0 {
+            let checkpoint = database.metadata(&format!("github_activity_v2:{}:pullRequests:true", one.id)).unwrap().unwrap();
+            assert!(checkpoint.contains("CURSOR_prOpen_1"));
+        }
+        assert!(database.metadata(github_sync::PAUSE_KEY).unwrap().is_none(), "login failures must not create a rate-limit cooldown");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    // A per-repository permission failure must not look like a global login failure.
+    let root = unique_root("permission-denied");
+    let fake = FakeGh::new("permission-denied", "permission-denied", 2);
+    let (database, database_path) = seed_database(&root, &[repository("repo-1", "one"), repository("repo-2", "two")]);
+    database.set_metadata("github_discovered_at", &Utc::now().to_rfc3339()).unwrap();
+    let app = state(database_path, &root);
+    let result = fake.with_path(|| sync::sync_activity(&app)).unwrap();
+    assert!(!result.ok);
+    assert!(!result.message.contains("not authenticated"));
+    assert_eq!(result.activity_repositories_synced, 1);
+    assert!(fake.calls().contains("name=two"));
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -839,8 +1581,8 @@ fn explicit_work_item_sync_does_not_touch_loc_even_when_all_loc_triggers_are_due
     assert!(result.pull_requests_synced > 0);
     assert!(result.issues_synced > 0);
     assert!(
-        fake.calls().matches("api graphql").count() >= 4,
-        "the activity feeds should refresh: {}",
+        activity_calls(&fake).len() == 2,
+        "the activity feeds should share two request waves: {}",
         fake.calls()
     );
 

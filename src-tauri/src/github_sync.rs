@@ -61,6 +61,7 @@ pub fn graphql(db: &Database, query: &str, variables: Value) -> AppResult<Value>
     loop {
         ensure_available(db)?;
         let output = Command::new(github::command_path("gh")).args(&args).output()?;
+        if output.status.code() == Some(4) { return Err(AppError::Authentication); }
         let success = output.status.success();
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -76,7 +77,7 @@ pub fn graphql(db: &Database, query: &str, variables: Value) -> AppResult<Value>
 }
 
 fn transient_network_failure(error: &AppError, stdout: &str, stderr: &str) -> bool {
-    if matches!(error, AppError::RateLimited { .. }) {
+    if matches!(error, AppError::RateLimited { .. } | AppError::Authentication | AppError::RepositoryUnavailable) {
         return false;
     }
     let message = format!("{stdout}\n{stderr}\n{error}").to_ascii_lowercase();
@@ -95,6 +96,9 @@ pub fn parse_response(db: &Database, success: bool, stdout: &str, stderr: &str) 
     let normalized = stdout.replace("\r\n", "\n");
     let (headers, body) = if normalized.starts_with("HTTP/") { normalized.split_once("\n\n").unwrap_or(("", &normalized)) } else { ("", normalized.as_str()) };
     let header = |name: &str| headers.lines().filter_map(|line| line.split_once(':')).find(|(key, _)| key.eq_ignore_ascii_case(name)).map(|(_, value)| value.trim());
+    if headers.lines().next().and_then(|line| line.split_whitespace().nth(1)) == Some("401") || (!success && stderr.contains("(HTTP 401)")) {
+        return Err(AppError::Authentication);
+    }
     let value = serde_json::from_str::<Value>(body);
     let message = format!("{} {} {}", if success { "" } else { stderr }, value.as_ref().ok().and_then(|v| v.get("errors")).map(Value::to_string).unwrap_or_default(), if success { String::new() } else { value.as_ref().ok().and_then(|v| v["message"].as_str()).unwrap_or("").to_string() });
     let rate = value.as_ref().ok().and_then(|v| v.pointer("/data/rateLimit"));
@@ -131,106 +135,226 @@ pub fn parse_response(db: &Database, success: bool, stdout: &str, stderr: &str) 
     Ok(value)
 }
 
+/// Identity, quota and the first owned-repository page share a request.
+/// Accumulate complete metadata before discovery publishes it to SQLite.
+pub(crate) fn discover_owned(db: &Database, include_owned: bool) -> AppResult<(crate::models::GithubUser, Vec<Repository>)> {
+    let fields = "id name nameWithOwner url sshUrl isPrivate isFork isArchived stargazerCount forkCount defaultBranchRef{name} primaryLanguage{name} createdAt updatedAt pushedAt";
+    let query = if include_owned {
+        format!("query($after:String){{rateLimit{{remaining resetAt}} viewer{{login repositories(first:100,after:$after,ownerAffiliations:[OWNER]){{nodes{{{fields}}} pageInfo{{hasNextPage endCursor}}}}}}}}")
+    } else {
+        "query{rateLimit{remaining resetAt} viewer{login}}".into()
+    };
+    let mut after: Option<String> = None;
+    let mut login: Option<String> = None;
+    let mut repositories = Vec::new();
+    for _ in 0..100 {
+        let response = graphql(db, &query, if include_owned { json!({"after": after}) } else { json!({}) })?;
+        let viewer = &response["data"]["viewer"];
+        let current_login = viewer["login"].as_str().map(str::trim).filter(|login| !login.is_empty())
+            .ok_or_else(|| AppError::InvalidArgument("GitHub did not return the authenticated login".into()))?;
+        if login.as_deref().is_some_and(|login| login != current_login) {
+            return Err(AppError::InvalidArgument("GitHub account changed during repository discovery; cached repositories retained".into()));
+        }
+        login = Some(current_login.to_owned());
+        if !include_owned { return Ok((crate::models::GithubUser { login: current_login.to_owned() }, repositories)); }
+        let page = &viewer["repositories"];
+        let nodes = page["nodes"].as_array().ok_or_else(|| AppError::InvalidArgument("GitHub response missing owned repositories".into()))?;
+        for node in nodes {
+            repositories.push(github::repository_from_json(serde_json::from_value(node.clone())?));
+        }
+        if repositories.len() >= 10000 {
+            return Err(AppError::InvalidArgument("Repository discovery reached its 10,000 repository limit; cached repositories retained".into()));
+        }
+        let more = page["pageInfo"]["hasNextPage"].as_bool().ok_or_else(|| AppError::InvalidArgument("GitHub response missing repository pageInfo".into()))?;
+        if !more { return Ok((crate::models::GithubUser { login: login.expect("validated login") }, repositories)); }
+        let next = page["pageInfo"]["endCursor"].as_str().filter(|cursor| !cursor.is_empty())
+            .ok_or_else(|| AppError::InvalidArgument("GitHub response missing repository endCursor".into()))?;
+        if after.as_deref() == Some(next) { return Err(AppError::InvalidArgument("GitHub repository pagination cursor did not advance".into())); }
+        after = Some(next.to_owned());
+    }
+    Err(AppError::InvalidArgument("Repository discovery exceeded its 100-page limit; cached repositories retained".into()))
+}
+
 #[derive(Default, Serialize, Deserialize)]
 struct Cursor {
     completed_at: Option<String>,
     started_at: Option<String>,
     after: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    since: Option<String>,
 }
 
-/// At most five pages per feed per cycle. Each page is durable before its cursor
-/// advances; failures replay safely through upserts. Open feeds are fully walked
-/// every pass so CI-only changes and old open items remain visible.
+const PR_FIELDS: &str = "number title state isDraft createdAt updatedAt mergedAt closedAt url author{login} assignees(first:100){nodes{login}} additions deletions changedFiles commits(last:1){nodes{commit{statusCheckRollup{state}}}}";
+const ISSUE_FIELDS: &str = "number title state createdAt updatedAt closedAt url author{login} labels(first:100){nodes{name}} assignees(first:100){nodes{login}}";
+
+struct Feed {
+    alias: &'static str,
+    kind: usize,
+    open: bool,
+    key: String,
+    cursor: Cursor,
+    started: String,
+    cutoff: DateTime<Utc>,
+    done: bool,
+}
+
+fn activity_query(repo: &Repository, feeds: &[Feed], requested: &[usize], board_enabled: bool) -> (String, Value) {
+    let mut variables = json!({"owner": repo.owner, "name": repo.name});
+    let mut definitions = String::new();
+    let mut selections = String::new();
+    for &index in requested {
+        let feed = &feeds[index];
+        let variable = format!("{}After", feed.alias);
+        definitions.push_str(&format!(",${variable}:String"));
+        variables[&variable] = json!(feed.cursor.after);
+        let states = if feed.open { "[OPEN]" } else if feed.kind == 0 { "[CLOSED,MERGED]" } else { "[CLOSED]" };
+        let filter = if let Some(since) = &feed.cursor.since {
+            let since_variable = format!("{}Since", feed.alias);
+            definitions.push_str(&format!(",${since_variable}:DateTime"));
+            variables[&since_variable] = json!(since);
+            format!(",filterBy:{{since:${since_variable}}}")
+        } else { String::new() };
+        let connection = if feed.kind == 0 { "pullRequests" } else { "issues" };
+        let fields = if feed.kind == 0 { PR_FIELDS } else { ISSUE_FIELDS };
+        let identity_fields = if !board_enabled { "" } else if feed.kind == 0 { "id " } else { "id stateReason " };
+        selections.push_str(&format!(" {}:{connection}(first:100,after:${variable},states:{states}{filter},orderBy:{{field:UPDATED_AT,direction:DESC}}){{nodes{{{identity_fields}{fields}}} pageInfo{{hasNextPage endCursor}}}}", feed.alias));
+    }
+    let query = format!("query($owner:String!,$name:String!{definitions}){{rateLimit{{remaining resetAt}} repository(owner:$owner,name:$name){{openPRs:pullRequests(states:OPEN){{totalCount}} openIssues:issues(states:OPEN){{totalCount}}{selections}}}}}");
+    (query, variables)
+}
+
+fn cursor_error(error: &AppError) -> bool {
+    !matches!(error, AppError::RateLimited { .. }) && error.to_string().to_ascii_lowercase().contains("cursor")
+}
+
+fn reset_cursor(db: &Database, feed: &mut Feed) -> AppResult<()> {
+    feed.cursor.after = None;
+    // Retain the original overlap watermark and cycle start on recovery.
+    db.set_metadata(&feed.key, &serde_json::to_string(&feed.cursor)?)
+}
+
+fn recover_invalid_cursors(db: &Database, repo: &Repository, feeds: &mut [Feed], requested: &[usize], board_enabled: bool, error: &AppError) -> AppResult<()> {
+    if !cursor_error(error) { return Ok(()); }
+    let resumed: Vec<_> = requested.iter().copied().filter(|&index| feeds[index].cursor.after.is_some()).collect();
+    let errors = match error {
+        AppError::Command { message, .. } => serde_json::from_str::<Vec<Value>>(message).ok(),
+        _ => None,
+    };
+    // GraphQL field errors identify the failing alias in their response path.
+    let identified: Vec<_> = resumed.iter().copied().filter(|&index| errors.as_ref().is_some_and(|errors| errors.iter().any(|error| {
+        error["message"].as_str().is_some_and(|message| message.to_ascii_lowercase().contains("cursor")) &&
+        error["path"].as_array().is_some_and(|path| path.iter().any(|part| part.as_str() == Some(feeds[index].alias)))
+    }))).collect();
+    if !identified.is_empty() {
+        for index in identified { reset_cursor(db, &mut feeds[index])?; }
+    } else if resumed.len() == 1 {
+        reset_cursor(db, &mut feeds[resumed[0]])?;
+    } else {
+        // Some servers omit error paths. Diagnose only resumed feeds, bounded
+        // to four requests, rather than discard healthy pagination checkpoints.
+        for index in resumed {
+            let (query, variables) = activity_query(repo, feeds, &[index], board_enabled);
+            match graphql(db, &query, variables) {
+                Err(error) if cursor_error(&error) => reset_cursor(db, &mut feeds[index])?,
+                Err(error @ (AppError::RateLimited { .. } | AppError::Authentication)) => return Err(error),
+                _ => (),
+            }
+        }
+    }
+    Ok(())
+}
+
+fn publish_feed_page(db: &Database, repo: &Repository, feed: &mut Feed, repository: &Value, board_enabled: bool, counts: &mut [i64; 2]) -> AppResult<()> {
+    let page = &repository[feed.alias];
+    let nodes = page["nodes"].as_array().ok_or_else(|| AppError::InvalidArgument("GitHub response missing activity nodes".into()))?;
+    let pr_total = repository["openPRs"]["totalCount"].as_i64().ok_or_else(|| AppError::InvalidArgument("GitHub response missing PR count".into()))?;
+    let issue_total = repository["openIssues"]["totalCount"].as_i64().ok_or_else(|| AppError::InvalidArgument("GitHub response missing issue count".into()))?;
+    let mut reached_cutoff = false;
+    let mut prs = Vec::new();
+    let mut issues = Vec::new();
+    let mut identities = Vec::new();
+    for node in nodes {
+        let updated = node["updatedAt"].as_str().and_then(|s| s.parse::<DateTime<Utc>>().ok()).ok_or_else(|| AppError::InvalidArgument("GitHub activity missing updatedAt".into()))?;
+        if !feed.open && updated < feed.cutoff { reached_cutoff = true; continue; }
+        let mut node = node.clone();
+        let node_id = node["id"].as_str().map(str::to_owned);
+        let completion_reason = node["stateReason"].as_str().map(str::to_owned);
+        if feed.kind == 0 {
+            let ci = node.pointer("/commits/nodes/0/commit/statusCheckRollup/state").and_then(Value::as_str).map(|s| match s { "ERROR" | "FAILURE" => "failure".into(), "EXPECTED" | "PENDING" => "pending".into(), _ => s.to_ascii_lowercase() });
+            node["assignees"] = node.pointer("/assignees/nodes").filter(|value| !value.is_null()).cloned().unwrap_or_else(|| json!([]));
+            let v: crate::models::GithubPullRequestJson = serde_json::from_value(node)?;
+            prs.push(PullRequest { repository_id:repo.id, repository:repo.name_with_owner.clone(), number:v.number,title:v.title,state:v.state,is_draft:v.is_draft,created_at:v.created_at,updated_at:v.updated_at,merged_at:v.merged_at,closed_at:v.closed_at,url:v.url,author:v.author.map(|a| a.login),assignees:v.assignees.into_iter().map(|a| a.login).collect(),additions:v.additions.unwrap_or(0),deletions:v.deletions.unwrap_or(0),changed_files:v.changed_files.unwrap_or(0),ci_state:ci });
+            if board_enabled && node_id.is_some() { identities.push(("pr", v.number, node_id, None)); }
+        } else {
+            node["labels"] = node["labels"]["nodes"].clone();
+            node["assignees"] = node["assignees"]["nodes"].clone();
+            let v: crate::models::GithubIssueJson = serde_json::from_value(node)?;
+            issues.push(Issue {repository_id:repo.id,repository:repo.name_with_owner.clone(),number:v.number,title:v.title,state:v.state,created_at:v.created_at,updated_at:v.updated_at,closed_at:v.closed_at,url:v.url,author:v.author.map(|a|a.login),labels:v.labels.into_iter().map(|a|a.name).collect(),assignees:v.assignees.into_iter().map(|a|a.login).collect()});
+            if board_enabled && node_id.is_some() { identities.push(("issue", v.number, node_id, completion_reason)); }
+        }
+    }
+    let more = page["pageInfo"]["hasNextPage"].as_bool().ok_or_else(|| AppError::InvalidArgument("GitHub response missing pageInfo".into()))?;
+    let done = !more || reached_cutoff;
+    let next_cursor = if done {
+        Cursor { completed_at:Some(feed.started.clone()), ..Cursor::default() }
+    } else {
+        let after = page["pageInfo"]["endCursor"].as_str().filter(|s| !s.is_empty()).ok_or_else(|| AppError::InvalidArgument("GitHub response missing endCursor".into()))?;
+        if feed.cursor.after.as_deref() == Some(after) { return Err(AppError::InvalidArgument("GitHub pagination cursor did not advance".into())); }
+        Cursor { after:Some(after.into()), started_at:Some(feed.started.clone()), completed_at:feed.cursor.completed_at.clone(), since:feed.cursor.since.clone() }
+    };
+    db.apply_activity_page_with_identities(&prs, &issues, repo.id, pr_total, issue_total, &feed.key, &serde_json::to_string(&next_cursor)?, |conn| {
+        for (kind, number, node_id, reason) in &identities {
+            crate::kanban::store_identity_on(conn, repo.id, &repo.github_id, kind, *number, node_id.as_deref(), reason.as_deref())?;
+        }
+        Ok(())
+    })?;
+    counts[feed.kind] += (prs.len() + issues.len()) as i64;
+    feed.cursor = next_cursor;
+    feed.done = done;
+    Ok(())
+}
+
+/// At most five pages per feed per cycle. Pending PR/issue feeds share one
+/// bounded request per round, each with its own cursor and durable checkpoint.
+/// Open feeds are fully walked so CI-only changes and old open items stay visible.
 pub fn sync_activity(db: &Database, repo: &Repository) -> AppResult<(i64, i64, bool)> {
     sync_activity_reporting(db, repo, &mut [0, 0])
 }
 
-/// Counts advance after each durable upsert, including when a later request fails.
 pub(crate) fn sync_activity_reporting(db: &Database, repo: &Repository, counts: &mut [i64; 2]) -> AppResult<(i64, i64, bool)> {
-    let mut complete = true;
     let cycle_started = Utc::now().to_rfc3339();
     let board_enabled = crate::sync::app_settings(db)?.kanban_enabled;
-    for open in [true, false] {
-        let mut sibling_page = None;
-        for (index, feed) in ["pullRequests", "issues"].iter().enumerate() {
-            let key = format!("github_activity_v2:{}:{feed}:{open}", repo.id);
-            let mut cursor: Cursor = db.metadata(&key)?.map(|s| serde_json::from_str(&s)).transpose()?.unwrap_or_default();
-            let started = cursor.started_at.clone().unwrap_or_else(|| cycle_started.clone());
-            let cutoff = cursor.completed_at.as_deref().and_then(|s| s.parse::<DateTime<Utc>>().ok()).map(|t| t - Duration::minutes(5)).unwrap_or_else(|| started.parse::<DateTime<Utc>>().unwrap_or_else(|_| Utc::now()) - Duration::days(30));
-            let fields = if index == 0 { format!("{}number title state isDraft createdAt updatedAt mergedAt closedAt url author{{login}} assignees(first:100){{nodes{{login}}}} additions deletions changedFiles commits(last:1){{nodes{{commit{{statusCheckRollup{{state}}}}}}}}", if board_enabled { "id " } else { "" }) } else { format!("{}number title state createdAt updatedAt closedAt url author{{login}} labels(first:100){{nodes{{name}}}} assignees(first:100){{nodes{{login}}}}", if board_enabled { "id stateReason " } else { "" }) };
-            let states = if open { "[OPEN]" } else if index == 0 { "[CLOSED,MERGED]" } else { "[CLOSED]" };
-            for page in 0..5 {
-                let sibling = if index == 0 && page == 0 {
-                    let states = if open { "[OPEN]" } else { "[CLOSED]" };
-                    format!("sibling:issues(first:100,states:{states},orderBy:{{field:UPDATED_AT,direction:DESC}}){{nodes{{{}{}}} pageInfo{{hasNextPage endCursor}}}}", if board_enabled { "id stateReason " } else { "" }, "number title state createdAt updatedAt closedAt url author{login} labels(first:100){nodes{name}} assignees(first:100){nodes{login}}")
-                } else { String::new() };
-                let query = format!("query($owner:String!,$name:String!,$after:String){{rateLimit{{cost remaining resetAt}} repository(owner:$owner,name:$name){{openPRs:pullRequests(states:OPEN){{totalCount}} openIssues:issues(states:OPEN){{totalCount}} {sibling} items:{feed}(first:100,after:$after,states:{states},orderBy:{{field:UPDATED_AT,direction:DESC}}){{nodes{{{fields}}} pageInfo{{hasNextPage endCursor}}}}}}}}");
-                let response = if index == 1 && page == 0 && cursor.after.is_none() && sibling_page.is_some() {
-                    sibling_page.take().expect("checked sibling page")
-                } else {
-                    match graphql(db, &query, json!({"owner":repo.owner,"name":repo.name,"after":cursor.after})) {
-                        Ok(response) => response,
-                        Err(error) => {
-                            if cursor.after.is_some() && error.to_string().to_ascii_lowercase().contains("cursor") && !matches!(error, AppError::RateLimited { .. }) {
-                                cursor.after = None;
-                                db.set_metadata(&key, &serde_json::to_string(&cursor)?)?;
-                            }
-                            return Err(error);
-                        }
-                    }
-                };
-                if index == 0 && page == 0 {
-                    let mut sibling = response.clone();
-                    sibling["data"]["repository"]["items"] = sibling["data"]["repository"]["sibling"].clone();
-                    sibling_page = Some(sibling);
-                }
-                let repository = &response["data"]["repository"];
-                let nodes = repository["items"]["nodes"].as_array().ok_or_else(|| AppError::InvalidArgument("GitHub response missing activity nodes".into()))?;
-                let pr_total = repository["openPRs"]["totalCount"].as_i64().ok_or_else(|| AppError::InvalidArgument("GitHub response missing PR count".into()))?;
-                let issue_total = repository["openIssues"]["totalCount"].as_i64().ok_or_else(|| AppError::InvalidArgument("GitHub response missing issue count".into()))?;
-                let mut reached_cutoff = false;
-                for node in nodes {
-                    let updated = node["updatedAt"].as_str().and_then(|s| s.parse::<DateTime<Utc>>().ok()).ok_or_else(|| AppError::InvalidArgument("GitHub activity missing updatedAt".into()))?;
-                    if !open && updated < cutoff { reached_cutoff = true; continue; }
-                    let mut node = node.clone();
-                    let node_id = node["id"].as_str().map(str::to_owned);
-                    let completion_reason = node["stateReason"].as_str().map(str::to_owned);
-                    if index == 0 {
-                        let ci = node.pointer("/commits/nodes/0/commit/statusCheckRollup/state").and_then(Value::as_str).map(|s| match s { "ERROR" | "FAILURE" => "failure".into(), "EXPECTED" | "PENDING" => "pending".into(), _ => s.to_ascii_lowercase() });
-                        if node.get("assignees").and_then(|value| value.get("nodes")).is_none_or(Value::is_null) {
-                            node["assignees"] = json!([]);
-                        } else {
-                            node["assignees"] = node["assignees"]["nodes"].clone();
-                        }
-                        let v: crate::models::GithubPullRequestJson = serde_json::from_value(node)?;
-                        db.upsert_pull_request(&PullRequest { repository_id:repo.id, repository:repo.name_with_owner.clone(), number:v.number,title:v.title,state:v.state,is_draft:v.is_draft,created_at:v.created_at,updated_at:v.updated_at,merged_at:v.merged_at,closed_at:v.closed_at,url:v.url,author:v.author.map(|a| a.login),assignees:v.assignees.into_iter().map(|a| a.login).collect(),additions:v.additions.unwrap_or(0),deletions:v.deletions.unwrap_or(0),changed_files:v.changed_files.unwrap_or(0),ci_state:ci })?;
-                        if board_enabled && node_id.is_some() { crate::kanban::store_identity(db,repo.id,&repo.github_id,"pr",v.number,node_id.as_deref(),None)?; }
-                    } else {
-                        node["labels"] = node["labels"]["nodes"].clone();
-                        node["assignees"] = node["assignees"]["nodes"].clone();
-                        let v: crate::models::GithubIssueJson = serde_json::from_value(node)?;
-                        db.upsert_issue(&Issue {repository_id:repo.id,repository:repo.name_with_owner.clone(),number:v.number,title:v.title,state:v.state,created_at:v.created_at,updated_at:v.updated_at,closed_at:v.closed_at,url:v.url,author:v.author.map(|a|a.login),labels:v.labels.into_iter().map(|a|a.name).collect(),assignees:v.assignees.into_iter().map(|a|a.login).collect()})?;
-                        if board_enabled && node_id.is_some() { crate::kanban::store_identity(db,repo.id,&repo.github_id,"issue",v.number,node_id.as_deref(),completion_reason.as_deref())?; }
-                    }
-                    counts[index] += 1;
-                }
-                db.set_open_counts(repo.id, pr_total, issue_total)?;
-                let more = repository["items"]["pageInfo"]["hasNextPage"].as_bool().ok_or_else(|| AppError::InvalidArgument("GitHub response missing pageInfo".into()))?;
-                if !more || reached_cutoff {
-                    cursor = Cursor { completed_at:Some(started.clone()), ..Cursor::default() };
-                    db.set_metadata(&key, &serde_json::to_string(&cursor)?)?;
-                    break;
-                }
-                let after = repository["items"]["pageInfo"]["endCursor"].as_str().filter(|s| !s.is_empty()).ok_or_else(|| AppError::InvalidArgument("GitHub response missing endCursor".into()))?;
-                if cursor.after.as_deref() == Some(after) { return Err(AppError::InvalidArgument("GitHub pagination cursor did not advance".into())); }
-                cursor.after = Some(after.into());
-                cursor.started_at = Some(started.clone());
-                db.set_metadata(&key, &serde_json::to_string(&cursor)?)?;
-                if page == 4 { complete = false; }
+    let mut feeds = Vec::with_capacity(4);
+    for (alias, kind, open) in [("prOpen", 0, true), ("issueOpen", 1, true), ("prClosed", 0, false), ("issueClosed", 1, false)] {
+        let connection = if kind == 0 { "pullRequests" } else { "issues" };
+        let key = format!("github_activity_v2:{}:{connection}:{open}", repo.id);
+        let mut cursor: Cursor = db.metadata(&key)?.map(|s| serde_json::from_str(&s)).transpose()?.unwrap_or_default();
+        let started = cursor.started_at.clone().unwrap_or_else(|| cycle_started.clone());
+        let cutoff = cursor.completed_at.as_deref().and_then(|s| s.parse::<DateTime<Utc>>().ok()).map(|t| t - Duration::minutes(5)).unwrap_or_else(|| started.parse::<DateTime<Utc>>().unwrap_or_else(|_| Utc::now()) - Duration::days(30));
+        // Server-side issue filtering avoids retransmitting older closed rows.
+        // Legacy cursors were created without this filter, so finish them with
+        // the original query. New filtered cursors persist the exact bound.
+        if kind == 1 && !open && cursor.after.is_none() && cursor.since.is_none() {
+            cursor.since = Some(cutoff.to_rfc3339());
+        }
+        feeds.push(Feed { alias, kind, open, key, cursor, started, cutoff, done: false });
+    }
+    for _ in 0..5 {
+        let requested: Vec<_> = feeds.iter().enumerate().filter_map(|(index, feed)| (!feed.done).then_some(index)).collect();
+        if requested.is_empty() { break; }
+        let (query, variables) = activity_query(repo, &feeds, &requested, board_enabled);
+        let response = match graphql(db, &query, variables) {
+            Ok(response) => response,
+            Err(error) => {
+                recover_invalid_cursors(db, repo, &mut feeds, &requested, board_enabled, &error)?;
+                return Err(error);
             }
+        };
+        for index in requested {
+            publish_feed_page(db, repo, &mut feeds[index], &response["data"]["repository"], board_enabled, counts)?;
         }
     }
-    Ok((counts[0], counts[1], complete))
+    Ok((counts[0], counts[1], feeds.iter().all(|feed| feed.done)))
 }
 
 #[derive(Debug, Default)]
