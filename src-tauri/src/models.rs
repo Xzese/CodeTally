@@ -111,6 +111,10 @@ pub struct PullRequest {
     pub merged_at: Option<String>,
     pub closed_at: Option<String>,
     pub url: String,
+    #[serde(default)]
+    pub author: Option<String>,
+    #[serde(default)]
+    pub assignees: Vec<String>,
     pub additions: i64,
     pub deletions: i64,
     pub changed_files: i64,
@@ -151,7 +155,19 @@ pub struct Dashboard {
     pub totals: DashboardTotals,
     pub history: Vec<HistoryPoint>,
     pub last_sync_at: Option<String>,
+    pub last_lines_refresh_at: Option<String>,
+    pub last_full_refresh_at: Option<String>,
+    pub last_activity_refresh_at: Option<String>,
+    pub last_personal_refresh_at: Option<String>,
     pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppInfo {
+    pub name: String,
+    pub version: String,
+    pub identifier: String,
+    pub repository_url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -188,20 +204,278 @@ pub struct SyncResult {
     pub errors: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MenuBarMetric {
+    #[default]
+    TotalLines,
+    TestLines,
+    SourceLines,
+    OpenPrs,
+    OpenIssues,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub enum LocChartRange {
+    #[serde(rename = "30D")]
+    ThirtyDays,
+    #[serde(rename = "3M")]
+    ThreeMonths,
+    #[serde(rename = "1Y")]
+    OneYear,
+    #[serde(rename = "3Y")]
+    ThreeYears,
+    #[default]
+    #[serde(rename = "ALL")]
+    All,
+}
+
+impl LocChartRange {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ThirtyDays => "30 days",
+            Self::ThreeMonths => "3 months",
+            Self::OneYear => "1 year",
+            Self::ThreeYears => "3 years",
+            Self::All => "all time",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ThemeMode {
+    Light,
+    Dark,
+    #[default]
+    System,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityRelationship {
+    Everyone,
+    #[default]
+    Author,
+    Assignee,
+    AuthorOrAssignee,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateCheckInterval {
+    #[default]
+    Daily,
+    Weekly,
+    Monthly,
+    Never,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
+    #[serde(default)]
+    pub theme_mode: ThemeMode,
     pub activity_refresh_minutes: i64,
+    #[serde(default = "default_personal_refresh_minutes")]
+    pub personal_refresh_minutes: i64,
+    #[serde(default)]
+    pub activity_relationship: ActivityRelationship,
+    #[serde(default)]
+    pub update_check_interval: UpdateCheckInterval,
     pub lines_refresh_minutes: i64,
     pub refresh_lines_on_change: bool,
+    #[serde(default = "default_run_in_background")]
+    pub run_in_background: bool,
+    #[serde(default)]
+    pub menu_bar_metric: MenuBarMetric,
+    #[serde(default)]
+    pub loc_chart_range: LocChartRange,
+    #[serde(default)]
+    pub menu_bar_metrics: Vec<MenuBarMetric>,
+    #[serde(default)]
+    pub menu_bar_compact_metrics: Vec<MenuBarMetric>,
+    #[serde(default = "default_run_in_background")]
+    pub show_menu_bar: bool,
+    #[serde(default)]
+    pub include_forks_in_totals: bool,
+    #[serde(default = "default_run_in_background")]
+    pub include_personal_repositories: bool,
+    #[serde(default = "default_run_in_background")]
+    pub include_company_repositories: bool,
+    #[serde(default)]
+    pub excluded_repository_ids: Vec<String>,
+    #[serde(default = "default_kanban_enabled")]
+    pub kanban_enabled: bool,
 }
+
+impl AppSettings {
+    /// Empty arrays are legacy preferences; always expose a nonempty canonical selection.
+    pub fn effective_menu_bar_metrics(&self) -> Vec<MenuBarMetric> {
+        if self.menu_bar_metrics.is_empty() { return vec![self.menu_bar_metric]; }
+        [MenuBarMetric::TotalLines, MenuBarMetric::SourceLines, MenuBarMetric::TestLines,
+            MenuBarMetric::OpenPrs, MenuBarMetric::OpenIssues]
+            .into_iter().filter(|metric| self.menu_bar_metrics.contains(metric)).collect()
+    }
+
+    pub fn normalize_menu_bar_metrics(&mut self) {
+        self.menu_bar_metrics = self.effective_menu_bar_metrics();
+        self.menu_bar_metric = self.menu_bar_metrics[0];
+        self.menu_bar_compact_metrics = [MenuBarMetric::TotalLines, MenuBarMetric::SourceLines,
+            MenuBarMetric::TestLines, MenuBarMetric::OpenPrs, MenuBarMetric::OpenIssues]
+            .into_iter().filter(|metric| self.menu_bar_compact_metrics.contains(metric)).collect();
+    }
+}
+
+fn default_run_in_background() -> bool { true }
+fn default_kanban_enabled() -> bool { true }
+fn default_personal_refresh_minutes() -> i64 { 5 }
 
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
-            activity_refresh_minutes: 10,
-            lines_refresh_minutes: 45,
+            theme_mode: ThemeMode::default(),
+            activity_refresh_minutes: 1440,
+            personal_refresh_minutes: default_personal_refresh_minutes(),
+            activity_relationship: ActivityRelationship::default(),
+            update_check_interval: UpdateCheckInterval::default(),
+            lines_refresh_minutes: 1440,
             refresh_lines_on_change: true,
+            run_in_background: true,
+            menu_bar_metric: MenuBarMetric::default(),
+            loc_chart_range: LocChartRange::default(),
+            menu_bar_metrics: Vec::new(),
+            menu_bar_compact_metrics: Vec::new(),
+            show_menu_bar: true,
+            include_forks_in_totals: false,
+            include_personal_repositories: true,
+            include_company_repositories: true,
+            excluded_repository_ids: Vec::new(),
+            kanban_enabled: true,
         }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct KanbanItem {
+    pub item_key: String,
+    pub kind: String,
+    pub repository_id: i64,
+    pub repository: String,
+    pub number: i64,
+    pub title: String,
+    pub state: String,
+    pub is_draft: bool,
+    pub updated_at: String,
+    pub url: String,
+    pub author: Option<String>,
+    pub assignees: Vec<String>,
+    pub ci_state: Option<String>,
+    pub closed_at: Option<String>,
+    pub merged_at: Option<String>,
+    pub completion_reason: Option<String>,
+    pub unavailable: bool,
+    pub manual_column: Option<String>,
+    pub priority: String,
+    pub notes: String,
+    pub sort_rank: i64,
+    pub revision: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct KanbanPage {
+    pub items: Vec<KanbanItem>,
+    pub total: i64,
+    pub active_count: i64,
+    pub completed_count: i64,
+    pub last_successful_refresh: Option<String>,
+    pub partial: bool,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct KanbanMetadata {
+    pub item_key: String,
+    pub manual_column: Option<String>,
+    pub priority: String,
+    pub notes: String,
+    pub sort_rank: i64,
+    pub revision: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct KanbanLink {
+    pub kind: String,
+    pub repository: String,
+    pub number: i64,
+    pub title: String,
+    pub state: String,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct KanbanLinks {
+    pub items: Vec<KanbanLink>,
+    pub partial: bool,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct KanbanComment {
+    pub id: String,
+    pub author: Option<String>,
+    pub body_text: String,
+    #[serde(default)]
+    pub body_markdown: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct KanbanCheck {
+    pub id: String,
+    pub name: String,
+    pub status: String,
+    pub details_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct KanbanCommit {
+    pub oid: String,
+    pub headline: String,
+    pub committed_at: String,
+    pub author: Option<String>,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct KanbanDiscussion {
+    pub comments: Vec<KanbanComment>,
+    pub comment_count: i64,
+    pub comments_has_more: bool,
+    pub checks: Vec<KanbanCheck>,
+    pub check_count: i64,
+    pub checks_has_more: bool,
+    pub commits: Vec<KanbanCommit>,
+    pub commit_count: i64,
+    pub commits_has_more: bool,
+    pub refreshed_at: Option<String>,
+    pub partial: bool,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KanbanPreferences {
+    pub kind: String,
+    pub repository_scope: String,
+    pub relationship: String,
+    pub search: String,
+    pub show_completed: bool,
+}
+
+impl Default for KanbanPreferences {
+    fn default() -> Self {
+        Self { kind:"both".into(),repository_scope:"all".into(),relationship:"author".into(),search:String::new(),show_completed:false }
     }
 }
 
@@ -298,6 +572,10 @@ pub struct GithubPullRequestJson {
     #[serde(rename = "closedAt")]
     pub closed_at: Option<String>,
     pub url: String,
+    #[serde(default)]
+    pub author: Option<GithubActor>,
+    #[serde(default)]
+    pub assignees: Vec<GithubActor>,
     pub additions: Option<i64>,
     pub deletions: Option<i64>,
     #[serde(rename = "changedFiles")]
@@ -343,4 +621,12 @@ where
         serde_json::Value::Number(value) => Ok(value.to_string()),
         other => Err(serde::de::Error::custom(format!("expected id string or number, got {other}"))),
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepositorySelection {
+    pub github_id: String,
+    pub name_with_owner: String,
+    pub owner: String,
+    pub group: String,
 }

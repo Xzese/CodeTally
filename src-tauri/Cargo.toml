@@ -13,7 +13,7 @@ crate-type = ["lib", "cdylib", "staticlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ignore = "0.4"
@@ -21,7 +21,16 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 chrono = { version = "0.4", features = ["serde", "clock"] }
 thiserror = "1"
 open = "5"
+url = "2"
 tokio = { version = "1", features = ["sync", "rt", "macros"] }
+tauri-plugin-updater = "=2.11.0"
+tauri-plugin-autostart = "2.5.1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSStatusItem", "NSMenu", "NSMenuItem", "NSImage", "NSImageView", "NSView", "NSResponder"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSData", "NSGeometry", "NSObject", "NSString"] }
+png = "0.17.16"
 
 [profile.release]
 codegen-units = 1

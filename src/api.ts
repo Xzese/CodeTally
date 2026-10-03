@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
-import type { ActivityFeed, ActivityItem, AppSettings, DashboardData, DependencyStatus, FeedKind, FeedRequest, GitHubUser, HistoryRequest, LocSnapshot, PullRequest, Issue, SyncProgress, SyncResult } from './types'
+import type { ActivityFeed, ActivityItem, AppSettings, DashboardData, DependencyStatus, FeedKind, FeedRequest, GitHubUser, HistoryRequest, LocSnapshot, PullRequest, Issue, RepositorySelection, SyncProgress, SyncResult } from './types'
 
 export class BackendError extends Error {
   readonly command: string
@@ -12,6 +12,10 @@ export class BackendError extends Error {
 
 async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   try {
+    if (import.meta.env.VITE_CODETALLY_SCREENSHOT_MODE === '1' && !('__TAURI_INTERNALS__' in window)) {
+      const { screenshotCall } = await import('./kanban/screenshotBackend')
+      return await screenshotCall(command, args) as T
+    }
     return await invoke<T>(command, args)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
@@ -61,6 +65,47 @@ export async function setAppSettings(settings: AppSettings): Promise<AppSettings
   return call<AppSettings>('set_app_settings', { settings })
 }
 
+export async function getDatabaseLocation(): Promise<string> {
+  return call<string>('get_database_location')
+}
+
+export interface AppInfo {
+  name: string
+  version: string
+  identifier: string
+  repository_url: string
+}
+
+export async function getAppInfo(): Promise<AppInfo> {
+  return call<AppInfo>('get_app_info')
+}
+
+export async function installAppUpdate(): Promise<void> {
+  return call<void>('install_update')
+}
+
+export async function revealDatabase(): Promise<boolean> {
+  return call<boolean>('reveal_database')
+}
+
+export async function getRepositorySelection(): Promise<RepositorySelection[]> {
+  const raw = await call<unknown>('get_repository_selection')
+  if (!Array.isArray(raw)) throw new Error('The repository selection command returned an invalid payload.')
+  return raw.map((item) => {
+    if (!item || typeof item !== 'object') throw new Error('The repository selection command returned an invalid repository.')
+    const source = item as Record<string, unknown>
+    const group = source.group
+    if (group !== 'personal' && group !== 'company') throw new Error('The repository selection command returned an invalid repository group.')
+    const githubId = source.github_id ?? source.githubId
+    const nameWithOwner = source.name_with_owner ?? source.nameWithOwner
+    const owner = source.owner
+    if ((typeof githubId !== 'string' && typeof githubId !== 'number') || typeof nameWithOwner !== 'string' || typeof owner !== 'string') {
+      throw new Error('The repository selection command returned an invalid repository.')
+    }
+    return { github_id: String(githubId), name_with_owner: nameWithOwner, owner, group }
+  })
+}
+
 export async function getDashboard(): Promise<DashboardData> {
   return call<DashboardData>('get_dashboard')
 }
@@ -80,6 +125,8 @@ export async function getActivityFeed(request: FeedRequest): Promise<PullRequest
     kind: request.kind,
     repository_id: request.repositoryId ?? null,
     state: request.state ?? 'all',
+    ...(request.repositoryIds !== undefined ? { repository_ids: request.repositoryIds } : {}),
+    ...(request.relationship !== undefined && request.relationship !== 'everyone' ? { relationship: request.relationship } : {}),
     limit: 1000
   })
   if (Array.isArray(raw)) return raw as PullRequest[] | Issue[]
@@ -94,8 +141,27 @@ export async function openExternalUrl(url: string): Promise<void> {
   await call('open_external_url', { url })
 }
 
+export interface AppUpdate {
+  current_version: string
+  latest_version: string
+  release_url: string
+  update_available: boolean
+}
+
+export async function checkForUpdates(): Promise<AppUpdate> {
+  return call<AppUpdate>('check_for_updates')
+}
+
 export async function getSyncProgress(): Promise<SyncProgress> {
   return call<SyncProgress>('get_sync_progress')
+}
+
+export async function getActivityRefreshAt(): Promise<string | null> {
+  return call<string | null>('get_activity_refresh_at')
+}
+
+export async function getPersonalRefreshAt(): Promise<string | null> {
+  return call<string | null>('get_personal_refresh_at')
 }
 
 export async function syncRepository(repositoryId: number | string): Promise<unknown> {
@@ -104,4 +170,30 @@ export async function syncRepository(repositoryId: number | string): Promise<unk
 
 export async function backfillLoc(repositoryId: number | string): Promise<unknown> {
   return call('backfill_loc', { repo_id: repositoryId })
+}
+
+export async function syncWorkItems(): Promise<SyncResult> {
+  return call('sync_work_items')
+}
+export async function syncPersonalWorkItems(): Promise<SyncResult> {
+  return call('sync_personal_work_items')
+}
+export async function getKanbanPage(request: { kind: import('./types').KanbanKind; repository_ids?: number[]; relationship: import('./types').ActivityRelationship; search: string; show_completed: boolean; offset: number; limit: number }): Promise<import('./types').KanbanPage> {
+  return call('get_kanban_page', request)
+}
+export async function setKanbanMetadata(metadata: Omit<import('./types').KanbanMetadata, 'revision'> & { expected_revision: number }): Promise<import('./types').KanbanMetadata> {
+  return call('set_kanban_metadata', metadata)
+}
+export async function getKanbanLinks(itemKey: string): Promise<import('./types').KanbanLinks> {
+  return call('get_kanban_links', { item_key: itemKey })
+}
+export async function getKanbanDiscussion(itemKey: string, loadMore?: 'comments' | 'checks' | 'commits', forceRefresh = false): Promise<import('./types').KanbanDiscussion> {
+  return call('get_kanban_discussion', { item_key: itemKey, load_more: loadMore ?? null, force_refresh: forceRefresh })
+}
+
+export async function getKanbanPreferences(): Promise<import('./types').KanbanPreferences> {
+  return call('get_kanban_preferences')
+}
+export async function setKanbanPreferences(preferences: import('./types').KanbanPreferences): Promise<import('./types').KanbanPreferences> {
+  return call('set_kanban_preferences', { preferences })
 }

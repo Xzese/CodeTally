@@ -9,8 +9,9 @@
 use chrono::{Duration, Utc};
 use codetally_lib::db::Database;
 use codetally_lib::github_sync;
-use codetally_lib::models::{Repository, SyncProgress};
+use codetally_lib::models::{AppSettings, PullRequest, Repository, Snapshot, SyncProgress};
 use codetally_lib::sync::{self, AppState};
+use codetally_lib::kanban;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -22,6 +23,31 @@ static GH_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn gh_env_lock() -> &'static Mutex<()> {
     GH_ENV_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+#[test]
+fn failed_link_refresh_retains_the_last_complete_cache() {
+    let root = unique_root("linked-work-offline");
+    let (database, database_path) = seed_database(&root, &[repository("repo-1", "one")]);
+    database.set_metadata("github_login", "me").expect("account");
+    sync::save_app_settings(&database, &AppSettings { kanban_enabled: true, ..AppSettings::default() }).expect("board enabled");
+    kanban::remember_repository(&database, "repo-1").expect("account repository");
+    let repo_id = database.repositories().expect("repositories")[0].id;
+    database.upsert_pull_request(&PullRequest { repository_id: repo_id, number: 7, title: "Fix bug".into(), state: "OPEN".into(), created_at: "2026-01-01T00:00:00Z".into(), updated_at: "2026-01-02T00:00:00Z".into(), url: "https://github.com/me/one/pull/7".into(), ..PullRequest::default() }).expect("PR");
+    let key = kanban::item_key("repo-1", "pr", 7, None);
+    let cached = serde_json::json!([{"kind":"issue","repository":"me/one","number":9,"title":"Linked issue","state":"OPEN","url":"https://github.com/me/one/issues/9"}]);
+    rusqlite::Connection::open(&database_path).expect("database connection").execute(
+        "INSERT INTO kanban_links_cache(account_scope,item_key,links_json,partial,updated_at) VALUES (?1,?2,?3,0,?4)",
+        rusqlite::params!["github.com:me", key, cached.to_string(), "2026-01-01T00:00:00Z"],
+    ).expect("cached links");
+    let fake = FakeGh::new("linked-work-offline", "permanent", 1);
+    let result = fake.with_path(|| kanban::load_links(&database, &key).expect("stale links should remain available"));
+    assert!(result.partial);
+    assert_eq!(result.items.len(), 1);
+    assert_eq!(result.items[0].number, 9);
+    assert_eq!(kanban::cached_links(&database, &key).expect("persistent cache").items.len(), 1);
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_file(database_path);
 }
 
 fn unique_root(label: &str) -> PathBuf {
@@ -86,6 +112,24 @@ fn state(database_path: PathBuf, root: &Path) -> AppState {
         dashboard_cache: Arc::new(Mutex::new(Default::default())),
         job_lock: Arc::new(Mutex::new(())),
     }
+}
+
+#[cfg(unix)]
+fn install_command_guard(bin: &Path, name: &str, log: &Path) {
+    let script = bin.join(name);
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' '$0 $*' >> '{}'\nexit 0\n",
+            log.display()
+        ),
+    )
+    .expect("write command guard");
+    let mut permissions = std::fs::metadata(&script)
+        .expect("command guard metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(script, permissions).expect("make command guard executable");
 }
 
 struct FakeGh {
@@ -236,6 +280,20 @@ if args[:2] == ["api", "graphql"]:
     with open(log, "r", encoding="utf-8") as stream:
         graphql_calls = sum(line.startswith("api graphql ") for line in stream)
 
+    if mode == "transient" and graphql_calls <= 2:
+        print("operation timed out", file=sys.stderr)
+        raise SystemExit(1)
+    if mode == "retry-exhausted":
+        print("connection reset by peer", file=sys.stderr)
+        raise SystemExit(1)
+    if mode == "permanent":
+        print("permission denied", file=sys.stderr)
+        raise SystemExit(1)
+    if mode == "missing-repository" and variables.get("name") == "one":
+        emit({"data": {"repository": None}, "errors": [{"type": "NOT_FOUND", "path": ["repository"], "message": "Repository not found"}]})
+        print("gh: Could not resolve to a Repository with the name 'me/one'.", file=sys.stderr)
+        raise SystemExit(1)
+
     if mode == "auth-missing":
         print("To get started with GitHub CLI, please run: gh auth login", file=sys.stderr)
         raise SystemExit(4)
@@ -285,6 +343,9 @@ if args[:2] == ["api", "graphql"]:
     def make_node(alias, kind, number, title, state, updated, ci=None):
         closed = alias.endswith("Closed")
         node = {
+            "id": ("PR_NODE_" if kind == "pr" else "ISSUE_NODE_") + str(number),
+            "stateReason": "COMPLETED" if kind == "issue" else None,
+            "author": {"login": "octocat"}, "assignees": {"nodes": []},
             "number": number, "title": title, "state": state,
             "createdAt": "2026-09-01T00:00:00Z", "updatedAt": updated,
             "closedAt": updated if closed else None,
@@ -462,6 +523,72 @@ fn paginated_activity_import_keeps_all_pages_and_preserves_server_counts() {
             );
         }
     }
+
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_file(database_path);
+}
+
+#[test]
+fn transient_graphql_failures_are_retried_before_activity_import_fails() {
+    let root = unique_root("transient-retry");
+    let fake = FakeGh::new("transient-retry", "transient", 1);
+    let repo = repository("repo-1", "one");
+    let (database, database_path) = seed_database(&root, std::slice::from_ref(&repo));
+    let stored = database.repositories().expect("repositories").remove(0);
+
+    let imported = fake.with_path(|| {
+        github_sync::sync_activity(&database, &stored).expect("transient GraphQL failures should be retried")
+    });
+    assert!(imported.2, "activity feeds should finish after transient retries");
+    assert_eq!(pull_requests(&database, stored.id).len(), 4);
+    assert_eq!(issues(&database, stored.id).len(), 4);
+    assert_eq!(fake.calls().matches("api graphql").count(), 4, "the fake should record two retries before the paginated feeds: {}", fake.calls());
+
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_file(database_path);
+}
+
+#[test]
+fn exhausted_transient_graphql_retries_preserve_cached_activity() {
+    let root = unique_root("retry-exhausted");
+    let mut fake = FakeGh::new("retry-exhausted", "pages", 1);
+    let repo = repository("repo-1", "one");
+    let (database, database_path) = seed_database(&root, std::slice::from_ref(&repo));
+    let stored = database.repositories().expect("repositories").remove(0);
+
+    fake.with_path(|| github_sync::sync_activity(&database, &stored).expect("seed activity cache"));
+    fake.scenario = "retry-exhausted:1".into();
+    fake.clear_calls();
+    let error = fake.with_path(|| {
+        github_sync::sync_activity(&database, &stored).expect_err("exhausted transient failures should be reported")
+    });
+    assert!(error.to_string().contains("connection reset by peer"));
+    assert_eq!(fake.calls().matches("api graphql").count(), 4, "retry exhaustion should make one initial request and three retries: {}", fake.calls());
+    assert_eq!(pull_requests(&database, stored.id).len(), 4, "cached pull requests should survive retry exhaustion");
+    assert_eq!(issues(&database, stored.id).len(), 4, "cached issues should survive retry exhaustion");
+
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_file(database_path);
+}
+
+#[test]
+fn permanent_graphql_failure_is_not_retried_and_preserves_cached_activity() {
+    let root = unique_root("permanent-error");
+    let mut fake = FakeGh::new("permanent-error", "pages", 1);
+    let repo = repository("repo-1", "one");
+    let (database, database_path) = seed_database(&root, std::slice::from_ref(&repo));
+    let stored = database.repositories().expect("repositories").remove(0);
+
+    fake.with_path(|| github_sync::sync_activity(&database, &stored).expect("seed activity cache"));
+    fake.scenario = "permanent:1".into();
+    fake.clear_calls();
+    let error = fake.with_path(|| {
+        github_sync::sync_activity(&database, &stored).expect_err("permanent failures should be reported")
+    });
+    assert!(error.to_string().contains("permission denied"));
+    assert_eq!(fake.calls().matches("api graphql").count(), 1, "permanent failures should not be retried: {}", fake.calls());
+    assert_eq!(pull_requests(&database, stored.id).len(), 4, "cached pull requests should survive a permanent failure");
+    assert_eq!(issues(&database, stored.id).len(), 4, "cached issues should survive a permanent failure");
 
     let _ = std::fs::remove_dir_all(root);
     let _ = std::fs::remove_file(database_path);
@@ -660,7 +787,16 @@ fn failed_page_leaves_page_cursor_durable_and_retryable() {
         "a failed page must not mark the feed complete"
     );
 
+    let conn = rusqlite::Connection::open(&database_path).unwrap();
+    let first_node: String = conn.query_row("SELECT node_id FROM pull_requests WHERE repository_id=?1 AND number=1", [stored.id], |row| row.get(0)).unwrap();
+    assert_eq!(first_node, "PR_NODE_1", "new page rows retain their Kanban identity");
+    conn.execute_batch("CREATE TRIGGER reject_identity BEFORE UPDATE OF node_id ON pull_requests WHEN NEW.number=2 BEGIN SELECT RAISE(ABORT, 'identity write failed'); END;").unwrap();
     fake.scenario = "pages:1".into();
+    fake.with_path(|| assert!(github_sync::sync_activity(&database, &stored).unwrap_err().to_string().contains("identity write failed")));
+    assert_eq!(pull_requests(&database, stored.id).len(), 2, "identity failure rolls back the newly inserted page");
+    let unchanged: serde_json::Value = serde_json::from_str(&database.metadata(&key).unwrap().unwrap()).unwrap();
+    assert_eq!(unchanged["after"], "CURSOR_prOpen_1", "identity failure preserves the durable cursor");
+    conn.execute_batch("DROP TRIGGER reject_identity").unwrap();
     fake.clear_calls();
     fake.with_path(|| {
         github_sync::sync_activity(&database, &stored).expect("retry after failed page")
@@ -686,6 +822,9 @@ fn failed_page_leaves_page_cursor_durable_and_retryable() {
     }
     assert_eq!(pull_requests(&database, stored.id).len(), 4);
     assert_eq!(issues(&database, stored.id).len(), 4);
+    let issue_identity: (String, String) = conn.query_row("SELECT node_id,completion_reason FROM issues WHERE repository_id=?1 AND number=1", [stored.id], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+    assert_eq!(issue_identity, ("ISSUE_NODE_1".into(), "COMPLETED".into()));
+    drop(conn);
 
     let _ = std::fs::remove_dir_all(root);
     let _ = std::fs::remove_file(database_path);
@@ -1151,29 +1290,56 @@ fn owned_discovery_paginates_before_publishing_and_failed_pages_retain_cache() {
     assert_eq!(serde_json::to_value(database.repositories().unwrap()).unwrap(), before);
     assert_eq!(database.metadata("github_login").unwrap().as_deref(), Some("me"));
     assert!(!switched.calls().contains("user/orgs"));
+
+    let scoped = FakeGh::new("owned-discovery-selection", "single", 1);
+    for (personal, company) in [(false, true), (true, false), (false, false)] {
+        sync::save_app_settings(&database, &AppSettings { include_personal_repositories: personal, include_company_repositories: company, ..AppSettings::default() }).unwrap();
+        scoped.clear_calls();
+        scoped.with_path(|| sync::discover(&app)).unwrap();
+        let calls = scoped.calls();
+        assert_eq!(calls.contains("ownerAffiliations:[OWNER]"), personal, "owned listing follows group selection: {calls}");
+        assert_eq!(calls.contains("user/orgs"), company, "organization listing follows group selection: {calls}");
+        assert_eq!(calls.lines().filter(|call| call.starts_with("api graphql")).count(), usize::from(personal || company));
+        assert!(!calls.lines().any(|call| call.starts_with("api user") || call.starts_with("auth status")), "identity shares the discovery request: {calls}");
+    }
     std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn authentication_failures_stop_refresh_and_preserve_committed_pages() {
-    for (mode, cached, full, expected_pages) in [
-        ("auth-missing", false, true, 0),
-        ("auth-org", false, false, 0),
-        ("auth-expired", true, false, 0),
-        ("auth-late", true, false, 1),
+    for (mode, cached, refresh, expected_pages) in [
+        ("auth-missing", false, "all", 0),
+        ("auth-org", false, "activity", 0),
+        ("auth-expired", true, "activity", 0),
+        ("auth-late", true, "activity", 1),
+        ("auth-org", false, "work", 0),
+        ("auth-expired", true, "work", 0),
+        ("auth-late", true, "work", 1),
+        ("auth-expired", true, "personal", 0),
     ] {
         let root = unique_root(mode);
         let fake = FakeGh::new(mode, mode, 2);
         let (database, database_path) = seed_database(&root, &[repository("repo-1", "one"), repository("repo-2", "two")]);
         if cached { database.set_metadata("github_discovered_at", &Utc::now().to_rfc3339()).unwrap(); }
+        database.set_metadata("github_login", "me").unwrap();
+        kanban::remember_repository(&database, "repo-1").unwrap();
+        kanban::remember_repository(&database, "repo-2").unwrap();
         let app = state(database_path, &root);
-        let result = fake.with_path(|| if full { sync::sync_all(&app) } else { sync::sync_activity(&app) }).unwrap();
+        let result = fake.with_path(|| match refresh {
+            "all" => sync::sync_all(&app),
+            "work" => sync::sync_work_items(&app),
+            "personal" => sync::sync_personal_work_items(&app),
+            _ => sync::sync_activity(&app),
+        }).unwrap();
         assert!(!result.ok, "{mode}");
         assert!(result.message.contains("not authenticated"), "{mode}: {result:?}");
         assert!(result.errors.iter().any(|error| error.contains("gh auth login")));
         assert!(!app.progress().running);
         let calls = fake.calls();
         assert!(!calls.lines().any(|call| call.starts_with("auth status")));
+        if refresh == "personal" {
+            assert_eq!(calls.lines().filter(|call| call.starts_with("api graphql")).count(), 1, "authentication failure skips totals refresh");
+        }
         assert!(!calls.contains("name=two"), "authentication failure stops subsequent repositories: {calls}");
         assert!(!calls.lines().any(|call| call.starts_with("repo list")), "failed identity request stops discovery");
         let one = database.repositories().unwrap().into_iter().find(|repo| repo.name == "one").unwrap();
@@ -1201,4 +1367,277 @@ fn authentication_failures_stop_refresh_and_preserve_committed_pages() {
     assert_eq!(result.activity_repositories_synced, 1);
     assert!(fake.calls().contains("name=two"));
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn excluded_repositories_are_skipped_by_activity_sync_but_selected_repositories_are_queried() {
+    let root = unique_root("repository-inclusion");
+    let fake = FakeGh::new("repository-inclusion", "pages", 2);
+    let repositories = [repository("repo-1", "one"), repository("repo-2", "two")];
+    let (database, database_path) = seed_database(&root, &repositories);
+    database
+        .set_metadata("github_login", "me")
+        .expect("cached GitHub login");
+    database
+        .set_metadata("github_discovered_at", &Utc::now().to_rfc3339())
+        .expect("cached discovery timestamp");
+    sync::save_app_settings(
+        &database,
+        &codetally_lib::models::AppSettings {
+            excluded_repository_ids: vec!["repo-2".into()],
+            ..codetally_lib::models::AppSettings::default()
+        },
+    )
+    .expect("save repository exclusion");
+    let state = state(database_path.clone(), &root);
+
+    let result = fake.with_path(|| sync::sync_activity(&state).expect("selected repository refresh"));
+    assert!(result.ok);
+    assert_eq!(result.activity_repositories_synced, 1);
+    assert!(database.metadata(sync::LAST_FULL_REFRESH_METADATA_KEY).expect("broad refresh marker").is_some());
+    let calls = fake.calls();
+    assert!(calls.lines().any(|call| call.contains("name=one")), "selected repository should reach GitHub: {calls}");
+    assert!(!calls.lines().any(|call| call.contains("name=two")), "excluded repository must not reach GitHub: {calls}");
+
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_file(database_path);
+}
+
+#[test]
+fn direct_sync_and_backfill_calls_reject_an_excluded_repository_before_scanning() {
+    let root = unique_root("disabled-direct-calls");
+    let fake = FakeGh::new("disabled-direct-calls", "pages", 1);
+    let repo = repository("repo-1", "one");
+    let (database, database_path) = seed_database(&root, std::slice::from_ref(&repo));
+    database
+        .set_metadata("github_login", "me")
+        .expect("cached GitHub login");
+    sync::save_app_settings(
+        &database,
+        &codetally_lib::models::AppSettings {
+            excluded_repository_ids: vec!["repo-1".into()],
+            ..codetally_lib::models::AppSettings::default()
+        },
+    )
+    .expect("save repository exclusion");
+    let stored = database.repositories().expect("repositories").remove(0);
+    let state = state(database_path.clone(), &root);
+
+    fake.with_path(|| {
+        let sync_error = sync::sync_one(&state, stored.id).expect_err("disabled sync should be rejected");
+        assert!(sync_error.to_string().contains("Repository is disabled in settings"));
+        let backfill_error = sync::backfill_one(&state, stored.id).expect_err("disabled backfill should be rejected");
+        assert!(backfill_error.to_string().contains("Repository is disabled in settings"));
+    });
+    let calls = fake.calls();
+    assert_eq!(calls.lines().filter(|call| call.contains("api graphql")).count(), 0, "disabled direct calls must not scan GitHub: {calls}");
+
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_file(database_path);
+}
+
+#[test]
+fn unavailable_repository_is_removed_with_cached_data_and_other_repositories_continue() {
+    let root = unique_root("unavailable-repository");
+    let mut fake = FakeGh::new("unavailable-repository", "pages", 2);
+    let repos = [repository("repo-1", "one"), repository("repo-2", "two")];
+    let (database, database_path) = seed_database(&root, &repos);
+    // This test covers the legacy removal policy when the board is explicitly disabled.
+    sync::save_app_settings(&database, &AppSettings { kanban_enabled: false, ..AppSettings::default() }).expect("disable board");
+    let sync_state = state(database_path, &root);
+    fake.with_path(|| sync::sync_activity(&sync_state).expect("seed cached activity"));
+    let stored = database.repositories().unwrap().remove(0);
+    let cached_prs = pull_requests(&database, stored.id).len();
+    assert!(cached_prs > 0);
+    database.set_metadata("github_repository_unavailable:repo-1", "true").unwrap();
+    let cursor_key = format!("github_activity_v2:{}:pullRequests:true", stored.id);
+    database.set_metadata(&cursor_key, r#"{"completed_at":null,"started_at":null,"after":null}"#).unwrap();
+
+    fake.scenario = "missing-repository:2".into();
+    fake.clear_calls();
+    let result = fake.with_path(|| sync::sync_activity(&sync_state).unwrap());
+    assert!(result.ok, "missing repository must not fail refresh: {:?}", result.errors);
+    assert_eq!(result.activity_repositories_synced, 1);
+    assert_eq!(fake.calls().lines().filter(|call| call.contains("name=one")).count(), 1);
+    assert!(database.repository(stored.id).unwrap().is_none());
+    assert!(!database.repository_selection().unwrap().iter().any(|repo| repo.github_id == stored.github_id));
+    assert!(!database.summaries().unwrap().iter().any(|repo| repo.id == stored.id));
+    assert!(database.metadata("github_repository_unavailable:repo-1").unwrap().is_none());
+    assert!(database.metadata(&cursor_key).unwrap().is_none());
+    let conn = rusqlite::Connection::open(database.path()).unwrap();
+    for table in ["pull_requests", "issues", "code_snapshots", "loc_observations", "classification_rules"] {
+        let count: i64 = conn.query_row(&format!("SELECT COUNT(*) FROM {table} WHERE repository_id=?1"), [stored.id], |row| row.get(0)).unwrap();
+        assert_eq!(count, 0, "{table} should be deleted with the repository");
+    }
+
+    fake.clear_calls();
+    let restarted = state(sync_state.db_path.clone(), &root);
+    assert!(fake.with_path(|| sync::sync_activity(&restarted).unwrap()).ok);
+    assert!(!fake.calls().contains("name=one"));
+    assert!(fake.calls().contains("name=two"));
+
+    fake.clear_calls();
+    let manual = fake.with_path(|| sync::sync_one(&restarted, stored.id).expect_err("removed repository should no longer be addressable"));
+    assert!(manual.to_string().contains("was not found"));
+    assert!(!fake.calls().contains("name=one"));
+
+    fake.scenario = "pages:2".into();
+    fake.with_path(|| sync::discover(&restarted).unwrap());
+    assert!(database.repositories().unwrap().iter().any(|repo| repo.github_id == stored.github_id));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn only_missing_repository_errors_are_classified_as_unavailable() {
+    use codetally_lib::error::AppError;
+    let root = unique_root("missing-repository-response");
+    let (database, _) = seed_database(&root, &[]);
+    for success in [true, false] {
+        let error = github_sync::parse_response(&database, success,
+            r#"{"data":{"repository":null},"errors":[{"type":"NOT_FOUND","path":["repository"]}]}"#, "").unwrap_err();
+        assert!(matches!(error, AppError::RepositoryUnavailable));
+    }
+    let error = github_sync::parse_response(&database, false, "",
+        "gh: Could not resolve to a Repository with the name 'Xzese/pnpm'.").unwrap_err();
+    assert!(matches!(error, AppError::RepositoryUnavailable));
+    for body in [
+        r#"{"errors":[{"type":"NOT_FOUND","path":["repository","issues"]}]}"#,
+        r#"{"errors":[{"type":"FORBIDDEN","path":["repository"]}]}"#,
+        r#"{"errors":[{"type":"NOT_FOUND","path":["repository"]},{"type":"INTERNAL"}]}"#,
+    ] {
+        assert!(matches!(github_sync::parse_response(&database, false, body, "gh: Could not resolve to a Repository with the name 'me/one'.").unwrap_err(), AppError::Command { .. }));
+    }
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn explicit_work_item_sync_does_not_touch_loc_even_when_all_loc_triggers_are_due() {
+    let root = unique_root("work-items-loc-isolation");
+    let fake = FakeGh::new("work-items-loc-isolation", "pages", 1);
+    let forbidden_log = fake.root.join("git-tokei.log");
+    std::fs::write(&forbidden_log, "").expect("forbidden command log");
+    install_command_guard(&fake.bin, "git", &forbidden_log);
+    install_command_guard(&fake.bin, "tokei", &forbidden_log);
+
+    let (database, database_path) = seed_database(&root, &[]);
+    let pushed_at = "2026-09-10T00:00:00Z";
+    let fetched_pushed_at = "2026-09-01T00:00:00Z";
+    let mut repo = repository("repo-work-items", "work-items");
+    repo.pushed_at = Some(pushed_at.into());
+    repo.last_fetched_pushed_at = Some(fetched_pushed_at.into());
+    repo.local_path = None;
+    repo.loc_backfill_complete = false;
+    let repo_id = database.upsert_repository(&repo).expect("seed repository");
+    let stored = database
+        .repository(repo_id)
+        .expect("repository lookup")
+        .expect("stored repository");
+
+    let old_sweep = "2020-01-01T00:00:00Z";
+    database
+        .set_metadata("github_login", "me")
+        .expect("cached login");
+    database
+        .set_metadata("github_discovered_at", &Utc::now().to_rfc3339())
+        .expect("fresh discovery cache");
+    database
+        .set_metadata(sync::LOC_SWEEP_METADATA_KEY, old_sweep)
+        .expect("overdue LOC sweep");
+    database
+        .set_metadata(sync::LAST_LOC_REFRESH_METADATA_KEY, old_sweep)
+        .expect("previous line refresh");
+    database
+        .set_metadata(sync::LAST_FULL_REFRESH_METADATA_KEY, old_sweep)
+        .expect("previous broad refresh");
+    codetally_lib::kanban::remember_repository(&database, &stored.github_id)
+        .expect("remember tracked repo");
+    let cached_loc = Snapshot {
+        repository_id: repo_id,
+        commit_sha: "existing-loc-sample".into(),
+        commit_date: "2026-09-01T00:00:00Z".into(),
+        snapshot_date: "2026-09-01T00:00:00Z".into(),
+        total_loc: 120,
+        source_loc: 100,
+        test_loc: 20,
+        created_at: "2026-09-01T00:00:00Z".into(),
+        ..Snapshot::default()
+    };
+    database
+        .upsert_snapshot(&cached_loc)
+        .expect("seed LOC snapshot");
+    database
+        .upsert_observation(&cached_loc)
+        .expect("seed LOC observation");
+    let sync_state = state(database_path.clone(), &root);
+
+    let result = fake.with_path(|| sync::sync_work_items(&sync_state).expect("work-item sync"));
+    assert!(
+        result.ok,
+        "activity refresh should succeed: {:?}",
+        result.errors
+    );
+    assert_eq!(result.activity_repositories_synced, 1);
+    assert!(result.pull_requests_synced > 0);
+    assert!(result.issues_synced > 0);
+    assert!(
+        activity_calls(&fake).len() == 2,
+        "the activity feeds should share two request waves: {}",
+        fake.calls()
+    );
+
+    let refreshed = database
+        .repository(repo_id)
+        .expect("repository lookup")
+        .expect("repository remains");
+    assert_eq!(refreshed.pushed_at.as_deref(), Some(pushed_at));
+    assert_eq!(
+        refreshed.last_fetched_pushed_at.as_deref(),
+        Some(fetched_pushed_at)
+    );
+    assert_ne!(
+        refreshed.pushed_at, refreshed.last_fetched_pushed_at,
+        "explicit activity sync must not advance LOC's pushedAt cursor"
+    );
+    assert!(
+        refreshed.local_path.is_none(),
+        "activity sync must leave a missing clone missing"
+    );
+    assert!(
+        !refreshed.loc_backfill_complete,
+        "activity sync must not mark an incomplete LOC backfill complete"
+    );
+    assert_eq!(
+        database
+            .metadata(sync::LOC_SWEEP_METADATA_KEY)
+            .expect("LOC sweep marker")
+            .as_deref(),
+        Some(old_sweep)
+    );
+    assert_eq!(database.metadata(sync::LAST_LOC_REFRESH_METADATA_KEY).expect("line refresh marker").as_deref(), Some(old_sweep));
+    assert_eq!(database.metadata(sync::LAST_FULL_REFRESH_METADATA_KEY).expect("broad refresh marker").as_deref(), Some(old_sweep));
+    assert!(database.metadata(sync::LAST_ACTIVITY_REFRESH_METADATA_KEY).expect("ticket refresh marker").is_some());
+
+    let conn = rusqlite::Connection::open(database.path()).expect("database connection");
+    for (table, expected) in [("code_snapshots", 1), ("loc_observations", 1)] {
+        let count: i64 = conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE repository_id=?1"),
+                [repo_id],
+                |row| row.get(0),
+            )
+            .expect("LOC row count");
+        assert_eq!(
+            count, expected,
+            "work-item sync must preserve cached {table}"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(&forbidden_log).expect("forbidden command log"),
+        "",
+        "explicit activity sync must not invoke git or tokei"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_file(database_path);
 }
