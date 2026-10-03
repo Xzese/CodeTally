@@ -48,7 +48,7 @@ export const formatCompact = (number: number): string => {
 }
 export const formatSigned = (number: number, compact = false): string => `${number >= 0 ? '+' : ''}${compact ? formatCompact(number) : formatCount(number)}`
 
-export const relativeTime = (date?: string | null): string => {
+export const relativeTime = (date?: string | null, compact = false): string => {
   if (!date) return '—'
   const time = new Date(date).getTime()
   if (Number.isNaN(time)) return '—'
@@ -59,7 +59,7 @@ export const relativeTime = (date?: string | null): string => {
   const hours = Math.round(minutes / 60)
   if (hours < 24) return `${hours}h`
   const days = Math.round(hours / 24)
-  if (days === 1) return 'Yesterday'
+  if (days === 1) return compact ? '1d' : 'Yesterday'
   if (days < 30) return `${days}d`
   const months = Math.round(days / 30)
   if (months < 12) return `${months}mo`

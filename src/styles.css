@@ -840,9 +840,10 @@ body.kanban-drag-active, body.kanban-drag-active * { cursor: grabbing !important
 .rail-update.active::after { top: 0; right: auto; left: 100%; width: 12px; height: 100%; }
 .rail-update .update-panel { top: auto; right: auto; bottom: 0; left: calc(100% + 12px); width: min(370px, calc(100vw - 88px)); max-height: calc(100dvh - 24px); overflow-y: auto; }
 .rail-update .update-actions { flex-wrap: wrap; }
-.topbar { background: #0f1b2c; min-height: 56px; flex-basis: 56px; padding-inline: 24px; }
+.topbar { background: #0f1b2c; min-height: 56px; flex-basis: 56px; padding-inline: 24px; flex-wrap: nowrap; }
+.topbar-status { flex: 0 0 auto; flex-wrap: nowrap; }
 .light .topbar { background: #f8fafd; }
-.topbar-navigation { gap: 10px; min-width: 0; font-size: 11px; color: var(--subtle); }
+.topbar-navigation { flex: 1 1 auto; gap: 10px; min-width: 0; font-size: 11px; color: var(--subtle); white-space: nowrap; }
 .workspace-label { color: var(--muted); }
 .workspace-divider { opacity: .4; }
 .topbar-navigation strong { font-weight: 550; }
@@ -858,7 +859,7 @@ body.kanban-drag-active, body.kanban-drag-active * { cursor: grabbing !important
 .summary-icon { display: flex; color: var(--blue); margin-bottom: 12px; }
 .summary-item.purple .summary-icon { color: #9c9aff; }
 .summary-item.red .summary-icon { color: #ff858e; }
-.summary-item strong { font-size: 25px; line-height: 1.15; margin-bottom: 7px; letter-spacing: -.04em; }
+.summary-item strong { font-size: 25px; line-height: 1.15; margin-bottom: 7px; letter-spacing: -.04em; overflow-wrap: anywhere; }
 .summary-label { color: var(--subtle); font-size: 11px; margin: 0; }
 .summary-item small { display: block; font-size: 9px; color: var(--muted); margin-top: 6px; }
 .summary-breakdown { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 22px; color: var(--muted); font-size: 10px; margin-bottom: 23px; }
@@ -897,6 +898,10 @@ body.kanban-drag-active, body.kanban-drag-active * { cursor: grabbing !important
   .topbar { padding-inline: 16px; }
   .main-column { padding: 22px 18px 40px; }
 }
+@media (max-width: 700px) {
+  .refresh-label-full { display: none; }
+  .refresh-label-compact { display: inline; }
+}
 @media (max-width: 620px) {
   .summary-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .summary-item strong { font-size: 23px; }
@@ -906,4 +911,7 @@ body.kanban-drag-active, body.kanban-drag-active * { cursor: grabbing !important
   .page-heading h1 { font-size: 22px; }
   .topbar { padding-inline: 10px; }
   .combined-menu-preview { width: 100%; }
+}
+@media (max-width: 480px) {
+  .summary-strip { grid-template-columns: minmax(0, 1fr); }
 }
