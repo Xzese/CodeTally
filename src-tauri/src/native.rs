@@ -219,7 +219,7 @@ fn tray_menu(app: &AppHandle, state: Option<&AppState>, metric: MenuBarMetric, h
     let settings = state.and_then(|state| sync::app_settings(&state.database()).ok()).unwrap_or_default();
 
     if let Some(totals) = summary {
-        builder = builder.item(&MenuItem::with_id(app, "summary-heading", "CodeTally", false, None::<&str>)?);
+        builder = builder.item(&MenuItem::with_id(app, "summary-heading", "CodeTally", true, None::<&str>)?);
         if let Some(state) = state {
             let progress = state.progress();
             let dashboard = state.dashboard().ok();
@@ -228,17 +228,17 @@ fn tray_menu(app: &AppHandle, state: Option<&AppState>, metric: MenuBarMetric, h
             } else if let Some(date) = dashboard.as_ref().and_then(|data| data.last_full_refresh_at.as_deref()).and_then(|date| chrono::DateTime::parse_from_rfc3339(date).ok()) {
                 format!("Repositories refreshed {}", date.with_timezone(&chrono::Local).format("%b %-d, %H:%M"))
             } else { "No full refresh recorded".into() };
-            builder = builder.item(&MenuItem::with_id(app, "summary-status", status, false, None::<&str>)?);
+            builder = builder.item(&MenuItem::with_id(app, "summary-status", status, true, None::<&str>)?);
             if let Some(date) = dashboard.as_ref().and_then(|data| data.last_personal_refresh_at.as_deref().into_iter().chain(data.last_activity_refresh_at.as_deref()).max()).and_then(|date| chrono::DateTime::parse_from_rfc3339(date).ok()) {
-                builder = builder.item(&MenuItem::with_id(app, "summary-activity", format!("Tickets refreshed {}", date.with_timezone(&chrono::Local).format("%b %-d, %H:%M")), false, None::<&str>)?);
+                builder = builder.item(&MenuItem::with_id(app, "summary-activity", format!("Tickets refreshed {}", date.with_timezone(&chrono::Local).format("%b %-d, %H:%M")), true, None::<&str>)?);
             }
             if dashboard.as_ref().is_some_and(|data| data.repositories.iter().any(|repo| !repo.is_archived && (settings.include_forks_in_totals || !repo.is_fork) && !repo.loc_available)) {
-                builder = builder.item(&MenuItem::with_id(app, "summary-partial", "Partial line counts", false, None::<&str>)?);
+                builder = builder.item(&MenuItem::with_id(app, "summary-partial", "Partial line counts", true, None::<&str>)?);
             }
         }
         builder = builder.separator();
         for (key, label) in summary_rows(totals) {
-            builder = builder.item(&MenuItem::with_id(app, format!("summary-{key}"), label, false, None::<&str>)?);
+            builder = builder.item(&MenuItem::with_id(app, format!("summary-{key}"), label, true, None::<&str>)?);
         }
         builder = builder.separator();
     }

@@ -646,6 +646,17 @@ describe('dashboard UI', () => {
     const user = await renderDashboard()
     const sidebar = () => screen.getByRole('heading', { name: 'Recent activity' }).closest('aside') as HTMLElement
 
+    const prFilter = within(sidebar()).getByRole('button', { name: 'Pull requests' })
+    Object.defineProperty(sidebar(), 'clientWidth', { configurable: true, value: 328 })
+    fireEvent(window, new Event('resize'))
+    expect(prFilter).toHaveTextContent(/^PRs$/)
+    Object.defineProperty(sidebar(), 'clientWidth', { configurable: true, value: 500 })
+    fireEvent(window, new Event('resize'))
+    expect(prFilter).toHaveTextContent(/^Pull requests$/)
+    Object.defineProperty(sidebar(), 'clientWidth', { configurable: true, value: 328 })
+    fireEvent(window, new Event('resize'))
+    expect(prFilter).toHaveTextContent(/^PRs$/)
+
     await user.click(within(sidebar()).getByRole('button', { name: 'Issues' }))
     await user.click(within(sidebar()).getByRole('button', { name: 'All' }))
     expect(screen.getByText('Alpha issue')).toBeInTheDocument()

@@ -3,9 +3,9 @@
 //! on one menu row while leaving the other menu actions native.
 use crate::models::{HistoryPoint, LocChartRange, MenuBarMetric};
 use chrono::{Duration, Months, NaiveDate};
-use objc2::{AnyThread, MainThreadMarker};
-use objc2_app_kit::{NSImage, NSImageView};
-use objc2_foundation::{NSData, NSSize, NSString};
+use objc2::{AnyThread, MainThreadMarker, MainThreadOnly};
+use objc2_app_kit::{NSImage, NSImageView, NSView};
+use objc2_foundation::{NSData, NSPoint, NSRect, NSSize, NSString};
 use tauri::tray::TrayIcon;
 
 const DAYS: usize = 30;
@@ -14,6 +14,7 @@ const WIDTH: usize = 600;
 const HEIGHT: usize = 144;
 const DISPLAY_WIDTH: f64 = 300.0;
 const DISPLAY_HEIGHT: f64 = 72.0;
+const CHART_ROW_HORIZONTAL_INSET: f64 = 16.0;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChartData {
@@ -150,6 +151,7 @@ pub fn attach(tray: &TrayIcon<tauri::Wry>, data: &ChartData) {
         let Some(menu) = status_item.menu(mtm) else {
             return;
         };
+        menu.update();
         let Some(menu_item) = menu.itemWithTitle(&NSString::from_str("LOC chart")) else {
             return;
         };
@@ -159,8 +161,17 @@ pub fn attach(tray: &TrayIcon<tauri::Wry>, data: &ChartData) {
         };
         image.setSize(NSSize::new(DISPLAY_WIDTH, DISPLAY_HEIGHT));
         let image_view = NSImageView::imageViewWithImage(&image, mtm);
+        // Give the chart row the menu's measured content width so it follows
+        // wider summary/status text, then center the fixed-size chart inside it.
+        let row_width = menu.size().width.max(DISPLAY_WIDTH + 2.0 * CHART_ROW_HORIZONTAL_INSET);
+        let row = NSView::initWithFrame(
+            NSView::alloc(mtm),
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(row_width, DISPLAY_HEIGHT)),
+        );
+        image_view.setFrameOrigin(NSPoint::new((row_width - DISPLAY_WIDTH) / 2.0, 0.0));
         image_view.setFrameSize(NSSize::new(DISPLAY_WIDTH, DISPLAY_HEIGHT));
-        menu_item.setView(Some(&image_view));
+        row.addSubview(&image_view);
+        menu_item.setView(Some(&row));
     });
 }
 

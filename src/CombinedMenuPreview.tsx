@@ -136,7 +136,7 @@ function SummaryRows({ metrics }: { metrics: NormalizedMetrics }) {
     `${formatNumber(metrics.open_prs)} open PRs`,
     `${formatNumber(metrics.open_issues)} open issues`
   ]
-  return <div className="native-menu-preview-summary">{rows.map((row) => <div className="native-menu-preview-muted-row" key={row}>{row}</div>)}</div>
+  return <div className="native-menu-preview-summary">{rows.map((row) => <div className="native-menu-preview-info-row" key={row}>{row}</div>)}</div>
 }
 
 export function CombinedMenuPreview({ metrics, range, data }: Props) {
@@ -151,10 +151,10 @@ export function CombinedMenuPreview({ metrics, range, data }: Props) {
   const progress = data?.progress
 
   return <section className="native-menu-preview" aria-label="Combined menu bar preview">
-    <div className="native-menu-preview-disabled">CodeTally</div>
-    <div className="native-menu-preview-disabled">{progress?.running ? `Refreshing · ${progress.message}` : repositoryRefresh ? `Repositories refreshed ${repositoryRefresh}` : 'No full refresh recorded'}</div>
-    {ticketsRefresh && <div className="native-menu-preview-disabled">Tickets refreshed {ticketsRefresh}</div>}
-    {data?.partialLoc && <div className="native-menu-preview-disabled">Partial line counts</div>}
+    <div className="native-menu-preview-info-row">CodeTally</div>
+    <div className="native-menu-preview-info-row">{progress?.running ? `Refreshing · ${progress.message}` : repositoryRefresh ? `Repositories refreshed ${repositoryRefresh}` : 'No full refresh recorded'}</div>
+    {ticketsRefresh && <div className="native-menu-preview-info-row">Tickets refreshed {ticketsRefresh}</div>}
+    {data?.partialLoc && <div className="native-menu-preview-info-row">Partial line counts</div>}
     <Separator />
     <SummaryRows metrics={metrics} />
     <Separator />

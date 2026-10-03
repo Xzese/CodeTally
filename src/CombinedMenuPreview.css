@@ -15,7 +15,7 @@
   user-select: none;
 }
 
-.native-menu-preview-disabled,
+.native-menu-preview-info-row,
 .native-menu-preview-muted-row {
   min-height: 21px;
   padding: 3px 8px;
@@ -25,8 +25,8 @@
   white-space: nowrap;
 }
 
-.native-menu-preview-disabled:first-child {
-  color: #a6a6ad;
+.native-menu-preview-info-row {
+  color: inherit;
 }
 
 .native-menu-preview-summary {
@@ -96,13 +96,8 @@
   box-shadow: 0 8px 24px #00000020, inset 0 1px #ffffff9c;
 }
 
-.light .native-menu-preview-disabled,
 .light .native-menu-preview-muted-row {
   color: #77777e;
-}
-
-.light .native-menu-preview-disabled:first-child {
-  color: #68686f;
 }
 
 .light .native-menu-preview-separator {
