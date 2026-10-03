@@ -200,6 +200,15 @@ func clickRoute(_ label: String, app: AXUIElement) throws {
     try press(control, named: label)
 }
 
+func clickActivityTab(_ label: String, app: AXUIElement) throws {
+    guard let tabs = tree([app]).first(where: { candidate in
+        guard role(candidate) == "AXTabGroup" else { return false }
+        let text = tree([candidate]).flatMap(labels).joined(separator: " ").lowercased()
+        return text.contains("pull requests") && text.contains("issues")
+    }) else { try fail("Could not find the activity tabs in the fixture app.") }
+    try clickRoute(label, app: tabs)
+}
+
 func openRepositoryDetails(_ app: AXUIElement, repository: String) throws {
     let all = tree([app])
     func matchesRepository(_ candidate: AXUIElement) -> Bool {
@@ -314,23 +323,23 @@ do {
     if mode == "combined" {
         let app = AXUIElementCreateApplication(pid)
         try saveWindow(pid, outputDir, "dashboard-overview")
-        for (route, file) in [
-            ("View repositories", "repositories"),
-        ] {
-            try clickRoute(route, app: app)
-            try saveWindow(pid, outputDir, file)
-        }
+        try scrollToVisible("Repository table", app: app)
+        try saveWindow(pid, outputDir, "repositories")
         try openRepositoryDetails(app, repository: "planner")
         try saveWindow(pid, outputDir, "repository-detail")
+        try clickRoute("Overview", app: app)
+        try scrollToVisible("Lines metric", app: app)
+        try saveWindow(pid, outputDir, "analytics")
+        try clickRoute("Overview", app: app)
         for (route, file) in [
-            ("View analytics", "analytics"),
-            ("View pull requests", "pull-requests"),
-            ("View issues", "issues"),
-            ("Kanban Board", "kanban-board"),
+            ("Pull requests", "pull-requests"),
+            ("Issues", "issues"),
         ] {
-            try clickRoute(route, app: app)
+            try clickActivityTab(route, app: app)
             try saveWindow(pid, outputDir, file)
         }
+        try clickRoute("Kanban Board", app: app)
+        try saveWindow(pid, outputDir, "kanban-board")
         try clickRoute("Settings", app: app)
         try scrollToVisible("Combined menu bar preview", app: app)
         try saveWindow(pid, outputDir, "settings")
