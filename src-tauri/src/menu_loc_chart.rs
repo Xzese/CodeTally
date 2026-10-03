@@ -104,9 +104,15 @@ fn chart_png(data: &ChartData) -> Option<Vec<u8>> {
             rectangle(&mut pixels, x, y, 3, 1, [119, 145, 168, 75]);
         }
     }
+    // The selected range filters saved days; draw from the first measured bin
+    // to the last so missing days at either edge do not push the line aside.
+    let first_index = data.values.iter().position(Option::is_some)?;
+    let last_index = data.values.iter().rposition(Option::is_some)?;
     let points: Vec<_> = data.values.iter().enumerate().filter_map(|(index, sample)| {
         let sample = (*sample)?;
-        let x = 12 + (index as f64 * (WIDTH - 24) as f64 / (data.values.len() - 1) as f64).round() as usize;
+        let x = if first_index == last_index { WIDTH / 2 } else {
+            12 + ((index - first_index) as f64 * (WIDTH - 24) as f64 / (last_index - first_index) as f64).round() as usize
+        };
         // Scale to the observed range so small changes remain visible.
         let y = if minimum == maximum { 72 } else {
             118 - (((sample - minimum) as f64 / (maximum - minimum) as f64) * 96.0).round() as usize
@@ -177,9 +183,33 @@ pub fn attach(tray: &TrayIcon<tauri::Wry>, data: &ChartData) {
 
 #[cfg(test)]
 mod tests {
-    use super::chart_data;
+    use super::{chart_data, chart_png, ChartData, WIDTH};
     use crate::models::{HistoryPoint, LocChartRange, MenuBarMetric};
     use chrono::NaiveDate;
+
+    #[test]
+    fn rendered_line_centers_sparse_history_and_single_samples() {
+        for single_sample in [false, true] {
+            let mut values = vec![None; 30];
+            values[25] = Some(120);
+            if !single_sample { values[8] = Some(100); }
+            let bytes = chart_png(&ChartData { values, first: None, latest: None, measured_days: if single_sample { 1 } else { 2 } }).unwrap();
+            let mut reader = png::Decoder::new(std::io::Cursor::new(bytes)).read_info().unwrap();
+            let mut pixels = vec![0; reader.output_buffer_size()];
+            let frame = reader.next_frame(&mut pixels).unwrap();
+            let ink: Vec<_> = pixels[..frame.buffer_size()].chunks_exact(4).enumerate()
+                .filter(|(_, rgba)| rgba[0] < 100 && rgba[1] > 100 && rgba[2] > 100 && rgba[3] > 200)
+                .map(|(index, _)| index % WIDTH).collect();
+            let left = *ink.iter().min().unwrap();
+            let right = *ink.iter().max().unwrap();
+            assert!(left.abs_diff(WIDTH - 1 - right) <= 3, "unequal plot margins: {left}..{right}");
+            if single_sample {
+                assert!(left >= WIDTH / 2 - 5 && right <= WIDTH / 2 + 5);
+            } else {
+                assert!(left < 20 && right > WIDTH - 20, "measured days should use the plot width");
+            }
+        }
+    }
 
     #[test]
     fn chart_keeps_only_measured_days_and_selects_the_requested_metric() {

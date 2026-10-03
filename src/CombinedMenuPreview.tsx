@@ -105,9 +105,11 @@ function LocChart({ values }: { values: Array<ChartPoint | null> }) {
   if (!samples.length) return null
   const minimum = Math.min(...samples.map((point) => point.value))
   const maximum = Math.max(...samples.map((point) => point.value))
+  const firstIndex = values.findIndex((point) => point !== null)
+  const lastIndex = values.length - 1 - [...values].reverse().findIndex((point) => point !== null)
   const plotted = values.flatMap((point, index) => {
     if (!point) return []
-    const x = 6 + index * 288 / Math.max(1, values.length - 1)
+    const x = firstIndex === lastIndex ? 150 : 6 + (index - firstIndex) * 288 / (lastIndex - firstIndex)
     const y = minimum === maximum ? 36 : 59 - (point.value - minimum) / (maximum - minimum) * 48
     return [{ x, y }]
   })
