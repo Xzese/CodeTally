@@ -5,8 +5,14 @@ pub mod error;
 pub mod gitops;
 pub mod github;
 pub mod github_sync;
+pub mod kanban;
+pub mod kanban_detail;
 pub mod models;
+#[cfg(target_os = "macos")]
+mod menu_loc_chart;
+pub mod native;
 pub mod sync;
+pub mod updates;
 
 use models::SyncProgress;
 use std::io;
@@ -18,6 +24,10 @@ use tauri::Manager;
 const APP_DATABASE_FILE: &str = "codetally.sqlite3";
 const LEGACY_APP_DATA_DIRECTORY: &str = "com.samfaid.github-portfolio";
 const LEGACY_DATABASE_FILE: &str = "github-portfolio.sqlite3";
+
+pub fn screenshot_mode() -> bool {
+    cfg!(debug_assertions) && std::env::var("CODETALLY_SCREENSHOT_MODE").ok().as_deref() == Some("1")
+}
 
 /// Copy data from the pre-CodeTally application directory without replacing
 /// files that already exist in the new location. Keeping this operation
@@ -80,42 +90,90 @@ fn copy_directory_contents_if_missing(source: &Path, destination: &Path) -> io::
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let app_data_dir = app.path().app_data_dir().map_err(|error| error.to_string())?;
-            migrate_legacy_app_data(&app_data_dir).map_err(|error| error.to_string())?;
-            std::fs::create_dir_all(&app_data_dir).map_err(|error| error.to_string())?;
-            let cache_dir = app_data_dir.join("repositories");
+            if !screenshot_mode() {
+                migrate_legacy_app_data(&app_data_dir).map_err(|error| error.to_string())?;
+                std::fs::create_dir_all(&app_data_dir).map_err(|error| error.to_string())?;
+            }
+            let db_path = if screenshot_mode() {
+                std::env::var_os("CODETALLY_SCREENSHOT_DATABASE").map(std::path::PathBuf::from).ok_or("Set CODETALLY_SCREENSHOT_DATABASE to an isolated fixture database")?
+            } else {
+                app_data_dir.join(APP_DATABASE_FILE)
+            };
+            let cache_dir = if screenshot_mode() { db_path.parent().ok_or("Fixture database needs a parent directory")?.join("repositories") } else { app_data_dir.join("repositories") };
             std::fs::create_dir_all(&cache_dir).map_err(|error| error.to_string())?;
-            let db_path = app_data_dir.join(APP_DATABASE_FILE);
             let database = db::Database::new(&db_path);
             database.init().map_err(|error| error.to_string())?;
-            if let Some(parent) = app_data_dir.parent() {
+            let settings = sync::app_settings(&database).map_err(|error| error.to_string())?;
+            if let Some(parent) = app_data_dir.parent().filter(|_| !screenshot_mode()) {
                 let legacy_cache_dir = parent.join(LEGACY_APP_DATA_DIRECTORY).join("repositories");
                 database
                     .rebase_local_paths(&legacy_cache_dir, &cache_dir)
                     .map_err(|error| error.to_string())?;
             }
             app.manage(AppState { db_path, cache_dir, progress: Arc::new(Mutex::new(SyncProgress::default())), dashboard_cache: Arc::new(Mutex::new(Default::default())), job_lock: Arc::new(Mutex::new(())) });
+            native::apply_activation_policy(app.handle(), &settings)?;
+            native::setup(app.handle())?;
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let state = window.state::<AppState>();
+                if sync::app_settings(&state.database()).map(|settings| settings.run_in_background).unwrap_or(true) {
+                    if window.hide().is_ok() { api.prevent_close(); }
+                } else {
+                    window.app_handle().exit(0);
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             commands::check_dependencies,
+            commands::check_for_updates,
+            commands::install_update,
             commands::get_github_user,
             commands::discover_repositories,
             commands::sync_github_data,
             commands::sync_activity,
+            commands::sync_work_items,
+            commands::sync_personal_work_items,
             commands::get_app_settings,
+            commands::get_app_info,
+            commands::get_repository_selection,
             commands::set_app_settings,
+            commands::get_database_location,
+            commands::reveal_database,
             commands::sync_repository,
             commands::backfill_loc,
             commands::get_sync_progress,
+            commands::get_activity_refresh_at,
+            commands::get_personal_refresh_at,
             commands::get_repository_classification,
             commands::set_repository_classification,
             commands::get_dashboard,
             commands::get_loc_history,
             commands::get_activity_feed,
+            commands::get_kanban_page,
+            commands::set_kanban_metadata,
+            commands::get_kanban_links,
+            commands::get_kanban_discussion,
+            commands::get_kanban_preferences,
+            commands::set_kanban_preferences,
             commands::open_external_url
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running CodeTally");
+        .build(tauri::generate_context!())
+        .expect("error while building CodeTally")
+        .run(|app, event| {
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = event {
+                native::show_window(app);
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = (app, event);
+        });
 }

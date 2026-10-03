@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 const LOC_ANALYSIS_VERSION: &str = "3";
 const HISTORY_SAMPLING_VERSION: &str = "1";
+const ACTIVITY_ACTOR_FIELDS_VERSION: &str = "1";
 
 pub struct Database {
     path: std::path::PathBuf,
@@ -43,7 +44,7 @@ impl Database {
     }
 
     pub fn init(&self) -> AppResult<()> {
-        let conn = self.connect()?;
+        let mut conn = self.connect()?;
         conn.execute_batch(
             r#"
             PRAGMA foreign_keys = ON;
@@ -109,6 +110,8 @@ impl Database {
                 merged_at TEXT,
                 closed_at TEXT,
                 url TEXT NOT NULL,
+                author TEXT,
+                assignees_json TEXT NOT NULL DEFAULT '[]',
                 additions INTEGER NOT NULL DEFAULT 0,
                 deletions INTEGER NOT NULL DEFAULT 0,
                 changed_files INTEGER NOT NULL DEFAULT 0,
@@ -162,6 +165,132 @@ impl Database {
         let _ = conn.execute("ALTER TABLE repositories ADD COLUMN last_fetched_pushed_at TEXT", []);
         let _ = conn.execute("ALTER TABLE repositories ADD COLUMN star_count INTEGER NOT NULL DEFAULT 0", []);
         let _ = conn.execute("ALTER TABLE repositories ADD COLUMN fork_count INTEGER NOT NULL DEFAULT 0", []);
+        let _ = conn.execute("ALTER TABLE pull_requests ADD COLUMN author TEXT", []);
+        let _ = conn.execute("ALTER TABLE pull_requests ADD COLUMN assignees_json TEXT NOT NULL DEFAULT '[]'", []);
+        // Kanban data has its own additive schema version. Keep it independent
+        // from LOC analysis migrations and from the disposable GitHub cache.
+        let kanban_version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if kanban_version < 1 {
+            let tx = conn.transaction()?;
+            tx.execute_batch(r#"
+                ALTER TABLE pull_requests ADD COLUMN node_id TEXT;
+                ALTER TABLE issues ADD COLUMN node_id TEXT;
+                ALTER TABLE issues ADD COLUMN completion_reason TEXT;
+                CREATE TABLE kanban_item_metadata (
+                    account_scope TEXT NOT NULL,
+                    item_key TEXT NOT NULL,
+                    manual_column TEXT,
+                    priority TEXT NOT NULL DEFAULT 'None',
+                    notes TEXT NOT NULL DEFAULT '',
+                    sort_rank INTEGER NOT NULL DEFAULT 0,
+                    revision INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(account_scope, item_key)
+                );
+                CREATE TABLE kanban_account_repositories (
+                    account_scope TEXT NOT NULL,
+                    github_repository_id TEXT NOT NULL,
+                    PRIMARY KEY(account_scope, github_repository_id)
+                );
+                CREATE TABLE kanban_activity_status (
+                    account_scope TEXT NOT NULL,
+                    github_repository_id TEXT NOT NULL,
+                    last_successful_at TEXT,
+                    partial INTEGER NOT NULL DEFAULT 1,
+                    error TEXT,
+                    PRIMARY KEY(account_scope, github_repository_id)
+                );
+                CREATE TABLE kanban_links_cache (
+                    account_scope TEXT NOT NULL,
+                    item_key TEXT NOT NULL,
+                    links_json TEXT NOT NULL,
+                    partial INTEGER NOT NULL,
+                    message TEXT,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(account_scope, item_key)
+                );
+                INSERT OR IGNORE INTO kanban_account_repositories(account_scope, github_repository_id)
+                    SELECT 'github.com:' || lower(value), github_id FROM repositories
+                    CROSS JOIN app_metadata WHERE key='github_login' AND value<>'';
+                PRAGMA user_version = 1;
+            "#)?;
+            tx.commit()?;
+        }
+        if kanban_version < 2 {
+            let tx = conn.transaction()?;
+            tx.execute_batch(r#"
+                CREATE TABLE IF NOT EXISTS kanban_preferences (
+                    account_scope TEXT PRIMARY KEY,
+                    kind TEXT NOT NULL DEFAULT 'prs',
+                    repository_scope TEXT NOT NULL DEFAULT 'all',
+                    relationship TEXT NOT NULL DEFAULT 'author',
+                    search TEXT NOT NULL DEFAULT '',
+                    show_completed INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL
+                );
+                PRAGMA user_version = 2;
+            "#)?;
+            tx.commit()?;
+        }
+        if kanban_version < 3 {
+            let tx = conn.transaction()?;
+            tx.execute_batch("ALTER TABLE kanban_links_cache ADD COLUMN next_cursor TEXT; PRAGMA user_version = 3;")?;
+            tx.commit()?;
+        }
+        if kanban_version < 4 {
+            let tx = conn.transaction()?;
+            tx.execute_batch(r#"
+                CREATE TABLE kanban_discussion_cache (
+                    account_scope TEXT NOT NULL,
+                    item_key TEXT NOT NULL,
+                    comments_json TEXT NOT NULL DEFAULT '[]',
+                    comment_count INTEGER NOT NULL DEFAULT 0,
+                    comments_cursor TEXT,
+                    checks_json TEXT NOT NULL DEFAULT '[]',
+                    check_count INTEGER NOT NULL DEFAULT 0,
+                    checks_cursor TEXT,
+                    checks_commit_oid TEXT,
+                    refreshed_at TEXT,
+                    PRIMARY KEY(account_scope, item_key)
+                );
+                PRAGMA user_version = 4;
+            "#)?;
+            tx.commit()?;
+        }
+        if kanban_version < 5 {
+            let tx = conn.transaction()?;
+            tx.execute_batch("ALTER TABLE kanban_discussion_cache ADD COLUMN commits_json TEXT NOT NULL DEFAULT '[]';
+                              ALTER TABLE kanban_discussion_cache ADD COLUMN commit_count INTEGER NOT NULL DEFAULT 0;
+                              ALTER TABLE kanban_discussion_cache ADD COLUMN commits_cursor TEXT;
+                              ALTER TABLE kanban_discussion_cache ADD COLUMN last_error TEXT;
+                              UPDATE kanban_discussion_cache SET refreshed_at=NULL;
+                              PRAGMA user_version = 5;")?;
+            tx.commit()?;
+        }
+        let stored_activity_actor_version: Option<String> = conn.query_row("SELECT value FROM app_metadata WHERE key='activity_actor_fields_version'", [], |row| row.get(0)).optional()?;
+        if stored_activity_actor_version.as_deref() != Some(ACTIVITY_ACTOR_FIELDS_VERSION) {
+            // Actor fields were added after activity was already cached. Reset
+            // only closed-PR checkpoints to the oldest cached PR so the next
+            // activity refresh hydrates actor data without dropping rows.
+            let oldest_closed_prs = {
+                let mut statement = conn.prepare("SELECT repository_id,MIN(updated_at) FROM pull_requests WHERE upper(state) IN ('CLOSED','MERGED') GROUP BY repository_id")?;
+                let rows = statement.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?;
+                rows.collect::<Result<Vec<_>, _>>()?
+            };
+            for (repository_id, updated_at) in oldest_closed_prs {
+                let checkpoint = serde_json::json!({
+                    "completed_at": updated_at,
+                    "started_at": null,
+                    "after": null,
+                }).to_string();
+                conn.execute(
+                    "INSERT INTO app_metadata(key,value) VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    params![format!("github_activity_v2:{repository_id}:pullRequests:false"), checkpoint],
+                )?;
+            }
+            conn.execute("INSERT INTO app_metadata(key,value) VALUES ('activity_actor_fields_version',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [ACTIVITY_ACTOR_FIELDS_VERSION])?;
+        }
         let stored_version: Option<String> = conn.query_row("SELECT value FROM app_metadata WHERE key='loc_analysis_version'", [], |row| row.get(0)).optional()?;
         if stored_version.as_deref() != Some(LOC_ANALYSIS_VERSION) {
             // LOC counts are derived artifacts. A scanner/parser change must
@@ -184,7 +313,7 @@ impl Database {
         Ok(())
     }
 
-    fn connect(&self) -> AppResult<Connection> {
+    pub(crate) fn connect(&self) -> AppResult<Connection> {
         let conn = Connection::open(&self.path)?;
         conn.busy_timeout(std::time::Duration::from_secs(10))?;
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
@@ -203,9 +332,12 @@ impl Database {
     }
 
     pub fn upsert_repository(&self, repo: &Repository) -> AppResult<i64> {
-        let conn = self.connect()?;
-        Self::upsert_repository_on(&conn, repo)?;
-        Ok(conn.query_row("SELECT id FROM repositories WHERE github_id=?1", [&repo.github_id], |row| row.get(0))?)
+        let mut conn = self.connect()?;
+        let tx = conn.transaction()?;
+        Self::upsert_repository_on(&tx, repo)?;
+        let id = tx.query_row("SELECT id FROM repositories WHERE github_id=?1", [&repo.github_id], |row| row.get(0))?;
+        tx.commit()?;
+        Ok(id)
     }
 
     pub fn upsert_repositories(&self, repositories: &[Repository]) -> AppResult<()> {
@@ -217,6 +349,25 @@ impl Database {
     }
 
     fn upsert_repository_on(conn: &Connection, repo: &Repository) -> AppResult<()> {
+        // A deleted repository can be recreated under the same owner/name with
+        // a new GitHub ID. Keep the old row and its snapshots/activity attached
+        // to that old identity, but retire its display name before inserting the
+        // new repository. Names are reusable; GitHub IDs are the cache key.
+        let displaced_id: Option<i64> = conn.query_row(
+            "SELECT id FROM repositories WHERE name_with_owner=?1 AND github_id<>?2",
+            params![repo.name_with_owner, repo.github_id],
+            |row| row.get(0),
+        ).optional()?;
+        if let Some(id) = displaced_id {
+            conn.execute(
+                "UPDATE repositories SET name_with_owner=?1,is_archived=1,last_error=?2 WHERE id=?3",
+                params![
+                    format!("{} [replaced local #{id}]", repo.name_with_owner),
+                    "Repository name now belongs to a different GitHub repository",
+                    id
+                ],
+            )?;
+        }
         conn.prepare_cached(
             r#"INSERT INTO repositories
                (github_id, owner, name, name_with_owner, url, ssh_url, default_branch,
@@ -288,6 +439,49 @@ impl Database {
         let mut stmt = conn.prepare("SELECT id,github_id,owner,name,name_with_owner,url,ssh_url,default_branch,primary_language,is_private,is_fork,is_archived,star_count,fork_count,created_at,github_updated_at,pushed_at,local_path,last_sync_at,last_error,loc_backfill_complete,open_pr_count,open_issue_count,open_counts_synced,last_fetched_pushed_at FROM repositories ORDER BY name_with_owner COLLATE NOCASE")?;
         let rows = stmt.query_map([], repository_from_row)?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// The inventory remains unfiltered so disabled repositories can be reenabled.
+    pub fn repository_selection(&self) -> AppResult<Vec<crate::models::RepositorySelection>> {
+        let login = self.metadata("github_login")?.unwrap_or_default();
+        Ok(self.repositories()?.into_iter().filter(|repo| !repo.is_archived).map(|repo| {
+            let group = if repo.owner.eq_ignore_ascii_case(&login) { "personal" } else { "company" }.to_string();
+            crate::models::RepositorySelection { github_id: repo.github_id, name_with_owner: repo.name_with_owner, owner: repo.owner, group }
+        }).collect())
+    }
+
+    pub fn delete_repository(&self, repo: &Repository) -> AppResult<()> {
+        let mut conn = self.connect()?;
+        let transaction = conn.transaction()?;
+        transaction.execute("DELETE FROM repositories WHERE id=?1", [repo.id])?;
+        transaction.execute(
+            "DELETE FROM app_metadata WHERE key=?1 OR key LIKE ?2",
+            params![format!("github_repository_unavailable:{}", repo.github_id), format!("github_activity_v2:{}:%", repo.id)],
+        )?;
+        transaction.execute(
+            "DELETE FROM app_metadata WHERE key='github_last_attempted_repository' AND value=?1",
+            [repo.id.to_string()],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn repository_enabled(&self, repo: &Repository) -> AppResult<bool> {
+        let settings = crate::sync::app_settings(self)?;
+        let login = self.metadata("github_login")?.unwrap_or_default();
+        Ok(repository_selected(repo, &settings, &login))
+    }
+
+    pub fn selected_repositories(&self) -> AppResult<Vec<Repository>> {
+        let settings = crate::sync::app_settings(self)?;
+        let login = self.metadata("github_login")?.unwrap_or_default();
+        Ok(self.repositories()?.into_iter().filter(|repo| repository_selected(repo, &settings, &login)).collect())
+    }
+
+    fn activity_repository_ids_json(&self, scope: Option<&[i64]>) -> AppResult<String> {
+        let ids: Vec<i64> = self.selected_repositories()?.iter().map(|repo| repo.id)
+            .filter(|id| scope.is_none_or(|scope| scope.contains(id))).collect();
+        Ok(serde_json::to_string(&ids)?)
     }
 
     pub fn set_local_path(&self, id: i64, path: &str) -> AppResult<()> {
@@ -489,10 +683,10 @@ impl Database {
     fn upsert_pull_request_on(conn: &Connection, item: &PullRequest) -> AppResult<()> {
         conn.prepare_cached(
             r#"INSERT INTO pull_requests
-               (repository_id,number,title,state,is_draft,created_at,updated_at,merged_at,closed_at,url,additions,deletions,changed_files,ci_state)
-               VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
-               ON CONFLICT(repository_id,number) DO UPDATE SET title=excluded.title,state=excluded.state,is_draft=excluded.is_draft,created_at=excluded.created_at,updated_at=excluded.updated_at,merged_at=excluded.merged_at,closed_at=excluded.closed_at,url=excluded.url,additions=excluded.additions,deletions=excluded.deletions,changed_files=excluded.changed_files,ci_state=excluded.ci_state
-               WHERE pull_requests.title IS NOT excluded.title OR pull_requests.state IS NOT excluded.state OR pull_requests.is_draft IS NOT excluded.is_draft OR pull_requests.created_at IS NOT excluded.created_at OR pull_requests.updated_at IS NOT excluded.updated_at OR pull_requests.merged_at IS NOT excluded.merged_at OR pull_requests.closed_at IS NOT excluded.closed_at OR pull_requests.url IS NOT excluded.url OR pull_requests.additions IS NOT excluded.additions OR pull_requests.deletions IS NOT excluded.deletions OR pull_requests.changed_files IS NOT excluded.changed_files OR pull_requests.ci_state IS NOT excluded.ci_state"#)?.execute(params![item.repository_id,item.number,item.title,item.state,item.is_draft,item.created_at,item.updated_at,item.merged_at,item.closed_at,item.url,item.additions,item.deletions,item.changed_files,item.ci_state])?;
+               (repository_id,number,title,state,is_draft,created_at,updated_at,merged_at,closed_at,url,author,assignees_json,additions,deletions,changed_files,ci_state)
+               VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
+               ON CONFLICT(repository_id,number) DO UPDATE SET title=excluded.title,state=excluded.state,is_draft=excluded.is_draft,created_at=excluded.created_at,updated_at=excluded.updated_at,merged_at=excluded.merged_at,closed_at=excluded.closed_at,url=excluded.url,author=excluded.author,assignees_json=excluded.assignees_json,additions=excluded.additions,deletions=excluded.deletions,changed_files=excluded.changed_files,ci_state=excluded.ci_state
+               WHERE pull_requests.title IS NOT excluded.title OR pull_requests.state IS NOT excluded.state OR pull_requests.is_draft IS NOT excluded.is_draft OR pull_requests.created_at IS NOT excluded.created_at OR pull_requests.updated_at IS NOT excluded.updated_at OR pull_requests.merged_at IS NOT excluded.merged_at OR pull_requests.closed_at IS NOT excluded.closed_at OR pull_requests.url IS NOT excluded.url OR pull_requests.additions IS NOT excluded.additions OR pull_requests.deletions IS NOT excluded.deletions OR pull_requests.changed_files IS NOT excluded.changed_files OR pull_requests.ci_state IS NOT excluded.ci_state OR pull_requests.author IS NOT excluded.author OR pull_requests.assignees_json IS NOT excluded.assignees_json"#)?.execute(params![item.repository_id,item.number,item.title,item.state,item.is_draft,item.created_at,item.updated_at,item.merged_at,item.closed_at,item.url,item.author,serde_json::to_string(&item.assignees)?,item.additions,item.deletions,item.changed_files,item.ci_state])?;
         Ok(())
     }
 
@@ -514,10 +708,15 @@ impl Database {
     /// Publish a validated feed page and its checkpoint together. A failed
     /// commit leaves both data and cursor unchanged, so replay remains safe.
     pub fn apply_activity_page(&self, prs: &[PullRequest], issues: &[Issue], repository_id: i64, open_prs: i64, open_issues: i64, cursor_key: &str, cursor: &str) -> AppResult<()> {
+        self.apply_activity_page_with_identities(prs, issues, repository_id, open_prs, open_issues, cursor_key, cursor, |_| Ok(()))
+    }
+
+    pub(crate) fn apply_activity_page_with_identities(&self, prs: &[PullRequest], issues: &[Issue], repository_id: i64, open_prs: i64, open_issues: i64, cursor_key: &str, cursor: &str, update_identities: impl FnOnce(&Connection) -> AppResult<()>) -> AppResult<()> {
         let mut conn = self.connect()?;
         let tx = conn.transaction()?;
         for item in prs { Self::upsert_pull_request_on(&tx, item)?; }
         for item in issues { Self::upsert_issue_on(&tx, item)?; }
+        update_identities(&tx)?;
         tx.execute("UPDATE repositories SET open_pr_count=?1, open_issue_count=?2, open_counts_synced=1 WHERE id=?3 AND (open_counts_synced<>1 OR open_pr_count<>?1 OR open_issue_count<>?2)", params![open_prs, open_issues, repository_id])?;
         tx.execute("INSERT INTO app_metadata(key,value) VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE app_metadata.value IS NOT excluded.value", params![cursor_key, cursor])?;
         tx.commit()?;
@@ -525,22 +724,42 @@ impl Database {
     }
 
     pub fn pull_requests(&self, repository_id: Option<i64>, state: Option<&str>, limit: usize) -> AppResult<Vec<PullRequest>> {
+        self.scoped_pull_requests(repository_id, None, state, limit)
+    }
+
+    fn scoped_pull_requests(&self, repository_id: Option<i64>, scope: Option<&[i64]>, state: Option<&str>, limit: usize) -> AppResult<Vec<PullRequest>> {
+        self.scoped_pull_requests_for_relationship(repository_id, scope, state, limit, "everyone", None)
+    }
+
+    fn scoped_pull_requests_for_relationship(&self, repository_id: Option<i64>, scope: Option<&[i64]>, state: Option<&str>, limit: usize, relationship: &str, login: Option<&str>) -> AppResult<Vec<PullRequest>> {
+        let relationship = normalize_relationship(relationship)?;
+        let relationship_filter = relationship_filter("p", relationship);
         let conn = self.connect()?;
         let repository_filter = if repository_id.is_some() { " AND p.repository_id=?1" } else { "" };
         let state_filter = if state.is_some() { " AND lower(p.state)=lower(?2)" } else { "" };
-        let query = format!("SELECT p.repository_id,r.name_with_owner,p.number,p.title,p.state,p.is_draft,p.created_at,p.updated_at,p.merged_at,p.closed_at,p.url,p.additions,p.deletions,p.changed_files,p.ci_state FROM pull_requests p JOIN repositories r ON r.id=p.repository_id WHERE r.is_archived=0{repository_filter}{state_filter} ORDER BY p.updated_at DESC LIMIT ?3");
+        let query = format!("SELECT p.repository_id,r.name_with_owner,p.number,p.title,p.state,p.is_draft,p.created_at,p.updated_at,p.merged_at,p.closed_at,p.url,p.author,p.assignees_json,p.additions,p.deletions,p.changed_files,p.ci_state FROM pull_requests p JOIN repositories r ON r.id=p.repository_id WHERE r.is_archived=0 AND r.id IN (SELECT value FROM json_each(?4)){repository_filter}{state_filter} AND ({relationship_filter}) ORDER BY p.updated_at DESC LIMIT ?3");
         let mut stmt = conn.prepare(&query)?;
-        let rows = stmt.query_map(params![repository_id, state, limit as i64], pull_request_from_row)?;
+        let rows = stmt.query_map(params![repository_id, state, limit as i64, self.activity_repository_ids_json(scope)?, login], pull_request_from_row)?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     pub fn issues(&self, repository_id: Option<i64>, state: Option<&str>, limit: usize) -> AppResult<Vec<Issue>> {
+        self.scoped_issues(repository_id, None, state, limit)
+    }
+
+    fn scoped_issues(&self, repository_id: Option<i64>, scope: Option<&[i64]>, state: Option<&str>, limit: usize) -> AppResult<Vec<Issue>> {
+        self.scoped_issues_for_relationship(repository_id, scope, state, limit, "everyone", None)
+    }
+
+    fn scoped_issues_for_relationship(&self, repository_id: Option<i64>, scope: Option<&[i64]>, state: Option<&str>, limit: usize, relationship: &str, login: Option<&str>) -> AppResult<Vec<Issue>> {
+        let relationship = normalize_relationship(relationship)?;
+        let relationship_filter = relationship_filter("i", relationship);
         let conn = self.connect()?;
         let repository_filter = if repository_id.is_some() { " AND i.repository_id=?1" } else { "" };
         let state_filter = if state.is_some() { " AND lower(i.state)=lower(?2)" } else { "" };
-        let query = format!("SELECT i.repository_id,r.name_with_owner,i.number,i.title,i.state,i.created_at,i.updated_at,i.closed_at,i.url,i.author,i.labels_json,i.assignees_json FROM issues i JOIN repositories r ON r.id=i.repository_id WHERE r.is_archived=0{repository_filter}{state_filter} ORDER BY i.updated_at DESC LIMIT ?3");
+        let query = format!("SELECT i.repository_id,r.name_with_owner,i.number,i.title,i.state,i.created_at,i.updated_at,i.closed_at,i.url,i.author,i.labels_json,i.assignees_json FROM issues i JOIN repositories r ON r.id=i.repository_id WHERE r.is_archived=0 AND r.id IN (SELECT value FROM json_each(?4)){repository_filter}{state_filter} AND ({relationship_filter}) ORDER BY i.updated_at DESC LIMIT ?3");
         let mut stmt = conn.prepare(&query)?;
-        let rows = stmt.query_map(params![repository_id, state, limit as i64], issue_from_row)?;
+        let rows = stmt.query_map(params![repository_id, state, limit as i64, self.activity_repository_ids_json(scope)?, login], issue_from_row)?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
@@ -549,9 +768,11 @@ impl Database {
     }
 
     fn summaries_at(&self, now: DateTime<Utc>) -> AppResult<Vec<RepositorySummary>> {
+        let settings = crate::sync::app_settings(self)?;
+        let login = self.metadata("github_login")?.unwrap_or_default();
         let conn = self.connect()?;
         let tx = conn.unchecked_transaction()?;
-        let repos = Self::repositories_on(&tx)?;
+        let repos: Vec<_> = Self::repositories_on(&tx)?.into_iter().filter(|repo| repository_selected(repo, &settings, &login)).collect();
         let day_7 = (now - Duration::days(7)).to_rfc3339();
         let day_30 = (now - Duration::days(30)).to_rfc3339();
         let day_90 = (now - Duration::days(90)).to_rfc3339();
@@ -629,11 +850,15 @@ impl Database {
         }
         let repositories: Vec<_> = self.summaries_at(now)?.into_iter().filter(|repo| !repo.is_archived).collect();
         let dashboard = Arc::new(Dashboard {
-            totals: self.totals(&repositories),
+            totals: self.totals(&repositories)?,
             history: self.history(None)?,
             last_sync_at: repositories.iter().filter_map(|repo| repo.last_sync_at.clone()).max(),
             user: self.metadata("github_login")?.map(|login| GithubUser { login }),
-            errors: self.metadata("org_discovery_errors")?.map(|value| value.lines().map(str::to_string).collect()).unwrap_or_default(),
+            errors: self.metadata("org_discovery_errors")?.filter(|_| crate::sync::app_settings(self).map(|settings| settings.include_company_repositories).unwrap_or(false)).map(|value| value.lines().map(str::to_string).collect()).unwrap_or_default(),
+            last_lines_refresh_at: self.metadata(crate::sync::LAST_LOC_REFRESH_METADATA_KEY)?,
+            last_full_refresh_at: self.metadata(crate::sync::LAST_FULL_REFRESH_METADATA_KEY)?,
+            last_activity_refresh_at: self.metadata(crate::sync::LAST_ACTIVITY_REFRESH_METADATA_KEY)?,
+            last_personal_refresh_at: self.metadata(crate::sync::LAST_PERSONAL_REFRESH_METADATA_KEY)?,
             repositories,
         });
         let expires_at = Self::dashboard_expiry(observer, now)?;
@@ -674,10 +899,11 @@ impl Database {
         Ok(expires)
     }
 
-    pub fn totals(&self, summaries: &[RepositorySummary]) -> DashboardTotals {
-        summaries.iter().filter(|r| !r.is_archived).fold(DashboardTotals::default(), |mut totals, repo| {
+    pub fn totals(&self, summaries: &[RepositorySummary]) -> AppResult<DashboardTotals> {
+        let settings = crate::sync::app_settings(self)?;
+        Ok(summaries.iter().filter(|r| !r.is_archived).fold(DashboardTotals::default(), |mut totals, repo| {
             totals.repositories += 1;
-            if !repo.is_fork {
+            if settings.include_forks_in_totals || !repo.is_fork {
                 totals.total_loc += repo.total_loc;
                 totals.source_loc += repo.source_loc;
                 totals.test_loc += repo.test_loc;
@@ -686,14 +912,17 @@ impl Database {
             totals.open_prs += repo.open_prs;
             totals.open_issues += repo.open_issues;
             totals
-        })
+        }))
     }
 
     pub fn history(&self, repository_id: Option<i64>) -> AppResult<Vec<HistoryPoint>> {
+        let settings = crate::sync::app_settings(self)?;
+        let repos: Vec<Repository> = self.selected_repositories()?.into_iter().filter(|repo| repository_id.map(|id| repo.id == id).unwrap_or(settings.include_forks_in_totals || !repo.is_fork)).collect();
+        let allowed = serde_json::to_string(&repos.iter().map(|repo| repo.id).collect::<Vec<_>>())?;
         let conn = self.connect()?;
         // Scope in SQLite, then sweep measurements once. Observations win over
         // commit samples on the same day, even if their timestamp is earlier.
-        let scope = if repository_id.is_some() { "r.id=?1" } else { "r.is_archived=0 AND r.is_fork=0" };
+        let scope = "r.id IN (SELECT value FROM json_each(?1))";
         let query = format!(
             "SELECT day,repository_id,total_loc,source_loc,test_loc FROM (
                 SELECT substr(s.snapshot_date,1,10) AS day,s.repository_id,s.total_loc,s.source_loc,s.test_loc,
@@ -706,7 +935,7 @@ impl Database {
              ) ORDER BY day,repository_id,observation,measured_at,id"
         );
         let mut stmt = conn.prepare(&query)?;
-        let mut rows = if let Some(id) = repository_id { stmt.query([id])? } else { stmt.query([])? };
+        let mut rows = stmt.query([allowed])?;
         let mut latest = HashMap::<i64, (i64, i64, i64)>::new();
         let mut current = HistoryPoint::default();
         let mut points = Vec::new();
@@ -728,10 +957,18 @@ impl Database {
     }
 
     pub fn all_activity(&self, kind: &str, repository_id: Option<i64>, state: Option<&str>, limit: usize) -> AppResult<Vec<ActivityItem>> {
+        self.scoped_activity(kind, repository_id, None, state, limit)
+    }
+
+    pub fn scoped_activity(&self, kind: &str, repository_id: Option<i64>, scope: Option<&[i64]>, state: Option<&str>, limit: usize) -> AppResult<Vec<ActivityItem>> {
+        self.scoped_activity_for_relationship(kind, repository_id, scope, state, limit, "everyone", None)
+    }
+
+    pub fn scoped_activity_for_relationship(&self, kind: &str, repository_id: Option<i64>, scope: Option<&[i64]>, state: Option<&str>, limit: usize, relationship: &str, login: Option<&str>) -> AppResult<Vec<ActivityItem>> {
         if kind.eq_ignore_ascii_case("issues") || kind.eq_ignore_ascii_case("issue") {
-            Ok(self.issues(repository_id, state, limit)?.into_iter().map(ActivityItem::Issue).collect())
+            Ok(self.scoped_issues_for_relationship(repository_id, scope, state, limit, relationship, login)?.into_iter().map(ActivityItem::Issue).collect())
         } else {
-            Ok(self.pull_requests(repository_id, state, limit)?.into_iter().map(ActivityItem::PullRequest).collect())
+            Ok(self.scoped_pull_requests_for_relationship(repository_id, scope, state, limit, relationship, login)?.into_iter().map(ActivityItem::PullRequest).collect())
         }
     }
 }
@@ -747,11 +984,38 @@ fn snapshot_from_row(row: &Row<'_>) -> rusqlite::Result<Snapshot> {
 }
 
 fn pull_request_from_row(row: &Row<'_>) -> rusqlite::Result<PullRequest> {
-    Ok(PullRequest { repository_id: row.get(0)?, repository: row.get(1)?, number: row.get(2)?, title: row.get(3)?, state: row.get(4)?, is_draft: row.get(5)?, created_at: row.get(6)?, updated_at: row.get(7)?, merged_at: row.get(8)?, closed_at: row.get(9)?, url: row.get(10)?, additions: row.get(11)?, deletions: row.get(12)?, changed_files: row.get(13)?, ci_state: row.get(14)?, })
+    let assignees_json: Option<String> = row.get(12)?;
+    Ok(PullRequest { repository_id: row.get(0)?, repository: row.get(1)?, number: row.get(2)?, title: row.get(3)?, state: row.get(4)?, is_draft: row.get(5)?, created_at: row.get(6)?, updated_at: row.get(7)?, merged_at: row.get(8)?, closed_at: row.get(9)?, url: row.get(10)?, author: row.get(11)?, assignees: assignees_json.as_deref().and_then(|json| serde_json::from_str(json).ok()).unwrap_or_default(), additions: row.get(13)?, deletions: row.get(14)?, changed_files: row.get(15)?, ci_state: row.get(16)?, })
 }
 
 fn issue_from_row(row: &Row<'_>) -> rusqlite::Result<Issue> {
     let labels_json: String = row.get(10)?;
     let assignees_json: String = row.get(11)?;
     Ok(Issue { repository_id: row.get(0)?, repository: row.get(1)?, number: row.get(2)?, title: row.get(3)?, state: row.get(4)?, created_at: row.get(5)?, updated_at: row.get(6)?, closed_at: row.get(7)?, url: row.get(8)?, author: row.get(9)?, labels: serde_json::from_str(&labels_json).unwrap_or_default(), assignees: serde_json::from_str(&assignees_json).unwrap_or_default(), })
+}
+
+fn normalize_relationship(relationship: &str) -> AppResult<&str> {
+    if relationship.eq_ignore_ascii_case("everyone") { Ok("everyone") }
+    else if relationship.eq_ignore_ascii_case("author") { Ok("author") }
+    else if relationship.eq_ignore_ascii_case("assignee") { Ok("assignee") }
+    else if relationship.eq_ignore_ascii_case("author_or_assignee") { Ok("author_or_assignee") }
+    else { Err(crate::error::AppError::InvalidArgument("relationship must be one of everyone, author, assignee, author_or_assignee".into())) }
+}
+
+fn relationship_filter(alias: &str, relationship: &str) -> String {
+    match relationship {
+        // Keep the login placeholder present so all relationship variants use
+        // the same positional parameter list.
+        "everyone" => "?5 IS NULL OR ?5 IS NOT NULL".into(),
+        "author" => format!("?5 IS NOT NULL AND lower({alias}.author)=lower(?5)"),
+        "assignee" => format!("?5 IS NOT NULL AND EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid({alias}.assignees_json) THEN {alias}.assignees_json ELSE '[]' END) AS assignee WHERE lower(CAST(assignee.value AS TEXT))=lower(?5))"),
+        "author_or_assignee" => format!("?5 IS NOT NULL AND (lower({alias}.author)=lower(?5) OR EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid({alias}.assignees_json) THEN {alias}.assignees_json ELSE '[]' END) AS assignee WHERE lower(CAST(assignee.value AS TEXT))=lower(?5)) )"),
+        _ => unreachable!("relationship validated before SQL generation"),
+    }
+}
+
+fn repository_selected(repo: &Repository, settings: &crate::models::AppSettings, login: &str) -> bool {
+    !repo.is_archived
+        && (if repo.owner.eq_ignore_ascii_case(login) { settings.include_personal_repositories } else { settings.include_company_repositories })
+        && !settings.excluded_repository_ids.contains(&repo.github_id)
 }

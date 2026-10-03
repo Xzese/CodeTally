@@ -9,12 +9,15 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "tauri": "tauri",
-    "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "screenshots": "swift scripts/capture-screenshots.swift",
+    "tauri": "node scripts/tauri-run.mjs",
+    "tauri:dev": "node scripts/tauri-run.mjs dev",
+    "tauri:build": "node scripts/tauri-run.mjs build",
+    "screenshots:fixtures": "node scripts/generate-screenshots.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.8.0",
+    "@tauri-apps/plugin-autostart": "^2.5.1",
     "lucide-react": "^0.468.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
