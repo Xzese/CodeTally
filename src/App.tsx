@@ -1005,7 +1005,12 @@ const ActivitySidebar = memo(function ActivitySidebar({ hidden, asOf, onActivity
   useLayoutEffect(() => {
     const sidebar = sidebarRef.current
     if (!sidebar) return
-    const updateLabel = () => setCompactPullRequestLabel(sidebar.clientWidth <= 360)
+    const updateLabel = () => {
+      const width = sidebar.clientWidth
+      // Allow spare room before expanding again so small layout or scrollbar
+      // changes around the breakpoint cannot keep flipping the label.
+      setCompactPullRequestLabel((compact) => compact ? width < 390 : width <= 360)
+    }
     updateLabel()
     if (typeof ResizeObserver === 'undefined') {
       window.addEventListener('resize', updateLabel)

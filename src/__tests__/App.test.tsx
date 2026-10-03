@@ -647,15 +647,18 @@ describe('dashboard UI', () => {
     const sidebar = () => screen.getByRole('heading', { name: 'Recent activity' }).closest('aside') as HTMLElement
 
     const prFilter = within(sidebar()).getByRole('button', { name: 'Pull requests' })
-    Object.defineProperty(sidebar(), 'clientWidth', { configurable: true, value: 328 })
-    fireEvent(window, new Event('resize'))
-    expect(prFilter).toHaveTextContent(/^PRs$/)
-    Object.defineProperty(sidebar(), 'clientWidth', { configurable: true, value: 500 })
-    fireEvent(window, new Event('resize'))
-    expect(prFilter).toHaveTextContent(/^Pull requests$/)
-    Object.defineProperty(sidebar(), 'clientWidth', { configurable: true, value: 328 })
-    fireEvent(window, new Event('resize'))
-    expect(prFilter).toHaveTextContent(/^PRs$/)
+    const resizeActivityPane = (width: number, label: string) => {
+      Object.defineProperty(sidebar(), 'clientWidth', { configurable: true, value: width })
+      fireEvent(window, new Event('resize'))
+      expect(prFilter.textContent).toBe(label)
+    }
+    resizeActivityPane(328, 'PRs')
+    resizeActivityPane(500, 'Pull requests')
+    resizeActivityPane(378, 'Pull requests')
+    resizeActivityPane(360, 'PRs')
+    resizeActivityPane(378, 'PRs')
+    resizeActivityPane(390, 'Pull requests')
+    resizeActivityPane(328, 'PRs')
 
     await user.click(within(sidebar()).getByRole('button', { name: 'Issues' }))
     await user.click(within(sidebar()).getByRole('button', { name: 'All' }))
