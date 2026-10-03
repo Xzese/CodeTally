@@ -718,16 +718,15 @@ function App() {
 
   return (
     <div className={lightMode ? 'app-shell light' : 'app-shell'}>
-      <aside className="navigation-rail">
+      <aside className="navigation-rail" aria-label="Application controls">
         <div className="rail-brand" title="CodeTally"><img src={codetallyAppIcon} alt="CodeTally" /></div>
         <nav aria-label="Main navigation">{navItems.map(({ key, label, icon: Icon, aria }) => <button key={key} type="button" aria-label={aria} title={label} aria-current={activeNavigation === key ? 'page' : undefined} className={activeNavigation === key ? 'active' : ''} disabled={isSetup || (busy && !dashboard.repositories.length)} onClick={() => navigate(key)}><Icon size={17} aria-hidden="true" /><span>{label}</span></button>)}</nav>
-        <div className="rail-footer"><button className="rail-settings" title="Settings" aria-label="Settings" onClick={() => setSettingsOpen(true)}><Settings size={17} /></button></div>
+        <div className="rail-footer"><UpdateStatus placement="rail" updateCheckInterval={settingsLoaded ? appSettings.update_check_interval : null} /><button className="rail-settings" title="Settings" aria-label="Settings" onClick={() => setSettingsOpen(true)}><Settings size={17} /></button></div>
       </aside>
       <div className="workspace-shell">
       <header className="topbar">
         <div className="topbar-navigation"><span className="workspace-label">Your workspace</span><span className="workspace-divider">/</span><strong>{screen === 'detail' ? 'Repository' : screen === 'kanban' ? 'Kanban' : 'Overview'}</strong></div>
         <div className="topbar-status">
-          <UpdateStatus updateCheckInterval={settingsLoaded ? appSettings.update_check_interval : null} />
           <div className="topbar-refresh-group">
             <div
             className={syncDetailsAvailable ? 'sync-popover-wrap active' : 'sync-popover-wrap'}

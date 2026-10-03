@@ -1440,6 +1440,11 @@ describe('dashboard UI', () => {
     await renderDashboard()
     const navigation = screen.getByRole('navigation', { name: 'Main navigation' })
     expect(within(navigation).getAllByRole('button')).toHaveLength(1)
+    expect(within(screen.getByRole('complementary', { name: 'Application controls' })).getByRole('button', { name: 'Updates' })).toBeEnabled()
+    const topbar = screen.getByRole('banner')
+    expect(within(topbar).queryByRole('button', { name: 'Updates' })).not.toBeInTheDocument()
+    expect(within(topbar).getByLabelText('Refresh times')).toBeInTheDocument()
+    expect(within(topbar).getByRole('button', { name: 'Hide activity sidebar' })).toBeInTheDocument()
     const sidebar = screen.getByRole('heading', { name: 'Recent activity' }).closest('aside') as HTMLElement
     await user.click(within(sidebar).getByRole('button', { name: 'Issues' }))
     await screen.findByRole('button', { name: /sam\/alpha #4/ })

@@ -175,13 +175,23 @@ describe('UpdateStatus', () => {
     unmount()
   })
 
-  it('does not check automatically or show a top-bar control when the update cadence is never', async () => {
-    invokeMock.mockResolvedValue(upToDate)
+  it('keeps manual update checks available in the rail when automatic checks are disabled', async () => {
+    invokeMock.mockResolvedValueOnce(upToDate).mockResolvedValueOnce(updateAvailable)
+    const user = userEvent.setup()
 
-    renderUpdateStatus('never')
+    render(<UpdateStatus placement="rail" updateCheckInterval="never" />)
     await flushPromises()
     expect(invokeMock.mock.calls.filter(([command]) => command === 'check_for_updates')).toHaveLength(0)
-    expect(screen.queryByRole('button', { name: 'Updates' })).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Updates' }))
+    expect(within(updatesPanel()).getByRole('status')).toHaveTextContent('Updates haven’t been checked yet.')
+    await user.click(within(updatesPanel()).getByRole('button', { name: 'Check for updates' }))
+    await within(updatesPanel()).findByText('No update available')
+    expect(screen.getByRole('button', { name: 'Updates' })).toBeEnabled()
+    await user.click(within(updatesPanel()).getByRole('button', { name: 'Check for updates' }))
+    expect(await screen.findByRole('button', { name: 'Update available: v0.2.0' })).toBeEnabled()
+    expect(within(updatesPanel()).getByRole('button', { name: 'Download update' })).toBeEnabled()
+    await user.keyboard('{Escape}')
+    expect(screen.queryByRole('region', { name: 'Updates' })).not.toBeInTheDocument()
   })
 
   it('opens on hover or click and closes with pointer exit or Escape', async () => {
