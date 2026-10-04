@@ -13,7 +13,8 @@
     "tauri": "node scripts/tauri-run.mjs",
     "tauri:dev": "node scripts/tauri-run.mjs dev",
     "tauri:build": "node scripts/tauri-run.mjs build",
-    "screenshots:fixtures": "node scripts/generate-screenshots.mjs"
+    "screenshots:fixtures": "node scripts/generate-screenshots.mjs",
+    "screenshots:menus": "node scripts/generate-menu-simulations.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.8.0",
@@ -24,15 +25,16 @@
     "recharts": "^3.1.0"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2.8.0",
     "@testing-library/jest-dom": "^6.6.3",
     "@testing-library/react": "^16.1.0",
     "@testing-library/user-event": "^14.5.2",
     "@types/node": "^22.10.2",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
-    "@tauri-apps/cli": "^2.8.0",
     "@vitejs/plugin-react": "^4.3.4",
     "jsdom": "^25.0.1",
+    "playwright": "1.57.0",
     "typescript": "^5.7.2",
     "vite": "^6.0.5",
     "vitest": "^3.2.6"

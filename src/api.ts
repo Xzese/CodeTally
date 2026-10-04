@@ -197,3 +197,11 @@ export async function getKanbanPreferences(): Promise<import('./types').KanbanPr
 export async function setKanbanPreferences(preferences: import('./types').KanbanPreferences): Promise<import('./types').KanbanPreferences> {
   return call('set_kanban_preferences', { preferences })
 }
+
+export async function getOpenAtLogin(): Promise<boolean> {
+  return call<boolean>('get_open_at_login')
+}
+
+export async function setOpenAtLogin(enabled: boolean): Promise<boolean> {
+  return call<boolean>('set_open_at_login', { enabled })
+}
