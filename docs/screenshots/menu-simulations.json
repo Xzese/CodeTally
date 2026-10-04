@@ -1,0 +1,10 @@
+{
+  "kind": "browser-rendered menu simulations",
+  "fixture": "fictional CodeTally screenshot backend",
+  "captures": [
+    "menu-bar-summary-light.png",
+    "menu-bar-summary-dark.png",
+    "menu-pull-requests.png",
+    "menu-issues.png"
+  ]
+}

@@ -377,10 +377,12 @@ version = "0.1.2"
 dependencies = [
  "chrono",
  "ignore",
+ "libc",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
  "open",
+ "plist",
  "png 0.17.16",
  "rusqlite",
  "serde",

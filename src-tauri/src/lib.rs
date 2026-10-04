@@ -12,6 +12,7 @@ pub mod models;
 mod menu_loc_chart;
 pub mod native;
 pub mod sync;
+mod startup;
 pub mod updates;
 
 use models::SyncProgress;
@@ -118,6 +119,11 @@ pub fn run() {
                     .map_err(|error| error.to_string())?;
             }
             app.manage(AppState { db_path, cache_dir, progress: Arc::new(Mutex::new(SyncProgress::default())), dashboard_cache: Arc::new(Mutex::new(Default::default())), job_lock: Arc::new(Mutex::new(())) });
+            if !screenshot_mode() {
+                if let Err(error) = startup::repair(app.handle()) {
+                    eprintln!("Could not repair the login setting: {error}");
+                }
+            }
             native::apply_activation_policy(app.handle(), &settings)?;
             native::setup(app.handle())?;
             Ok(())
@@ -134,6 +140,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::check_dependencies,
+            startup::get_open_at_login,
+            startup::set_open_at_login,
             commands::check_for_updates,
             commands::install_update,
             commands::get_github_user,

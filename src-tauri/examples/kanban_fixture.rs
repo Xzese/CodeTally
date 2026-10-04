@@ -21,13 +21,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(path.parent().ok_or("database has no parent")?)?;
     let db = Database::new(&path);
     db.init()?;
-    db.set_metadata("github_login", "demo")?;
-    db.set_metadata("github_discovered_at", "2026-09-27T12:00:00Z")?;
-    db.set_metadata(sync::LAST_LOC_REFRESH_METADATA_KEY, "2026-09-27T09:30:00Z")?;
-    db.set_metadata(sync::LAST_FULL_REFRESH_METADATA_KEY, "2026-09-27T09:30:00Z")?;
+    db.set_metadata("github_login", "sample-maintainer")?;
+    db.set_metadata("github_discovered_at", "2026-10-04T12:00:00Z")?;
+    db.set_metadata(sync::LAST_LOC_REFRESH_METADATA_KEY, "2026-10-04T12:00:00Z")?;
+    db.set_metadata(sync::LAST_FULL_REFRESH_METADATA_KEY, "2026-10-04T12:00:00Z")?;
     db.set_metadata(
         sync::LAST_ACTIVITY_REFRESH_METADATA_KEY,
-        "2026-09-27T12:00:00Z",
+        "2026-10-04T12:00:00Z",
     )?;
     sync::save_app_settings(
         &db,
@@ -38,9 +38,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     )?;
     let repositories = [
-        ("repo-story-planner", "storyforge", "planner"),
-        ("repo-story-mobile", "storyforge", "mobile"),
-        ("repo-orbit-api", "orbit-labs", "api"),
+        ("fixture-planner", "example-team", "planner"),
+        ("fixture-mobile", "example-team", "mobile"),
+        ("fixture-api", "example-labs", "api"),
     ];
     let mut stored = Vec::new();
     for (github_id, owner, name) in repositories {
@@ -53,8 +53,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ssh_url: format!("git@github.com:{owner}/{name}.git"),
             default_branch: "main".into(),
             primary_language: Some(if name == "api" { "Rust" } else { "TypeScript" }.into()),
-            pushed_at: Some("2026-09-27T08:00:00Z".into()),
-            github_updated_at: Some("2026-09-27T08:00:00Z".into()),
+            pushed_at: Some("2026-10-04T08:00:00Z".into()),
+            github_updated_at: Some("2026-10-04T08:00:00Z".into()),
             ..Repository::default()
         };
         let id = db.upsert_repository(&repo)?;
@@ -62,7 +62,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         kanban::record_activity(&db, github_id, true, None)?;
         stored.push((id, repo));
     }
-    let date = "2026-09-27T09:30:00Z";
+    let date = "2026-10-04T12:00:00Z";
     for (repository_index, number, title, state, draft, ci) in [
         (
             0,
@@ -113,7 +113,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             title: title.into(),
             state: state.into(),
             is_draft: draft,
-            created_at: "2026-09-20T10:00:00Z".into(),
+            created_at: "2026-09-27T10:00:00Z".into(),
             updated_at: date.into(),
             merged_at: if state == "MERGED" {
                 Some(date.into())
@@ -126,8 +126,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None
             },
             url: format!("{}/pull/{number}", repo.url),
-            author: Some(if number == 16 { "morgan" } else { "demo" }.into()),
-            assignees: vec!["alex".into()],
+            author: Some(if number == 16 { "sample-contributor" } else { "sample-maintainer" }.into()),
+            assignees: vec!["sample-reviewer".into()],
             additions: 120,
             deletions: 36,
             changed_files: 5,
@@ -161,7 +161,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             number,
             title: title.into(),
             state: state.into(),
-            created_at: "2026-09-19T10:00:00Z".into(),
+            created_at: "2026-09-26T10:00:00Z".into(),
             updated_at: date.into(),
             closed_at: if state == "CLOSED" {
                 Some(date.into())
@@ -169,8 +169,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None
             },
             url: format!("{}/issues/{number}", repo.url),
-            author: Some("alex".into()),
-            assignees: vec!["demo".into()],
+            author: Some("sample-reviewer".into()),
+            assignees: vec!["sample-maintainer".into()],
             labels: vec!["accessibility".into()],
         })?;
         kanban::store_identity(
@@ -253,7 +253,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         42,
         Some(&format!("PR_{repository_id}_42")),
     );
-    conn.execute("INSERT INTO kanban_links_cache(account_scope,item_key,links_json,partial,message,updated_at,next_cursor) VALUES ('github.com:demo',?1,?2,0,NULL,?3,NULL)",rusqlite::params![pr_key,r#"[{"kind":"issue","repository":"storyforge/planner","number":105,"title":"Clarify weekly planning view","state":"OPEN","url":"https://github.com/storyforge/planner/issues/105"}]"#,chrono::Utc::now().to_rfc3339()])?;
+    conn.execute("INSERT INTO kanban_links_cache(account_scope,item_key,links_json,partial,message,updated_at,next_cursor) VALUES ('github.com:sample-maintainer',?1,?2,0,NULL,?3,NULL)",rusqlite::params![pr_key,r#"[{"kind":"issue","repository":"example-team/planner","number":105,"title":"Clarify weekly planning view","state":"OPEN","url":"https://github.com/example-team/planner/issues/105"}]"#,chrono::Utc::now().to_rfc3339()])?;
     println!("{}", path.display());
     Ok(())
 }

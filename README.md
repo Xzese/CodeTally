@@ -12,7 +12,7 @@ CodeTally is a local desktop dashboard for understanding the repositories availa
 
 The app is built with Tauri 2, React, TypeScript, Rust, SQLite, Recharts, the GitHub CLI, Git, and Tokei. It runs on your computer, stores its database and repository cache locally, and does not operate a hosted service.
 
-![CodeTally dashboard with private repository names redacted](docs/screenshots/dashboard-overview.png)
+![CodeTally dashboard using fictional example repositories and activity](docs/screenshots/dashboard-overview.png)
 
 ## What it shows
 
@@ -28,13 +28,21 @@ The app is built with Tauri 2, React, TypeScript, Rust, SQLite, Recharts, the Gi
 
 Keep selected metrics visible while CodeTally runs in the background. **Settings → Appearance & menu bar** lets you select total, source, or test lines, open PRs, and open issues, or hide all menu icons with **Show in menu bar**.
 
-![CodeTally's native issues, PRs, total lines, source lines, and test lines in the menu bar](docs/screenshots/menu-bar.png)
+![In-app Appearance and menu bar preview with fictional repository counts](docs/screenshots/menu-bar.png)
 
-Each selected metric has its own native icon. Click the PR or issue metric to see up to 25 recently updated open items from tracked repositories, then select an item to open its GitHub page. Every metric menu also offers **Show CodeTally** and **Quit CodeTally**. Reopen the app from Applications or the Dock if its menu icons are hidden.
+Enable **Combined menu bar item** for one icon with all seven dashboard metrics and the line-count chart. The light and dark examples below reuse the app's combined-menu preview with fictional data.
 
-| Open pull requests | Open issues |
+| Combined summary · light | Combined summary · dark |
 | --- | --- |
-| ![Pull-request menu with private repository names masked](docs/screenshots/menu-pull-requests.png) | ![Issue menu with private repository names masked](docs/screenshots/menu-issues.png) |
+| ![Simulated light menu showing fixture summary metrics and line-count history](docs/screenshots/menu-bar-summary-light.png) | ![Simulated dark menu showing fixture summary metrics and line-count history](docs/screenshots/menu-bar-summary-dark.png) |
+
+Each separate metric has its own native icon. Click the PR or issue metric to see up to 25 recently updated open items from tracked repositories, then select an item to open its GitHub page. Every metric menu also offers **Open CodeTally**, **Settings…**, and **Quit CodeTally**. Reopen the app from Applications or the Dock if its menu icons are hidden.
+
+| Pull request menu | Issue menu |
+| --- | --- |
+| ![Simulated pull request menu grouped by fictional example repositories](docs/screenshots/menu-pull-requests.png) | ![Simulated issue menu grouped by fictional example repositories](docs/screenshots/menu-issues.png) |
+
+These four menu images are browser-rendered simulations using fixture data, native icon bitmaps, and the app's menu-preview styling. macOS controls the exact appearance of the real menus. Generate them with `npm run screenshots:menus`; no obfuscation or personal-account data is used.
 
 ## Privacy and permissions
 
@@ -42,7 +50,7 @@ GitHub access for this feature is read-only. CodeTally does not create or edit r
 
 Authentication remains with the GitHub CLI. The app calls `gh` as a child process and reuses the account established by `gh auth login`; it never asks for or stores a GitHub token. Git commands use the GitHub CLI credential helper when private repositories are cloned into the managed cache.
 
-The local database can contain private repository names, URLs, pull-request and issue metadata, Kanban notes, line-count history, and local cache paths. Repository clones can contain the full source of private repositories. This data stays in the operating system's application-data directory and should never be committed or copied into this repository. The existing dashboard screenshots mask private repository names and full references; activity titles, usernames, and notes need separate review. New Kanban screenshots use fictional fixture data.
+The local database can contain private repository names, URLs, pull-request and issue metadata, Kanban notes, line-count history, and local cache paths. Repository clones can contain the full source of private repositories. This data stays in the operating system's application-data directory and should never be committed or copied into this repository. The checked-in screenshots use fictional fixture data; they contain no repository or activity copied from a GitHub account.
 
 Normal `gh` and `git` operations still communicate with GitHub. Line analysis and database storage happen locally.
 
@@ -163,7 +171,7 @@ On macOS, select one or more of **Total lines**, **Source lines**, **Test lines*
 
 **Include forks in line totals** is disabled by default. Enable it in Settings to count selected fork repositories in portfolio totals and line history.
 
-Enable **Open at login** to start CodeTally automatically when you sign in to your Mac. This uses the macOS login-item setting, so you can also manage it in System Settings.
+Enable **Open at login** to start CodeTally automatically when you sign in to your Mac. This uses the macOS login-item setting, so you can also manage it in System Settings. The packaged app repairs stale enabled registrations to use the current app, and leaves disabled entries untouched. Development builds do not change the installed app's login item.
 
 **Keep running in the background when the window closes** is enabled by default. With the menu bar visible, CodeTally runs without a Dock icon. Use **Show CodeTally** in the menu bar to reopen the dashboard and **Quit CodeTally** to stop the app. If you hide the menu bar, CodeTally keeps its Dock icon so you can still reopen it. Disable background operation to quit when the main window closes. Background operation does not keep the Mac awake.
 
@@ -207,7 +215,7 @@ Card details separate **GitHub details** from **Your planning**. Priority and no
 
 The read-only closing relationships section shows explicit GitHub closing links when available. This is a bounded, cached view, not a claim to include all mentions or cross-references. A linked PR merging does not locally close an issue; the issue moves to Done only when its own GitHub state is refreshed as closed. Notes, priorities, placement, ordering, and filters stay on this computer. There is no cross-device sync, GitHub Projects integration, extra GitHub scope, per-repository installation, PAT, or new Actions secret. The existing `gh auth login` account and its repository permissions still determine which GitHub data is available.
 
-These screenshots use fictional fixture repositories, tickets, and people in the implemented frontend. They are browser captures; native macOS window capture requires Screen Recording access in the capture environment.
+These board screenshots use fictional repositories, tickets, and people from the browser fixture backend. They do not read the local CodeTally database or contact GitHub.
 
 | View | Screenshot |
 | --- | --- |
@@ -321,29 +329,26 @@ The fixture app does not read your regular CodeTally database or refresh GitHub.
 
 In **Settings → Appearance & menu bar**, enable **Combined menu bar item** for one icon containing all seven dashboard metrics and the LOC line chart. Disable it to restore your separate metric selections. A compact icon rail switches between Overview and the optional Kanban page. The dashboard uses four primary metric cards and a source/test/change breakdown; lines of code remain a line chart.
 
-### README screenshots (macOS)
+### README screenshots (fixture data)
 
-Open the installed app to the view you want, close unrelated overlays, and run the capture helper from this repository:
+The checked-in screenshots use fictional fixture repositories, tickets, people, notes, and counts. They do not require a GitHub login or the installed app's database. To regenerate the menu simulations without macOS capture permissions:
 
 ```sh
-npm run screenshots -- --output docs/screenshots/dashboard-overview.png
-npm run screenshots -- --list-windows
-npm run screenshots -- --menu-bar --screen-rect X,Y,WIDTH,HEIGHT --output docs/screenshots/menu-bar.png
-npm run screenshots -- --delay 8 --screen-rect X,Y,WIDTH,HEIGHT --output docs/screenshots/menu-pull-requests.png
-npm run screenshots -- --delay 8 --screen-rect X,Y,WIDTH,HEIGHT --output docs/screenshots/menu-issues.png
-npm run screenshots -- --audit-input docs/screenshots/dashboard-overview.png
-npm run screenshots -- --audit-input docs/screenshots/menu-bar.png
-npm run screenshots -- --audit-input docs/screenshots/menu-pull-requests.png
-npm run screenshots -- --audit-input docs/screenshots/menu-issues.png
+npx playwright install chromium --only-shell  # one-time browser installation
+npm run screenshots:menus
+npm run screenshots:menus -- --output-dir /tmp/codetally-menus
 ```
 
-Replace `X,Y,WIDTH,HEIGHT` with the screen-point rectangle enclosing only CodeTally's menu items and, for the dropdown captures, its open menu. Coordinates depend on your display layout. `--delay 8` gives you eight seconds to click the PR or issue icon before capture. Swift (Xcode Command Line Tools), macOS Screen Recording permission for the terminal/host, and the local CodeTally database are required. Use `--database PATH` for another database location.
+The command starts an isolated browser fixture app, captures light and dark combined summaries plus PR and issue menus, and stops the app and browser. It blocks requests outside the local fixture server, freezes the fixture date, and writes a `menu-simulations.json` manifest. The summaries reuse the actual in-app preview; ticket menus follow the native grouping and labels. Use `--browser-executable PATH` for an existing Chromium installation. See `npm run screenshots:menus -- --help` for options.
 
-To process a screenshot you already took, use `--input /path/to/screenshot.png --crop X,Y,WIDTH,HEIGHT --output docs/screenshots/menu-pull-requests.png`. The optional crop uses input-image pixels from the top-left corner. Add `--menu-bar` for an icon-only crop without repository names. This mode does not need Screen Recording permission and leaves the original file untouched.
+These commands generate a native screenshot gallery with equivalent fixture views; the native captures will not exactly match the browser screenshots checked in here:
 
-The helper copies SQLite and its WAL to a private temporary directory, verifies the copy, and uses local Vision OCR to apply soft blurred masks to private repository names and their full `owner/repository` references. Public repository names and standalone owners remain visible. Identical private/public repository names are also masked because OCR cannot distinguish them. The live database is untouched. Temporary raw captures and database copies are deleted when the script finishes; only flattened PNGs are written under `docs/screenshots`. Public/Private labels and numeric data remain visible.
+```sh
+npm run screenshots:fixtures
+npm run screenshots:fixtures -- --output-dir /tmp/codetally-gallery
+```
 
-Inspect each output before publishing: OCR can miss clipped or unusual text. Repeat `--mask X,Y,WIDTH,HEIGHT` to cover missed regions in output-image pixels (top-left origin). `--extra-sensitive-file PATH` adds identifiers from a local text file, one per line; keep that file outside the repository. Titles and other content remain visible unless they match an identifier or explicit mask. Capture and `--audit-input` both check for known identifiers, but an OCR pass does not replace visual review.
+The generator builds a separate fixture app, seeds a disposable database, and does not invoke `gh`, `git`, synchronization, or updater checks. It writes captures to `docs/screenshots` by default; `--output-dir` keeps an alternate gallery outside the repository. macOS Accessibility and Screen Recording access are required for native window and menu capture. See `npm run screenshots:fixtures -- --help` for details.
 
 ### Build and test
 
