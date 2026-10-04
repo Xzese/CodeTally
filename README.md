@@ -30,11 +30,19 @@ Keep selected metrics visible while CodeTally runs in the background. **Settings
 
 ![In-app Appearance and menu bar preview with fictional repository counts](docs/screenshots/menu-bar.png)
 
-Each selected metric has its own native icon. Click the PR or issue metric to see up to 25 recently updated open items from tracked repositories, then select an item to open its GitHub page. The examples below show those pull requests and issues in the app's activity sidebar; they are not captures of the native metric menus. Every metric menu also offers **Show CodeTally** and **Quit CodeTally**. Reopen the app from Applications or the Dock if its menu icons are hidden.
+Enable **Combined menu bar item** for one icon with all seven dashboard metrics and the line-count chart. The light and dark examples below reuse the app's combined-menu preview with fictional data.
 
-| Pull requests in the activity sidebar | Issues in the activity sidebar |
+| Combined summary · light | Combined summary · dark |
 | --- | --- |
-| ![Activity sidebar showing fictional open pull requests from example repositories](docs/screenshots/menu-pull-requests.png) | ![Activity sidebar showing fictional open issues from example repositories](docs/screenshots/menu-issues.png) |
+| ![Simulated light menu showing fixture summary metrics and line-count history](docs/screenshots/menu-bar-summary-light.png) | ![Simulated dark menu showing fixture summary metrics and line-count history](docs/screenshots/menu-bar-summary-dark.png) |
+
+Each separate metric has its own native icon. Click the PR or issue metric to see up to 25 recently updated open items from tracked repositories, then select an item to open its GitHub page. Every metric menu also offers **Open CodeTally**, **Settings…**, and **Quit CodeTally**. Reopen the app from Applications or the Dock if its menu icons are hidden.
+
+| Pull request menu | Issue menu |
+| --- | --- |
+| ![Simulated pull request menu grouped by fictional example repositories](docs/screenshots/menu-pull-requests.png) | ![Simulated issue menu grouped by fictional example repositories](docs/screenshots/menu-issues.png) |
+
+These four menu images are browser-rendered simulations using fixture data, native icon bitmaps, and the app's menu-preview styling. macOS controls the exact appearance of the real menus. Generate them with `npm run screenshots:menus`; no obfuscation or personal-account data is used.
 
 ## Privacy and permissions
 
@@ -323,7 +331,17 @@ In **Settings → Appearance & menu bar**, enable **Combined menu bar item** for
 
 ### README screenshots (fixture data)
 
-The checked-in screenshots use fictional fixture repositories, tickets, people, notes, and counts. They do not require a GitHub login or the installed app's database. These commands generate a native screenshot gallery with equivalent fixture views; the native captures will not exactly match the browser screenshots checked in here:
+The checked-in screenshots use fictional fixture repositories, tickets, people, notes, and counts. They do not require a GitHub login or the installed app's database. To regenerate the menu simulations without macOS capture permissions:
+
+```sh
+npx playwright install chromium --only-shell  # one-time browser installation
+npm run screenshots:menus
+npm run screenshots:menus -- --output-dir /tmp/codetally-menus
+```
+
+The command starts an isolated browser fixture app, captures light and dark combined summaries plus PR and issue menus, and stops the app and browser. It blocks requests outside the local fixture server, freezes the fixture date, and writes a `menu-simulations.json` manifest. The summaries reuse the actual in-app preview; ticket menus follow the native grouping and labels. Use `--browser-executable PATH` for an existing Chromium installation. See `npm run screenshots:menus -- --help` for options.
+
+These commands generate a native screenshot gallery with equivalent fixture views; the native captures will not exactly match the browser screenshots checked in here:
 
 ```sh
 npm run screenshots:fixtures
