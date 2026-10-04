@@ -102,7 +102,7 @@ export default function UpdateStatus({ updateCheckInterval = 'daily', placement 
     }
   }
 
-  if (placement !== 'rail' && !update?.update_available) return null
+  if (!update?.update_available) return null
 
   return <div className={`update-status${placement === 'rail' ? ' rail-update' : ''}${open ? ' active' : ''}`} ref={container}
     onMouseEnter={() => { dismissed.current = false; setOpen(true) }}

@@ -56,12 +56,14 @@ afterEach(() => {
 })
 
 describe('UpdateStatus', () => {
-  it('checks for updates on startup and stays out of the top bar when up to date', async () => {
+  it.each(['topbar', 'rail'] as const)('checks for updates on startup and stays out of the %s when up to date', async (placement) => {
     invokeMock.mockResolvedValue(upToDate)
 
-    renderUpdateStatus()
+    render(<UpdateStatus placement={placement} />)
 
-    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('check_for_updates', undefined))
+    expect(screen.queryByRole('button', { name: /Updates|Update available/ })).not.toBeInTheDocument()
+    await flushPromises()
+    expect(invokeMock).toHaveBeenCalledWith('check_for_updates', undefined)
     expect(screen.queryByRole('button', { name: 'Updates' })).not.toBeInTheDocument()
   })
 
@@ -69,7 +71,7 @@ describe('UpdateStatus', () => {
     invokeMock.mockResolvedValue(updateAvailable)
     const user = userEvent.setup()
 
-    renderUpdateStatus()
+    render(<UpdateStatus placement="rail" />)
 
     const trigger = await screen.findByRole('button', { name: 'Update available: v0.2.0' })
     expect(trigger).toHaveAttribute('title', 'CodeTally v0.2.0 is available')
@@ -128,12 +130,13 @@ describe('UpdateStatus', () => {
     ['monthly', CHECK_INTERVALS.monthly]
   ] as const)('polls on the %s cadence and stops polling after unmount', async (interval, checkInterval) => {
     vi.useFakeTimers()
-    invokeMock.mockResolvedValue(upToDate)
-    const { unmount } = renderUpdateStatus(interval)
+    invokeMock.mockResolvedValueOnce(upToDate).mockResolvedValueOnce(updateAvailable).mockResolvedValue(upToDate)
+    const { unmount } = render(<UpdateStatus placement="rail" updateCheckInterval={interval} />)
 
     await flushPromises()
     const checks = () => invokeMock.mock.calls.filter(([command]) => command === 'check_for_updates').length
     expect(checks()).toBe(1)
+    expect(screen.queryByRole('button', { name: /Updates|Update available/ })).not.toBeInTheDocument()
 
     await act(async () => {
       vi.advanceTimersByTime(checkInterval - 1)
@@ -147,13 +150,22 @@ describe('UpdateStatus', () => {
       await Promise.resolve()
     })
     expect(checks()).toBe(2)
+    expect(screen.getByRole('button', { name: 'Update available: v0.2.0' })).toBeInTheDocument()
+
+    await act(async () => {
+      vi.advanceTimersByTime(checkInterval)
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(checks()).toBe(3)
+    expect(screen.queryByRole('button', { name: /Updates|Update available/ })).not.toBeInTheDocument()
 
     unmount()
     await act(async () => {
       vi.advanceTimersByTime(checkInterval * 2)
       await Promise.resolve()
     })
-    expect(checks()).toBe(2)
+    expect(checks()).toBe(3)
   })
 
   it('does not overlap a scheduled check while the startup check is still pending', async () => {
@@ -175,23 +187,11 @@ describe('UpdateStatus', () => {
     unmount()
   })
 
-  it('keeps manual update checks available in the rail when automatic checks are disabled', async () => {
-    invokeMock.mockResolvedValueOnce(upToDate).mockResolvedValueOnce(updateAvailable)
-    const user = userEvent.setup()
-
+  it('keeps the rail update symbol hidden when automatic checks are disabled', async () => {
     render(<UpdateStatus placement="rail" updateCheckInterval="never" />)
     await flushPromises()
     expect(invokeMock.mock.calls.filter(([command]) => command === 'check_for_updates')).toHaveLength(0)
-    await user.click(screen.getByRole('button', { name: 'Updates' }))
-    expect(within(updatesPanel()).getByRole('status')).toHaveTextContent('Updates haven’t been checked yet.')
-    await user.click(within(updatesPanel()).getByRole('button', { name: 'Check for updates' }))
-    await within(updatesPanel()).findByText('No update available')
-    expect(screen.getByRole('button', { name: 'Updates' })).toBeEnabled()
-    await user.click(within(updatesPanel()).getByRole('button', { name: 'Check for updates' }))
-    expect(await screen.findByRole('button', { name: 'Update available: v0.2.0' })).toBeEnabled()
-    expect(within(updatesPanel()).getByRole('button', { name: 'Download update' })).toBeEnabled()
-    await user.keyboard('{Escape}')
-    expect(screen.queryByRole('region', { name: 'Updates' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Updates|Update available/ })).not.toBeInTheDocument()
   })
 
   it('opens on hover or click and closes with pointer exit or Escape', async () => {

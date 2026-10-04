@@ -1521,7 +1521,7 @@ describe('dashboard UI', () => {
     await renderDashboard()
     const navigation = screen.getByRole('navigation', { name: 'Main navigation' })
     expect(within(navigation).getAllByRole('button')).toHaveLength(1)
-    expect(within(screen.getByRole('complementary', { name: 'Application controls' })).getByRole('button', { name: 'Updates' })).toBeEnabled()
+    expect(within(screen.getByRole('complementary', { name: 'Application controls' })).queryByRole('button', { name: 'Updates' })).not.toBeInTheDocument()
     const topbar = screen.getByRole('banner')
     expect(within(topbar).queryByRole('button', { name: 'Updates' })).not.toBeInTheDocument()
     expect(within(topbar).getByLabelText('Refresh times')).toBeInTheDocument()
@@ -1697,6 +1697,7 @@ describe('dashboard UI', () => {
   it('checks for updates when About opens and installs an available release', async () => {
     configureBackend({ appUpdateResponses: [appUpdateAvailable] })
     const user = await renderDashboard()
+    expect(await within(screen.getByRole('complementary', { name: 'Application controls' })).findByRole('button', { name: 'Update available: v0.2.0' })).toBeEnabled()
 
     // The dashboard status indicator may already have checked on startup. Isolate
     // the check performed by the About section when Settings mounts.
