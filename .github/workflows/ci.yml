@@ -15,15 +15,76 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: Detect app changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      app_changed: ${{ steps.diff.outputs.app_changed }}
+    steps:
+      - name: Check out repository history
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check app, build, test, and workflow paths
+        id: diff
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == 'workflow_dispatch' ]]; then
+            echo 'app_changed=true' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Promotion PRs were already checked on main and are checked again on release.
+          if [[ "$EVENT_NAME" == 'pull_request' && "$HEAD_REF" == 'main' && "$BASE_REF" == 'release' ]]; then
+            echo 'app_changed=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [[ "$EVENT_NAME" == 'pull_request' ]]; then
+            base="$(git merge-base "$BASE_SHA" "$HEAD_SHA")"
+          elif [[ -z "$BEFORE_SHA" || "$BEFORE_SHA" =~ ^0+$ ]] || ! git cat-file -e "$BEFORE_SHA^{commit}"; then
+            # A new branch or unavailable old commit should receive full checks.
+            echo 'app_changed=true' >> "$GITHUB_OUTPUT"
+            exit 0
+          else
+            base="$BEFORE_SHA"
+          fi
+
+          changed_paths="$(git diff --name-only "$base" "$HEAD_SHA" -- \
+            src/ src-tauri/ public/ scripts/ .github/workflows/ \
+            package.json package-lock.json index.html \
+            ':(top,glob)tsconfig*.json' \
+            ':(top,glob)vite.config.*' \
+            ':(top,glob)vitest.config.*')"
+          if [[ -n "$changed_paths" ]]; then
+            echo 'app_changed=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'app_changed=false' >> "$GITHUB_OUTPUT"
+          fi
+
   frontend:
     name: Frontend checks
-    # A main → release PR contains a commit that has already passed this same
-    # suite on the push to main. The release workflow validates it again after
-    # the PR merges, so avoid a second identical CI run here.
-    if: github.event_name != 'pull_request' || github.head_ref != 'main' || github.base_ref != 'release'
+    needs: changes
+    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.app_changed == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      - name: Require successful change detection
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+        run: test "$CHANGES_RESULT" = 'success'
+
       - name: Check out repository
         uses: actions/checkout@v7
         with:
@@ -49,8 +110,10 @@ jobs:
 
   desktop:
     name: Desktop checks (${{ matrix.architecture }})
-    if: github.event_name != 'pull_request' || github.head_ref != 'main' || github.base_ref != 'release'
-    runs-on: ${{ matrix.os }}
+    needs: changes
+    # Keep both required matrix check names even when no native build is needed.
+    if: always()
+    runs-on: ${{ needs.changes.outputs.app_changed == 'true' && matrix.os || 'ubuntu-latest' }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -66,38 +129,53 @@ jobs:
             run_tests: false
 
     steps:
+      - name: Require successful change detection
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+        run: test "$CHANGES_RESULT" = 'success'
+
+      - name: No desktop build needed
+        if: needs.changes.outputs.app_changed != 'true'
+        run: echo 'No app changes to build, or this promotion PR was already checked on main.'
+
       - name: Check out repository
+        if: needs.changes.outputs.app_changed == 'true'
         uses: actions/checkout@v7
         with:
           persist-credentials: false
 
       - name: Set up Node.js
+        if: needs.changes.outputs.app_changed == 'true'
         uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
 
       - name: Install Rust target
+        if: needs.changes.outputs.app_changed == 'true'
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
       - name: Cache Rust build artifacts
+        if: needs.changes.outputs.app_changed == 'true'
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
           shared-key: ci-${{ matrix.target }}
 
       - name: Install JavaScript dependencies
+        if: needs.changes.outputs.app_changed == 'true'
         run: npm ci
 
       - name: Install Tokei for backend tests
-        if: matrix.run_tests
+        if: needs.changes.outputs.app_changed == 'true' && matrix.run_tests
         run: brew install tokei
 
       - name: Run backend tests
-        if: matrix.run_tests
+        if: needs.changes.outputs.app_changed == 'true' && matrix.run_tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked
 
       - name: Build native app
+        if: needs.changes.outputs.app_changed == 'true'
         run: npm run tauri:build -- --ci --no-bundle --target ${{ matrix.target }} -- --locked

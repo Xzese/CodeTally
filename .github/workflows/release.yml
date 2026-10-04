@@ -4,6 +4,18 @@ on:
   push:
     branches:
       - release
+    paths:
+      - 'src/**'
+      - 'src-tauri/**'
+      - 'public/**'
+      - 'scripts/**'
+      - '.github/workflows/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'index.html'
+      - 'tsconfig*.json'
+      - 'vite.config.*'
+      - 'vitest.config.*'
 
 concurrency:
   group: release-publication
