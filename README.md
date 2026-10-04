@@ -14,6 +14,22 @@ Built with Tauri, React, TypeScript, Rust, and SQLite. Currently built and verif
 - A local Kanban board with notes, priorities, and ticket placement.
 - Menu bar metrics, automatic refreshes, and progress tracking for imports.
 
+## Menu bar
+
+Keep your repository metrics visible in the macOS menu bar while CodeTally runs in the background. Choose total, source, or test lines, open pull requests, and open issues in **Settings → Appearance & menu bar**. Use separate metric icons or a combined item with the dashboard summary and line-count chart.
+
+Click a PR or issue metric to browse recently updated open tickets grouped by repository and open them on GitHub. Line-count menus show history from saved samples. You can also reopen CodeTally, open Settings, or quit from the menu bar.
+
+![Combined menu bar summary simulated with fictional data](docs/screenshots/menu-bar-summary-light.png)
+
+## Kanban board
+
+Open **Kanban Board** to organize cached pull requests and issues across your tracked repositories. Filter by repository, owner, involvement, or text, and move open cards between **Todo**, **In progress**, **Review**, and **Blocked**. Add priorities and personal notes to keep your next steps close to the work.
+
+Closed issues and closed or merged PRs appear in **Done**, which you can reveal with **Show completed**. Card details include GitHub activity and local planning controls. **Refresh Tickets** updates your authored and assigned tickets without scanning code. Notes, priorities, and card placement stay on your computer; GitHub state changes happen on GitHub.
+
+![Kanban board using fictional repositories and tickets](docs/screenshots/kanban-overview.png)
+
 ## Get started
 
 Install `gh` (GitHub CLI), `git`, and `tokei`, and make sure they are on `PATH`. To run from source, you also need Node.js/npm, Rust/Cargo, and the native prerequisites for Tauri 2.
