@@ -1,5 +1,13 @@
 # CodeTally
 
+<p align="center">
+  <a href="https://github.com/Xzese/CodeTally/stargazers"><img src="https://img.shields.io/github/stars/Xzese/CodeTally?style=flat-square" alt="Stars"></a>
+  <a href="https://github.com/Xzese/CodeTally/commits/main"><img src="https://img.shields.io/github/last-commit/Xzese/CodeTally?style=flat-square" alt="Last commit"></a>
+  <a href="https://github.com/Xzese/CodeTally"><img src="https://img.shields.io/github/languages/top/Xzese/CodeTally?style=flat-square" alt="Top language"></a>
+  <a href="https://tauri.app"><img src="https://img.shields.io/badge/Tauri-2-24C8D8?style=flat-square&amp;logo=tauri&amp;logoColor=white" alt="Tauri 2"></a>
+  <a href="#more-information"><img src="https://img.shields.io/badge/license-not_selected-lightgrey?style=flat-square" alt="License: not selected"></a>
+</p>
+
 A local desktop dashboard for your GitHub repositories. Track source and test line history, browse repository metadata, and see recent pull requests and issues in one place.
 
 Built with Tauri, React, TypeScript, Rust, and SQLite. Currently built and verified on macOS.
