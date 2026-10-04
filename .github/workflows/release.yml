@@ -1,6 +1,9 @@
 name: Release desktop app
 
 on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
   push:
     branches:
       - release
@@ -22,8 +25,57 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  source:
+    name: Prepare release commit
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/release'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.commit.outputs.sha }}
+    steps:
+      - name: Require credentials for protected branch promotion
+        if: github.event_name != 'push'
+        env:
+          PROMOTION_TOKEN: ${{ secrets.RELEASE_PROMOTION_TOKEN }}
+        run: |
+          if [[ -z "$PROMOTION_TOKEN" ]]; then
+            echo 'Set RELEASE_PROMOTION_TOKEN to a token allowed to push to the protected release branch.' >&2
+            exit 1
+          fi
+      - name: Check out repository history
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          token: ${{ (github.event_name != 'push' && secrets.RELEASE_PROMOTION_TOKEN) || github.token }}
+          persist-credentials: ${{ github.event_name != 'push' }}
+      - name: Promote main for nightly and manual runs
+        id: commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" != 'push' ]]; then
+            git fetch origin main release --tags
+            git checkout -B release origin/release
+            pending="$(git rev-list --count HEAD..origin/main)"
+            if [[ "$pending" -gt 0 ]]; then
+              git config user.name 'github-actions[bot]'
+              git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+              git merge --no-edit origin/main
+              # Preserve release history; a concurrent update must fail rather than be overwritten.
+              git push origin HEAD:refs/heads/release
+              echo "Promoted $pending main commits to release." >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo 'No new main commits to promote.' >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
   preflight:
     name: Release version check
+    needs: source
+    # Token-authenticated promotion also queues a push run. This skips its duplicate publication.
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -34,6 +86,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ needs.source.outputs.sha }}
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@v7
@@ -49,7 +102,7 @@ jobs:
 
   checks:
     name: Test before release
-    needs: preflight
+    needs: [source, preflight]
     if: needs.preflight.outputs.publish == 'true'
     runs-on: macos-latest
     permissions:
@@ -57,6 +110,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.source.outputs.sha }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v7
@@ -81,7 +136,7 @@ jobs:
 
   build:
     name: Build ${{ matrix.architecture }} bundle
-    needs: [preflight, checks]
+    needs: [source, preflight, checks]
     runs-on: macos-latest
     permissions:
       contents: read
@@ -99,6 +154,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.source.outputs.sha }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v7
@@ -186,7 +243,7 @@ jobs:
 
   publish:
     name: Publish GitHub Release
-    needs: [preflight, build]
+    needs: [source, preflight, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -194,6 +251,7 @@ jobs:
       - name: Check out repository and tags
         uses: actions/checkout@v7
         with:
+          ref: ${{ needs.source.outputs.sha }}
           fetch-depth: 0
 
       - name: Set up Node.js
@@ -289,7 +347,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.preflight.outputs.version }}
           TAG: ${{ needs.preflight.outputs.tag }}
-          RELEASE_SHA: ${{ github.sha }}
+          RELEASE_SHA: ${{ needs.source.outputs.sha }}
         run: |
           cat > release-notes.md <<'EOF'
           Download Apple-Silicon_aarch64 for Macs with Apple M-series chips, or Intel_x64 for Intel Macs.
