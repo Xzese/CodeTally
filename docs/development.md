@@ -32,13 +32,15 @@ The [CI workflow](../.github/workflows/ci.yml) runs on feature pull requests, pu
 - Rust backend tests, including database, scanner, and GitHub sync regressions;
 - release-mode Tauri compilation on native Apple Silicon and Intel macOS runners.
 
+An initial change check compares the full pull-request diff or all commits in a push. Frontend tests and desktop builds run only when app source, native code and assets, public assets, scripts, dependencies, build/test configuration, or workflow files change. README, documentation, and documentation screenshot-only updates skip those checks. CI still runs a small Linux change check and two brief Linux status jobs to preserve both required desktop check names; the frontend job reports skipped. This keeps documentation-only pull requests mergeable without starting macOS runners or installing dependencies. Change-detection failures fail the required checks instead of silently skipping validation. Manual dispatch always runs the full suite.
+
 CI uses standard GitHub-hosted runners, read-only repository permissions, and no account credentials. GitHub sync tests use a fake CLI rather than your live account. Superseded runs are cancelled. CI does not publish releases or upload build artifacts; the release workflow below handles distributable bundles.
 
 To prevent merging failing changes, configure repository branch protection or a ruleset to require `Frontend checks`, `Desktop checks (Apple Silicon)`, and `Desktop checks (Intel)` after the workflow has run once. Adding the workflow alone does not enforce merge protection.
 
 ### Automated GitHub releases
 
-The [release workflow](../.github/workflows/release.yml) runs only when a commit is pushed or merged into the `release` branch. Normal development merges into `main` do not publish releases. Open a pull request from `main` into `release` when the current main build is ready to ship; merging it starts one release workflow.
+The [release workflow](../.github/workflows/release.yml) runs only when app, build, test, or workflow files change in a push or merge into the `release` branch, using the same paths as the CI change check. README, documentation, and screenshot-only updates do not start a release. Normal development merges into `main` do not publish releases. Open a pull request from `main` into `release` when the current main build is ready to ship; merging app changes starts one release workflow.
 
 The release workflow selects a version, repeats the frontend and backend tests against the release commit, then builds separate macOS artifacts for Apple Silicon and Intel. Each build includes a DMG plus a signed updater archive and is mounted, deep-signature verified, architecture checked, launched briefly on a matching runner, detached, and extracted from its updater archive before upload. Cross-architecture builds still receive all structural checks; a live launch is skipped when the runner architecture does not match. A successful run creates a published GitHub Release, generates release notes, tags the release commit as `v<version>`, and attaches both DMGs, updater archives, signatures, and the static `latest.json` updater manifest.
 
