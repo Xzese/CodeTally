@@ -20,9 +20,16 @@ Keep your repository metrics visible in the macOS menu bar while CodeTally runs 
 
 Click a PR or issue metric to browse recently updated open tickets grouped by repository and open them on GitHub. Line-count menus show history from saved samples. You can also reopen CodeTally, open Settings, or quit from the menu bar.
 
-| Menu bar summary | Pull requests |
-| --- | --- |
-| <img src="docs/screenshots/menu-bar-summary-light.png" alt="Combined menu bar summary simulated with fictional data" width="300"> | <img src="docs/screenshots/menu-pull-requests.png" alt="Pull request menu simulated with fictional repositories and tickets" width="300"> |
+<table width="100%">
+  <tr>
+    <th width="50%">Menu bar summary</th>
+    <th width="50%">Pull requests</th>
+  </tr>
+  <tr>
+    <td valign="top"><img src="docs/screenshots/menu-bar-summary-light.png" alt="Combined menu bar summary simulated with fictional data" width="100%"></td>
+    <td valign="top"><img src="docs/screenshots/menu-pull-requests.png" alt="Pull request menu simulated with fictional repositories and tickets" width="100%"></td>
+  </tr>
+</table>
 
 ## Kanban board
 
