@@ -1,8 +1,7 @@
 import { createPortal } from 'react-dom'
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react'
-import { disable as disableAutostart, enable as enableAutostart, isEnabled as isAutostartEnabled } from '@tauri-apps/plugin-autostart'
 import { AlertCircle, ArrowRight, Check, ChevronDown, ChevronUp, Coffee, ExternalLink, Github, Globe2, HardDrive, LoaderCircle, ChartNoAxesColumnIncreasing, CodeXml, FlaskConical, GitPullRequest, CircleDot, Sun, Moon, Monitor, X } from 'lucide-react'
-import { checkForUpdates, getAppInfo, getDatabaseLocation, getRepositorySelection, installAppUpdate, openExternalUrl, revealDatabase, type AppInfo, type AppUpdate } from './api'
+import { checkForUpdates, getOpenAtLogin, setOpenAtLogin, getAppInfo, getDatabaseLocation, getRepositorySelection, installAppUpdate, openExternalUrl, revealDatabase, type AppInfo, type AppUpdate } from './api'
 import type { AppSettings, MenuBarMetric, RepositorySelection, ThemeMode, UpdateCheckInterval } from './types'
 import type { NormalizedMetrics } from './utils'
 import { CombinedMenuPreview, type CombinedMenuPreviewData } from './CombinedMenuPreview'
@@ -114,9 +113,9 @@ function OpenAtLoginControl() {
         setEnabled(false)
         return
       }
-      setEnabled(await isAutostartEnabled())
-    } catch {
-      setError('Couldn’t read the login setting.')
+      setEnabled(await getOpenAtLogin())
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Couldn’t read the login setting.')
     } finally {
       setLoading(false)
     }
@@ -129,11 +128,9 @@ function OpenAtLoginControl() {
     setError(null)
     try {
       if (import.meta.env.VITE_CODETALLY_SCREENSHOT_MODE === '1') { setEnabled(next); return }
-      if (next) await enableAutostart()
-      else await disableAutostart()
-      setEnabled(next)
-    } catch {
-      setError('Couldn’t change the login setting.')
+      setEnabled(await setOpenAtLogin(next))
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Couldn’t change the login setting.')
     } finally {
       setChanging(false)
     }

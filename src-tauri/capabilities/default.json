@@ -4,9 +4,6 @@
   "description": "Default permissions for the CodeTally desktop window",
   "windows": ["main"],
   "permissions": [
-    "core:default",
-    "autostart:allow-enable",
-    "autostart:allow-disable",
-    "autostart:allow-is-enabled"
+    "core:default"
   ]
 }

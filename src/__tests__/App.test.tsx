@@ -17,12 +17,6 @@ const listenMock = vi.hoisted(() => vi.fn(async (event: string, callback: (...ar
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: invokeMock }))
 vi.mock('@tauri-apps/api/event', () => ({ listen: listenMock }))
-vi.mock('@tauri-apps/plugin-autostart', () => ({
-  isEnabled: () => invokeMock('plugin:autostart|is_enabled'),
-  enable: () => invokeMock('plugin:autostart|enable'),
-  disable: () => invokeMock('plugin:autostart|disable')
-}))
-
 const repoAlpha: Repository = {
   id: 1,
   github_id: 'repo-alpha',
@@ -326,14 +320,11 @@ function configureBackend({ dependencies = readyDependencies, syncResult = syncO
       }
       case 'open_external_url':
         return null
-      case 'plugin:autostart|is_enabled':
+      case 'get_open_at_login':
         return autostartEnabled
-      case 'plugin:autostart|enable':
-        autostartEnabled = true
-        return null
-      case 'plugin:autostart|disable':
-        autostartEnabled = false
-        return null
+      case 'set_open_at_login':
+        autostartEnabled = args?.enabled === true
+        return autostartEnabled
       default:
         throw new Error(`Unexpected Tauri command: ${command}`)
     }
@@ -1761,8 +1752,40 @@ describe('dashboard UI', () => {
 
     await user.click(openAtLogin)
     await waitFor(() => expect(openAtLogin).not.toBeChecked())
-    expect(invokeMock).toHaveBeenCalledWith('plugin:autostart|disable')
+    expect(invokeMock).toHaveBeenCalledWith('set_open_at_login', { enabled: false })
+
+    await user.click(openAtLogin)
+    await waitFor(() => expect(openAtLogin).toBeChecked())
+    expect(invokeMock).toHaveBeenCalledWith('set_open_at_login', { enabled: true })
     expect(invokeMock.mock.calls.some(([command]) => command === 'set_app_settings')).toBe(false)
+  })
+
+  it('shows login registration errors and retries without displaying a failed enable as on', async () => {
+    configureBackend()
+    const backend = invokeMock.getMockImplementation()!
+    let readFailed = false
+    invokeMock.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'get_open_at_login' && !readFailed) {
+        readFailed = true
+        throw new Error('The login setting is damaged.')
+      }
+      if (command === 'set_open_at_login') throw new Error('Couldn’t update the login entry: permission denied')
+      return backend(command, args)
+    })
+    const user = await renderDashboard()
+    await user.click(screen.getByRole('button', { name: 'Settings' }))
+    const control = await screen.findByRole('switch', { name: 'Open CodeTally at login' })
+    expect(await screen.findByText('The login setting is damaged.')).toBeInTheDocument()
+    expect(control).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: 'Retry' }))
+    await waitFor(() => expect(control).toBeEnabled())
+    expect(control).not.toBeChecked()
+    await user.click(control)
+    expect(await screen.findByText('Couldn’t update the login entry: permission denied')).toBeInTheDocument()
+    expect(control).not.toBeChecked()
+    await user.click(screen.getByRole('button', { name: 'Retry' }))
+    await waitFor(() => expect(control).toBeEnabled())
+    expect(control).not.toBeChecked()
   })
 
   it('persists the fork inclusion setting through off, on, and off states', async () => {

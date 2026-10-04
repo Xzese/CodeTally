@@ -121,7 +121,7 @@ settings.update({
 db.execute("UPDATE app_metadata SET value=? WHERE key='app_settings'", (json.dumps(settings, separators=(",", ":")),))
 repos = db.execute("SELECT id, name_with_owner FROM repositories ORDER BY id").fetchall()
 targets = [(18420, 14800), (24110, 19740), (11970, 9150)]
-today = datetime.date(2026, 9, 27)
+today = datetime.date(2026, 10, 4)
 for (repo_id, _), (total_target, source_target) in zip(repos, targets):
     for offset in range(30):
         day = today - datetime.timedelta(days=29-offset)
