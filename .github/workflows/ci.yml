@@ -105,6 +105,9 @@ jobs:
       - name: Test release preflight
         run: node --test scripts/release-preflight.check.mjs
 
+      - name: Test release workflow source selection
+        run: node --test scripts/release-workflow.check.mjs
+
       - name: Build frontend
         run: npm run build
 
