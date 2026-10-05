@@ -11,20 +11,17 @@ import { fileURLToPath } from 'node:url';
 const workflowPath = process.env.RELEASE_WORKFLOW_PATH ?? fileURLToPath(new URL('../.github/workflows/release.yml', import.meta.url));
 const workflow = JSON.parse(execFileSync('ruby', ['-r', 'yaml', '-r', 'json', '-e', 'puts JSON.generate(YAML.load_file(ARGV.fetch(0)))', workflowPath], { encoding: 'utf8' }));
 
-test('source steps run without promotion credentials and preserve branches', () => {
+test('source steps select main without custom credentials and preserve branches', () => {
   const root = mkdtempSync(join(tmpdir(), 'codetally-release-source-'));
   const git = (...args) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   try {
     git('init', '-b', 'main');
     const commit = (message) => git('-c', 'user.name=Release test', '-c', 'user.email=release@example.invalid', 'commit', '--allow-empty', '-m', message);
     commit('Released commit');
-    const released = git('rev-parse', 'HEAD');
-    git('branch', 'release');
     commit('New main commit');
     const main = git('rev-parse', 'HEAD');
     const branches = git('show-ref', '--heads');
-    const events = [['schedule', 'main', main], ['workflow_dispatch', 'main', main],
-      ['workflow_dispatch', 'release', released], ['push', 'release', released]];
+    const events = [['schedule', 'main', main], ['workflow_dispatch', 'main', main]];
 
     for (const [index, [event, branch, sha]] of events.entries()) {
       git('checkout', '--detach', sha);
@@ -50,6 +47,11 @@ test('source steps run without promotion credentials and preserve branches', () 
 test('every job uses the selected commit with read-only source access', () => {
   const jobs = workflow.jobs;
   const source = jobs.source;
+  // The remaining publication entry points are nightly and manual main runs.
+  const triggers = workflow.on ?? workflow.true; // Ruby YAML 1.1 parses "on" as true.
+  assert.deepEqual(Object.keys(triggers).sort(), ['schedule', 'workflow_dispatch']);
+  assert.deepEqual(triggers.schedule, [{ cron: '0 2 * * *' }]);
+  assert.equal(source.if, "github.ref == 'refs/heads/main'");
   const checkouts = (job) => job.steps.filter((step) => step.uses?.startsWith('actions/checkout@'));
   assert.deepEqual(source.permissions, { contents: 'read' });
   assert.equal(checkouts(source)[0].with.ref, '${{ github.sha }}');

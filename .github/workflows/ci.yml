@@ -36,18 +36,10 @@ jobs:
           BEFORE_SHA: ${{ github.event.before }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          HEAD_REF: ${{ github.head_ref }}
-          BASE_REF: ${{ github.base_ref }}
         run: |
           set -euo pipefail
           if [[ "$EVENT_NAME" == 'workflow_dispatch' ]]; then
             echo 'app_changed=true' >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          # Promotion PRs were already checked on main and are checked again on release.
-          if [[ "$EVENT_NAME" == 'pull_request' && "$HEAD_REF" == 'main' && "$BASE_REF" == 'release' ]]; then
-            echo 'app_changed=false' >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -139,7 +131,7 @@ jobs:
 
       - name: No desktop build needed
         if: needs.changes.outputs.app_changed != 'true'
-        run: echo 'No app changes to build, or this promotion PR was already checked on main.'
+        run: echo 'No app changes to build.'
 
       - name: Check out repository
         if: needs.changes.outputs.app_changed == 'true'
