@@ -25,7 +25,7 @@ output paths so release verification and uploading continue to work.
 
 ### Continuous integration
 
-The [CI workflow](../.github/workflows/ci.yml) runs on feature pull requests, pushes to `main`, and manual dispatch. A `main` → `release` pull request skips its duplicate CI jobs because that exact commit has already passed them on `main`; the release workflow validates it again after the merge. It checks:
+The [CI workflow](../.github/workflows/ci.yml) runs on feature pull requests, pushes to `main`, and manual dispatch. It checks:
 
 - frontend behavior with Vitest and React Testing Library;
 - TypeScript compilation and the Vite production build;
@@ -42,11 +42,11 @@ To prevent merging failing changes, configure repository branch protection or a 
 
 The [release workflow](../.github/workflows/release.yml) runs nightly at **02:00 UTC** and publishes the exact `main` commit that triggered the scheduled run. It records that commit once, then uses the same SHA for version selection, tests, builds, and the published tag. Later changes to `main` wait for the next run.
 
-Nightly and manual runs use the built-in `GITHUB_TOKEN`; no promotion token is required. Source selection has read-only repository access and does not update `main` or `release`. The protected `release` branch can still be updated through a normal `main` → `release` pull request. Only publication has repository write access, to create the tag and upload the release assets.
+Nightly and manual runs use the built-in `GITHUB_TOKEN`; no custom source-selection credentials are required. Source selection has read-only repository access and does not update `main`. Only publication has repository write access, to create the tag and upload the release assets. There is no separate release branch.
 
 With no new commits, the workflow checks the selected commit and skips builds if it is already published. A previous build failure before publication is retried on the next nightly run. Every new `main` commit, including documentation changes, is eligible for nightly publication. The schedule becomes active once this workflow is merged into `main`, GitHub's default branch; scheduled runs may start later than their scheduled time.
 
-For immediate publication, manually run the workflow from `main` or `release`; it publishes the selected branch's commit without merging branches. Direct pushes and merges into `release` still trigger a release only when app, build, test, or workflow files change, using the same paths as the CI change check. README, documentation, and screenshot-only direct pushes do not trigger an immediate release. Normal development merges into `main` wait for the nightly run.
+For immediate publication, manually run the workflow from `main`. Dispatches from other branches skip publication. Pushes and merges into `main` run CI and wait for the nightly run to publish; they do not trigger immediate releases.
 
 The release workflow selects a version, repeats the frontend and backend tests against the release commit, then builds separate macOS artifacts for Apple Silicon and Intel. Each build includes a DMG plus a signed updater archive and is mounted, deep-signature verified, architecture checked, launched briefly on a matching runner, detached, and extracted from its updater archive before upload. Cross-architecture builds still receive all structural checks; a live launch is skipped when the runner architecture does not match. A successful run creates a published GitHub Release, generates release notes, tags the release commit as `v<version>`, and attaches both DMGs, updater archives, signatures, and the static `latest.json` updater manifest.
 
@@ -58,9 +58,9 @@ Patch versions are automatic: if the source version is at or below the latest st
 
 Keep the root package versions in `package-lock.json` and `src-tauri/Cargo.lock` in sync as well. The selected release version is applied to all five files in each build's checkout; the workflow does not commit version bumps back to the branch. The GitHub tag and installed app record the selected version, while the source manifests retain the declared version. Publication runs are serialized so they select versions in order.
 
-Release PRs do not build or publish releases. The version is selected after merging, using the latest tags. Rerunning an already-published commit, including recreating `release` at that commit, succeeds and skips builds and publication once the workflow confirms both macOS DMGs exist. An incomplete release or failed GitHub lookup is reported instead of being silently skipped. Workflow changes take effect after they are merged; rerunning an older failed workflow still uses its original code.
+Pull requests do not build or publish releases. The version is selected after merging, using the latest tags. Rerunning an already-published commit succeeds and skips builds and publication once the workflow confirms both macOS DMGs exist. An incomplete release or failed GitHub lookup is reported instead of being silently skipped. Workflow changes take effect after they are merged; rerunning an older failed workflow still uses its original code.
 
-Run the release regression checks with `node --test scripts/release-preflight.check.mjs scripts/release-workflow.check.mjs`. The workflow checks use Ruby's bundled YAML parser (available on the Ubuntu CI runners) to execute the actual source-selection shell steps without credentials for scheduled, manual, and push runs, verify that branch refs remain unchanged, and enforce the same selected SHA throughout publication. Both checks also run in CI and before release builds.
+Run the release regression checks with `node --test scripts/release-preflight.check.mjs scripts/release-workflow.check.mjs`. The workflow checks use Ruby's bundled YAML parser (available on the Ubuntu CI runners) to execute the actual source-selection shell steps without credentials for scheduled and manual runs, verify that branch refs remain unchanged, and enforce main-only triggers and the same selected SHA throughout publication. Both checks also run in CI and before release builds.
 
 Choose `CodeTally_<version>_Apple-Silicon_aarch64.dmg` for an Apple M-series Mac, or `CodeTally_<version>_Intel_x64.dmg` for an Intel Mac. Check **Apple menu → About This Mac** for your chip or processor.
 
