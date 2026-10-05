@@ -26,56 +26,32 @@ concurrency:
 
 jobs:
   source:
-    name: Prepare release commit
+    name: Select release commit
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/release'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
-      contents: write
+      contents: read
     outputs:
       sha: ${{ steps.commit.outputs.sha }}
     steps:
-      - name: Require credentials for protected branch promotion
-        if: github.event_name != 'push'
-        env:
-          PROMOTION_TOKEN: ${{ secrets.RELEASE_PROMOTION_TOKEN }}
-        run: |
-          if [[ -z "$PROMOTION_TOKEN" ]]; then
-            echo 'Set RELEASE_PROMOTION_TOKEN to a token allowed to push to the protected release branch.' >&2
-            exit 1
-          fi
       - name: Check out repository history
         uses: actions/checkout@v7
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
-          token: ${{ (github.event_name != 'push' && secrets.RELEASE_PROMOTION_TOKEN) || github.token }}
-          persist-credentials: ${{ github.event_name != 'push' }}
-      - name: Promote main for nightly and manual runs
+          persist-credentials: false
+      - name: Record the exact workflow commit
         id: commit
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "$GITHUB_EVENT_NAME" != 'push' ]]; then
-            git fetch origin main release --tags
-            git checkout -B release origin/release
-            pending="$(git rev-list --count HEAD..origin/main)"
-            if [[ "$pending" -gt 0 ]]; then
-              git config user.name 'github-actions[bot]'
-              git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-              git merge --no-edit origin/main
-              # Preserve release history; a concurrent update must fail rather than be overwritten.
-              git push origin HEAD:refs/heads/release
-              echo "Promoted $pending main commits to release." >> "$GITHUB_STEP_SUMMARY"
-            else
-              echo 'No new main commits to promote.' >> "$GITHUB_STEP_SUMMARY"
-            fi
-          fi
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "Release source: $GITHUB_REF at $(git rev-parse HEAD)." >> "$GITHUB_STEP_SUMMARY"
 
   preflight:
     name: Release version check
     needs: source
-    # Token-authenticated promotion also queues a push run. This skips its duplicate publication.
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -94,6 +70,8 @@ jobs:
           node-version: 22
       - name: Test automatic version selection
         run: node --test scripts/release-preflight.check.mjs
+      - name: Test release workflow source selection
+        run: node --test scripts/release-workflow.check.mjs
       - name: Select release version before building
         id: version
         env:
