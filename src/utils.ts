@@ -17,6 +17,7 @@ export const repoUrl = (repo: Repository): string | undefined => repo.url
 export const repoTotal = (repo: Repository): number => repo.total_loc ?? repo.totalLoc ?? 0
 export const repoSource = (repo: Repository): number => repo.source_loc ?? repo.sourceLoc ?? 0
 export const repoTests = (repo: Repository): number => repo.test_loc ?? repo.testLoc ?? 0
+export const repoDocs = (repo: Repository): number => repo.docs_loc ?? repo.docsLoc ?? 0
 export const repoLocAvailable = (repo: Repository): boolean => repo.loc_available !== false
 export const repoBaseline30Available = (repo: Repository): boolean => repo.loc_baseline_30d_available !== false
 export const repoChange = (repo: Repository): number => repo.loc_30d_change ?? repo.loc_change_30d ?? repo.loc30dChange ?? 0
@@ -31,6 +32,8 @@ export const snapshotDate = (snapshot: LocSnapshot): string => snapshot.snapshot
 export const snapshotTotal = (snapshot: LocSnapshot): number => snapshot.total_loc ?? snapshot.totalLoc ?? 0
 export const snapshotSource = (snapshot: LocSnapshot): number => snapshot.source_loc ?? snapshot.sourceLoc ?? 0
 export const snapshotTests = (snapshot: LocSnapshot): number => snapshot.test_loc ?? snapshot.testLoc ?? 0
+
+export const snapshotDocs = (snapshot: LocSnapshot): number => snapshot.docs_loc ?? snapshot.docsLoc ?? 0
 
 export const prUpdated = (pr: PullRequest): string => pr.updated_at ?? pr.updatedAt ?? pr.created_at ?? pr.createdAt ?? ''
 export const issueUpdated = (issue: Issue): string => issue.updated_at ?? issue.updatedAt ?? issue.created_at ?? issue.createdAt ?? ''
@@ -78,6 +81,7 @@ export interface NormalizedMetrics {
   total_loc: number
   source_loc: number
   test_loc: number
+  docs_loc: number
   loc_30d_change: number
   open_prs: number
   open_issues: number
@@ -91,6 +95,7 @@ export const normalizeMetrics = (data: DashboardData): NormalizedMetrics => {
     total_loc: source.total_loc ?? source.totalLoc ?? repositories.reduce((sum, repo) => sum + repoTotal(repo), 0),
     source_loc: source.source_loc ?? source.sourceLoc ?? repositories.reduce((sum, repo) => sum + repoSource(repo), 0),
     test_loc: source.test_loc ?? source.testLoc ?? repositories.reduce((sum, repo) => sum + repoTests(repo), 0),
+    docs_loc: source.docs_loc ?? source.docsLoc ?? repositories.reduce((sum, repo) => sum + repoDocs(repo), 0),
     loc_30d_change: source.loc_change_30d ?? source.loc_30d_change ?? source.loc30dChange ?? repositories.reduce((sum, repo) => sum + repoChange(repo), 0),
     open_prs: source.open_prs ?? source.openPrs ?? repositories.reduce((sum, repo) => sum + repoOpenPrs(repo), 0),
     open_issues: source.open_issues ?? source.openIssues ?? repositories.reduce((sum, repo) => sum + repoOpenIssues(repo), 0)

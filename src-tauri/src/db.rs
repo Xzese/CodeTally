@@ -9,9 +9,21 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-const LOC_ANALYSIS_VERSION: &str = "3";
+const LOC_ANALYSIS_VERSION: &str = "4";
 const HISTORY_SAMPLING_VERSION: &str = "1";
 const ACTIVITY_ACTOR_FIELDS_VERSION: &str = "1";
+
+/// Original measurement metadata retained while derived LOC is reclassified.
+#[derive(Debug, Clone)]
+pub struct PendingLocRebuild {
+    pub id: i64,
+    pub repository_id: i64,
+    pub kind: String,
+    pub commit_sha: String,
+    pub commit_date: String,
+    pub snapshot_date: String,
+    pub created_at: String,
+}
 
 pub struct Database {
     path: std::path::PathBuf,
@@ -85,6 +97,7 @@ impl Database {
                 total_loc INTEGER NOT NULL DEFAULT 0,
                 source_loc INTEGER NOT NULL DEFAULT 0,
                 test_loc INTEGER NOT NULL DEFAULT 0,
+                docs_loc INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 UNIQUE(repository_id, commit_sha)
             );
@@ -97,7 +110,18 @@ impl Database {
                 total_loc INTEGER NOT NULL DEFAULT 0,
                 source_loc INTEGER NOT NULL DEFAULT 0,
                 test_loc INTEGER NOT NULL DEFAULT 0,
+                docs_loc INTEGER NOT NULL DEFAULT 0,
                 UNIQUE(repository_id, observation_date)
+            );
+            CREATE TABLE IF NOT EXISTS pending_loc_rebuild (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                repository_id INTEGER NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+                kind TEXT NOT NULL CHECK(kind IN ('snapshot','observation')),
+                commit_sha TEXT NOT NULL,
+                commit_date TEXT NOT NULL,
+                snapshot_date TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(repository_id,kind,commit_sha,snapshot_date)
             );
             CREATE TABLE IF NOT EXISTS pull_requests (
                 repository_id INTEGER NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
@@ -158,6 +182,8 @@ impl Database {
             "#,
         )?;
         // Keep databases created by an early development build usable.
+        let _ = conn.execute("ALTER TABLE code_snapshots ADD COLUMN docs_loc INTEGER NOT NULL DEFAULT 0", []);
+        let _ = conn.execute("ALTER TABLE loc_observations ADD COLUMN docs_loc INTEGER NOT NULL DEFAULT 0", []);
         let _ = conn.execute("ALTER TABLE repositories ADD COLUMN loc_backfill_complete INTEGER NOT NULL DEFAULT 0", []);
         let _ = conn.execute("ALTER TABLE repositories ADD COLUMN open_pr_count INTEGER NOT NULL DEFAULT 0", []);
         let _ = conn.execute("ALTER TABLE repositories ADD COLUMN open_issue_count INTEGER NOT NULL DEFAULT 0", []);
@@ -293,13 +319,18 @@ impl Database {
         }
         let stored_version: Option<String> = conn.query_row("SELECT value FROM app_metadata WHERE key='loc_analysis_version'", [], |row| row.get(0)).optional()?;
         if stored_version.as_deref() != Some(LOC_ANALYSIS_VERSION) {
-            // LOC counts are derived artifacts. A scanner/parser change must
-            // rebuild them automatically while retaining GitHub feeds, repo
-            // metadata, and the managed clone cache.
-            conn.execute("DELETE FROM code_snapshots", [])?;
-            conn.execute("DELETE FROM loc_observations", [])?;
-            conn.execute("UPDATE repositories SET loc_backfill_complete=0", [])?;
-            conn.execute("INSERT INTO app_metadata(key,value) VALUES ('loc_analysis_version',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [LOC_ANALYSIS_VERSION])?;
+            // Keep original measurement dates durable across restarts while
+            // replacing all old derived counts. Never expose mixed analyses.
+            let tx = conn.transaction()?;
+            tx.execute_batch("INSERT OR IGNORE INTO pending_loc_rebuild(repository_id,kind,commit_sha,commit_date,snapshot_date,created_at)
+                SELECT repository_id,'snapshot',commit_sha,commit_date,snapshot_date,created_at FROM code_snapshots;
+                INSERT OR IGNORE INTO pending_loc_rebuild(repository_id,kind,commit_sha,commit_date,snapshot_date,created_at)
+                SELECT repository_id,'observation',commit_sha,observed_at,observed_at,observed_at FROM loc_observations;
+                DELETE FROM code_snapshots;
+                DELETE FROM loc_observations;
+                UPDATE repositories SET loc_backfill_complete=0;")?;
+            tx.execute("INSERT INTO app_metadata(key,value) VALUES ('loc_analysis_version',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [LOC_ANALYSIS_VERSION])?;
+            tx.commit()?;
         }
         let stored_history_version: Option<String> = conn.query_row("SELECT value FROM app_metadata WHERE key='history_sampling_version'", [], |row| row.get(0)).optional()?;
         if stored_history_version.as_deref() != Some(HISTORY_SAMPLING_VERSION) {
@@ -573,10 +604,10 @@ impl Database {
         let conn = self.connect()?;
         let changed = conn.execute(
             r#"INSERT INTO code_snapshots
-               (repository_id,commit_sha,commit_date,snapshot_date,total_loc,source_loc,test_loc,created_at)
-               VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
+               (repository_id,commit_sha,commit_date,snapshot_date,total_loc,source_loc,test_loc,docs_loc,created_at)
+               VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
                ON CONFLICT(repository_id,commit_sha) DO NOTHING"#,
-            params![snapshot.repository_id, snapshot.commit_sha, snapshot.commit_date, snapshot.snapshot_date, snapshot.total_loc, snapshot.source_loc, snapshot.test_loc, snapshot.created_at],
+            params![snapshot.repository_id, snapshot.commit_sha, snapshot.commit_date, snapshot.snapshot_date, snapshot.total_loc, snapshot.source_loc, snapshot.test_loc, snapshot.docs_loc, snapshot.created_at],
         )?;
         Ok(changed > 0)
     }
@@ -586,14 +617,52 @@ impl Database {
         let observed_date = observation.snapshot_date.get(..10).unwrap_or(&observation.snapshot_date);
         let changed = conn.execute(
             r#"INSERT INTO loc_observations
-               (repository_id,commit_sha,observed_at,observation_date,total_loc,source_loc,test_loc)
-               VALUES (?1,?2,?3,?4,?5,?6,?7)
+               (repository_id,commit_sha,observed_at,observation_date,total_loc,source_loc,test_loc,docs_loc)
+               VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
                ON CONFLICT(repository_id,observation_date) DO UPDATE SET
                  commit_sha=excluded.commit_sha, observed_at=excluded.observed_at,
-                 total_loc=excluded.total_loc, source_loc=excluded.source_loc, test_loc=excluded.test_loc"#,
-            params![observation.repository_id, observation.commit_sha, observation.snapshot_date, observed_date, observation.total_loc, observation.source_loc, observation.test_loc],
+                 total_loc=excluded.total_loc, source_loc=excluded.source_loc, test_loc=excluded.test_loc, docs_loc=excluded.docs_loc"#,
+            params![observation.repository_id, observation.commit_sha, observation.snapshot_date, observed_date, observation.total_loc, observation.source_loc, observation.test_loc, observation.docs_loc],
         )?;
         Ok(changed > 0)
+    }
+
+    pub fn pending_loc_rebuild(&self, repository_id: i64) -> AppResult<Vec<PendingLocRebuild>> {
+        let conn = self.connect()?;
+        // Recover snapshots first, so each SHA's durable measurement cache has
+        // its original sample metadata before repeated daily observations.
+        let mut stmt = conn.prepare("SELECT id,repository_id,kind,commit_sha,commit_date,snapshot_date,created_at FROM pending_loc_rebuild WHERE repository_id=?1 ORDER BY kind DESC,snapshot_date,id")?;
+        let rows = stmt.query_map([repository_id], |row| Ok(PendingLocRebuild {
+            id: row.get(0)?, repository_id: row.get(1)?, kind: row.get(2)?, commit_sha: row.get(3)?,
+            commit_date: row.get(4)?, snapshot_date: row.get(5)?, created_at: row.get(6)?,
+        }))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn restore_loc_rebuild(&self, pending: &PendingLocRebuild, measurement: &Snapshot) -> AppResult<()> {
+        let mut conn = self.connect()?;
+        let tx = conn.transaction()?;
+        let observation_date = pending.snapshot_date.get(..10).unwrap_or(&pending.snapshot_date);
+        // Keep original snapshot days as observations too: monthly SHA dedup
+        // may move a commit sample earlier, but must not erase a measured day.
+        // A real daily observation has precedence over this preserved sample.
+        let original_observation_pending: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pending_loc_rebuild WHERE repository_id=?1 AND kind='observation' AND substr(snapshot_date,1,10)=?2)",
+            params![pending.repository_id, observation_date], |row| row.get(0))?;
+        if pending.kind != "snapshot" || !original_observation_pending {
+            let conflict = if pending.kind == "snapshot" { "DO NOTHING" } else {
+                "DO UPDATE SET commit_sha=excluded.commit_sha, observed_at=excluded.observed_at,
+                 total_loc=excluded.total_loc,source_loc=excluded.source_loc,test_loc=excluded.test_loc,docs_loc=excluded.docs_loc
+                 WHERE excluded.observed_at>=loc_observations.observed_at"
+            };
+            tx.execute(&format!("INSERT INTO loc_observations(repository_id,commit_sha,observed_at,observation_date,total_loc,source_loc,test_loc,docs_loc)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(repository_id,observation_date) {conflict}"),
+                params![pending.repository_id, pending.commit_sha, pending.snapshot_date, observation_date,
+                    measurement.total_loc, measurement.source_loc, measurement.test_loc, measurement.docs_loc])?;
+        }
+        tx.execute("DELETE FROM pending_loc_rebuild WHERE id=?1", [pending.id])?;
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn has_snapshots(&self, repository_id: i64) -> AppResult<bool> {
@@ -620,22 +689,22 @@ impl Database {
 
     pub fn snapshot_for_commit(&self, repository_id: i64, sha: &str) -> AppResult<Option<Snapshot>> {
         let conn = self.connect()?;
-        Ok(conn.query_row("SELECT id,repository_id,commit_sha,commit_date,snapshot_date,total_loc,source_loc,test_loc,created_at FROM code_snapshots WHERE repository_id=?1 AND commit_sha=?2 LIMIT 1", params![repository_id, sha], snapshot_from_row).optional()?)
+        Ok(conn.query_row("SELECT id,repository_id,commit_sha,commit_date,snapshot_date,total_loc,source_loc,test_loc,docs_loc,created_at FROM code_snapshots WHERE repository_id=?1 AND commit_sha=?2 LIMIT 1", params![repository_id, sha], snapshot_from_row).optional()?)
     }
 
     pub fn latest_snapshot(&self, repository_id: i64) -> AppResult<Option<Snapshot>> {
         let conn = self.connect()?;
-        Ok(conn.query_row("SELECT id,repository_id,commit_sha,commit_date,snapshot_date,total_loc,source_loc,test_loc,created_at FROM code_snapshots WHERE repository_id=?1 ORDER BY snapshot_date DESC, id DESC LIMIT 1", [repository_id], snapshot_from_row).optional()?)
+        Ok(conn.query_row("SELECT id,repository_id,commit_sha,commit_date,snapshot_date,total_loc,source_loc,test_loc,docs_loc,created_at FROM code_snapshots WHERE repository_id=?1 ORDER BY snapshot_date DESC, id DESC LIMIT 1", [repository_id], snapshot_from_row).optional()?)
     }
 
     pub fn latest_observation(&self, repository_id: i64) -> AppResult<Option<Snapshot>> {
         let conn = self.connect()?;
-        Ok(conn.query_row("SELECT id,repository_id,commit_sha,observed_at,observed_at,total_loc,source_loc,test_loc,observed_at FROM loc_observations WHERE repository_id=?1 ORDER BY observed_at DESC, id DESC LIMIT 1", [repository_id], snapshot_from_row).optional()?)
+        Ok(conn.query_row("SELECT id,repository_id,commit_sha,observed_at,observed_at,total_loc,source_loc,test_loc,docs_loc,observed_at FROM loc_observations WHERE repository_id=?1 ORDER BY observed_at DESC, id DESC LIMIT 1", [repository_id], snapshot_from_row).optional()?)
     }
 
     pub fn snapshot_at_or_before(&self, repository_id: i64, date: &str) -> AppResult<Option<Snapshot>> {
         let conn = self.connect()?;
-        Ok(conn.query_row("SELECT id,repository_id,commit_sha,commit_date,snapshot_date,total_loc,source_loc,test_loc,created_at FROM code_snapshots WHERE repository_id=?1 AND snapshot_date<=?2 ORDER BY snapshot_date DESC, id DESC LIMIT 1", params![repository_id, date], snapshot_from_row).optional()?)
+        Ok(conn.query_row("SELECT id,repository_id,commit_sha,commit_date,snapshot_date,total_loc,source_loc,test_loc,docs_loc,created_at FROM code_snapshots WHERE repository_id=?1 AND snapshot_date<=?2 ORDER BY snapshot_date DESC, id DESC LIMIT 1", params![repository_id, date], snapshot_from_row).optional()?)
     }
 
     pub fn measurement_at_or_before(&self, repository_id: i64, date: &str) -> AppResult<Option<Snapshot>> {
@@ -644,8 +713,8 @@ impl Database {
     }
 
     fn measurement_on(conn: &Connection, repository_id: i64, date: &str) -> AppResult<Option<Snapshot>> {
-        let snapshot: Option<Snapshot> = conn.prepare_cached("SELECT id,repository_id,commit_sha,commit_date,snapshot_date,total_loc,source_loc,test_loc,created_at FROM code_snapshots WHERE repository_id=?1 AND snapshot_date<=?2 ORDER BY snapshot_date DESC, id DESC LIMIT 1")?.query_row(params![repository_id, date], snapshot_from_row).optional()?;
-        let observation: Option<Snapshot> = conn.prepare_cached("SELECT id,repository_id,commit_sha,observed_at,observed_at,total_loc,source_loc,test_loc,observed_at FROM loc_observations WHERE repository_id=?1 AND observed_at<=?2 ORDER BY observed_at DESC, id DESC LIMIT 1")?.query_row(params![repository_id, date], snapshot_from_row).optional()?;
+        let snapshot: Option<Snapshot> = conn.prepare_cached("SELECT id,repository_id,commit_sha,commit_date,snapshot_date,total_loc,source_loc,test_loc,docs_loc,created_at FROM code_snapshots WHERE repository_id=?1 AND snapshot_date<=?2 ORDER BY snapshot_date DESC, id DESC LIMIT 1")?.query_row(params![repository_id, date], snapshot_from_row).optional()?;
+        let observation: Option<Snapshot> = conn.prepare_cached("SELECT id,repository_id,commit_sha,observed_at,observed_at,total_loc,source_loc,test_loc,docs_loc,observed_at FROM loc_observations WHERE repository_id=?1 AND observed_at<=?2 ORDER BY observed_at DESC, id DESC LIMIT 1")?.query_row(params![repository_id, date], snapshot_from_row).optional()?;
         Ok(match (snapshot, observation) {
             (Some(snapshot), Some(observation)) => if observation.snapshot_date >= snapshot.snapshot_date { Some(observation) } else { Some(snapshot) },
             (Some(snapshot), None) => Some(snapshot),
@@ -788,10 +857,10 @@ impl Database {
             let old_30 = Self::measurement_on(&tx, repo.id, &day_30)?;
             let old_90 = Self::measurement_on(&tx, repo.id, &day_90)?;
             let loc_available = current.is_some();
-            let (total, source, tests) = current.as_ref().map(|x| (x.total_loc, x.source_loc, x.test_loc)).unwrap_or_default();
-            let base_7 = old_7.as_ref().map(|x| x.total_loc).unwrap_or_default();
-            let base_30 = old_30.as_ref().map(|x| x.total_loc).unwrap_or_default();
-            let base_90 = old_90.as_ref().map(|x| x.total_loc).unwrap_or_default();
+            let (total, source, tests, docs) = current.as_ref().map(|x| (settings.selected_total_loc(x.source_loc, x.test_loc, x.docs_loc), x.source_loc, x.test_loc, x.docs_loc)).unwrap_or_default();
+            let base_7 = old_7.as_ref().map(|x| settings.selected_total_loc(x.source_loc, x.test_loc, x.docs_loc)).unwrap_or_default();
+            let base_30 = old_30.as_ref().map(|x| settings.selected_total_loc(x.source_loc, x.test_loc, x.docs_loc)).unwrap_or_default();
+            let base_90 = old_90.as_ref().map(|x| settings.selected_total_loc(x.source_loc, x.test_loc, x.docs_loc)).unwrap_or_default();
             let change_30 = if loc_available && old_30.is_some() { total - base_30 } else { 0 };
             let (latest_pr, latest_issue, open_prs, open_issues): (Option<String>, Option<String>, i64, i64) = tx.prepare_cached(
                 "SELECT (SELECT MAX(updated_at) FROM pull_requests WHERE repository_id=?1),
@@ -816,6 +885,7 @@ impl Database {
                 total_loc: total,
                 source_loc: source,
                 test_loc: tests,
+                docs_loc: docs,
                 loc_change_7d: if loc_available && old_7.is_some() { total - base_7 } else { 0 },
                 loc_change_30d: change_30,
                 loc_change_90d: if loc_available && old_90.is_some() { total - base_90 } else { 0 },
@@ -908,9 +978,10 @@ impl Database {
         Ok(summaries.iter().filter(|r| !r.is_archived).fold(DashboardTotals::default(), |mut totals, repo| {
             totals.repositories += 1;
             if settings.include_forks_in_totals || !repo.is_fork {
-                totals.total_loc += repo.total_loc;
+                totals.total_loc += settings.selected_total_loc(repo.source_loc, repo.test_loc, repo.docs_loc);
                 totals.source_loc += repo.source_loc;
                 totals.test_loc += repo.test_loc;
+                totals.docs_loc += repo.docs_loc;
                 totals.loc_change_30d += repo.loc_change_30d;
             }
             totals.open_prs += repo.open_prs;
@@ -928,19 +999,19 @@ impl Database {
         // commit samples on the same day, even if their timestamp is earlier.
         let scope = "r.id IN (SELECT value FROM json_each(?1))";
         let query = format!(
-            "SELECT day,repository_id,total_loc,source_loc,test_loc FROM (
-                SELECT substr(s.snapshot_date,1,10) AS day,s.repository_id,s.total_loc,s.source_loc,s.test_loc,
+            "SELECT day,repository_id,total_loc,source_loc,test_loc,docs_loc FROM (
+                SELECT substr(s.snapshot_date,1,10) AS day,s.repository_id,s.total_loc,s.source_loc,s.test_loc,s.docs_loc,
                        0 AS observation,s.snapshot_date AS measured_at,s.id
                 FROM code_snapshots s JOIN repositories r ON r.id=s.repository_id WHERE {scope}
                 UNION ALL
-                SELECT substr(o.observed_at,1,10),o.repository_id,o.total_loc,o.source_loc,o.test_loc,
+                SELECT substr(o.observed_at,1,10),o.repository_id,o.total_loc,o.source_loc,o.test_loc,o.docs_loc,
                        1,o.observed_at,o.id
                 FROM loc_observations o JOIN repositories r ON r.id=o.repository_id WHERE {scope}
              ) ORDER BY day,repository_id,observation,measured_at,id"
         );
         let mut stmt = conn.prepare(&query)?;
         let mut rows = stmt.query([allowed])?;
-        let mut latest = HashMap::<i64, (i64, i64, i64)>::new();
+        let mut latest = HashMap::<i64, (i64, i64, i64, i64)>::new();
         let mut current = HistoryPoint::default();
         let mut points = Vec::new();
         while let Some(row) = rows.next()? {
@@ -950,11 +1021,13 @@ impl Database {
                 current.snapshot_date = day;
             }
             let repo_id: i64 = row.get(1)?;
-            let counts = (row.get::<_, i64>(2)?, row.get::<_, i64>(3)?, row.get::<_, i64>(4)?);
+            let counts = (row.get::<_, i64>(2)?, row.get::<_, i64>(3)?, row.get::<_, i64>(4)?, row.get::<_, i64>(5)?);
             let previous = latest.insert(repo_id, counts).unwrap_or_default();
-            current.total_loc += counts.0 - previous.0;
+            current.total_loc += settings.selected_total_loc(counts.1, counts.2, counts.3)
+                - settings.selected_total_loc(previous.1, previous.2, previous.3);
             current.source_loc += counts.1 - previous.1;
             current.test_loc += counts.2 - previous.2;
+            current.docs_loc += counts.3 - previous.3;
         }
         if !current.snapshot_date.is_empty() { points.push(current); }
         Ok(points)
@@ -984,7 +1057,7 @@ fn repository_from_row(row: &Row<'_>) -> rusqlite::Result<Repository> {
 }
 
 fn snapshot_from_row(row: &Row<'_>) -> rusqlite::Result<Snapshot> {
-    Ok(Snapshot { id: row.get(0)?, repository_id: row.get(1)?, commit_sha: row.get(2)?, commit_date: row.get(3)?, snapshot_date: row.get(4)?, total_loc: row.get(5)?, source_loc: row.get(6)?, test_loc: row.get(7)?, created_at: row.get(8)? })
+    Ok(Snapshot { id: row.get(0)?, repository_id: row.get(1)?, commit_sha: row.get(2)?, commit_date: row.get(3)?, snapshot_date: row.get(4)?, total_loc: row.get(5)?, source_loc: row.get(6)?, test_loc: row.get(7)?, docs_loc: row.get(8)?, created_at: row.get(9)? })
 }
 
 fn pull_request_from_row(row: &Row<'_>) -> rusqlite::Result<PullRequest> {

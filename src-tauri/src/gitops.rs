@@ -1,4 +1,4 @@
-use crate::classify::{classify_tokei_json_with_config, excluded_tokei_directories, is_test_path_with_config, is_tokei_report, tokei_report_code_by_path, tokei_report_paths};
+use crate::classify::{classify_tokei_json_with_config, excluded_tokei_directories, is_documentation_path, is_test_path_with_config, is_tokei_report, tokei_report_code_by_path, tokei_report_paths, tokei_documentation_paths};
 use crate::error::{command_error, AppError, AppResult};
 use crate::github::command_path;
 use crate::models::Repository;
@@ -19,6 +19,7 @@ pub struct LocScan {
     pub total_loc: i64,
     pub source_loc: i64,
     pub test_loc: i64,
+    pub docs_loc: i64,
 }
 
 pub fn cache_path(cache_root: &Path, repo: &Repository) -> PathBuf {
@@ -272,29 +273,28 @@ pub fn scan_worktree_with_config(path: &Path, config: Option<&ClassificationConf
     let default_config = ClassificationConfig::default();
     let config = config.unwrap_or(&default_config);
     let (mut total, mut source, mut tests) = classify_tokei_json_with_config(&value, config);
-    let (fallback_source, fallback_tests) = fallback_omitted_files(path, &value, config)?;
+    let (fallback_source, fallback_tests, docs) = count_documentation_and_omitted_files(path, &value, config)?;
     source += fallback_source;
     tests += fallback_tests;
     total += fallback_source + fallback_tests;
-    Ok(LocScan { total_loc: total, source_loc: source, test_loc: tests })
+    Ok(LocScan { total_loc: total, source_loc: source, test_loc: tests, docs_loc: docs })
 }
 
-/// Count tracked text files omitted by Tokei. Shell candidates are presented
+/// Count documentation contents and tracked text files omitted by Tokei.
+/// Documentation counts every nonblank line, including comments and fences.
+/// Shell candidates are presented
 /// under a temporary `.sh` name so Tokei keeps its shell parser; other unknown
 /// text uses the same nonblank, full-line-comment rule as the fallback only.
-fn fallback_omitted_files(path: &Path, report: &Value, config: &ClassificationConfig) -> AppResult<(i64, i64)> {
+fn count_documentation_and_omitted_files(path: &Path, report: &Value, config: &ClassificationConfig) -> AppResult<(i64, i64, i64)> {
     let recognized = tokei_report_paths(report);
-    let Ok(output) = run_git(Some(path), &["ls-files".into(), "-z".into()]) else {
-        // Keep scan_worktree useful for callers that pass a non-Git directory;
-        // normal application clones are Git repositories and use the fallback.
-        return Ok((0, 0));
-    };
-    let tracked = output
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter_map(|raw| std::str::from_utf8(raw).ok())
-        .map(normalize_relative_path)
-        .collect::<BTreeSet<_>>();
+    let documentation = tokei_documentation_paths(report);
+    // Documentation also works for non-Git directories; unknown source fallback
+    // remains restricted to tracked files, as before.
+    let tracked = run_git(Some(path), &["ls-files".into(), "-z".into()])
+        .map(|output| output.stdout.split(|byte| *byte == 0)
+            .filter_map(|raw| std::str::from_utf8(raw).ok())
+            .map(normalize_relative_path).collect::<BTreeSet<_>>())
+        .unwrap_or_default();
     let mut walker = WalkBuilder::new(path);
     walker
         .hidden(false)
@@ -306,15 +306,18 @@ fn fallback_omitted_files(path: &Path, report: &Value, config: &ClassificationCo
         .add_custom_ignore_filename(".tokeignore");
     let mut source = 0_i64;
     let mut tests = 0_i64;
+    let mut docs = 0_i64;
     let mut shell_candidates = Vec::new();
     for entry in walker.build() {
         let entry = entry.map_err(|error| AppError::InvalidArgument(format!("could not walk repository for LOC fallback: {error}")))?;
         let relative = normalize_relative_path(entry.path().strip_prefix(path).ok().and_then(|value| value.to_str()).unwrap_or(""));
         if relative.is_empty()
-            || !tracked.contains(&relative)
-            || recognized.contains(&relative)
             || should_skip_fallback_path(&relative, config)
         {
+            continue;
+        }
+        let is_doc = is_documentation_path(&relative) || documentation.contains(&relative);
+        if !is_doc && (!tracked.contains(&relative) || recognized.contains(&relative)) {
             continue;
         }
         let full_path = entry.path();
@@ -322,7 +325,11 @@ fn fallback_omitted_files(path: &Path, report: &Value, config: &ClassificationCo
             continue;
         }
         let bytes = std::fs::read(full_path)?;
-        if is_documentation_path(&relative) || bytes.contains(&0) || std::str::from_utf8(&bytes).is_err() {
+        if bytes.contains(&0) || std::str::from_utf8(&bytes).is_err() {
+            continue;
+        }
+        if is_doc {
+            docs += std::str::from_utf8(&bytes).unwrap().lines().filter(|line| !line.trim().is_empty()).count() as i64;
             continue;
         }
         if is_shell_fallback_candidate(&full_path, &bytes) {
@@ -339,7 +346,7 @@ fn fallback_omitted_files(path: &Path, report: &Value, config: &ClassificationCo
     let (shell_source, shell_tests) = count_shell_candidates_with_tokei(&shell_candidates, config)?;
     source += shell_source;
     tests += shell_tests;
-    Ok((source, tests))
+    Ok((source, tests, docs))
 }
 
 fn is_regular_file(path: &Path) -> bool {
@@ -391,15 +398,6 @@ fn count_fallback_text_lines(bytes: &[u8]) -> i64 {
 
 fn is_full_line_comment(line: &str) -> bool {
     line.starts_with('#') || line.starts_with("//") || line.starts_with("/*") || line.starts_with('*') || line.starts_with("<!--")
-}
-
-fn is_documentation_path(relative: &str) -> bool {
-    let name = relative.rsplit('/').next().unwrap_or("").to_ascii_lowercase();
-    if matches!(name.as_str(), "readme" | "license" | "copying" | "changelog") {
-        return true;
-    }
-    let extension = Path::new(&name).extension().and_then(|value| value.to_str()).unwrap_or("");
-    matches!(extension, "adoc" | "asciidoc" | "markdown" | "md" | "mdown" | "mkd" | "org" | "rst" | "text" | "textile" | "txt")
 }
 
 fn count_shell_candidates_with_tokei(candidates: &[(String, Vec<u8>)], config: &ClassificationConfig) -> AppResult<(i64, i64)> {
@@ -473,7 +471,7 @@ fn should_skip_fallback_path(relative: &str, config: &ClassificationConfig) -> b
         return true;
     }
     let built_in = excluded_tokei_directories();
-    if components.iter().any(|component| built_in.contains(component.as_str())) {
+    if components.iter().any(|component| built_in.iter().any(|directory| component.eq_ignore_ascii_case(directory))) {
         return true;
     }
     config.excluded_directories.iter().any(|configured| {

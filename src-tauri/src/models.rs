@@ -60,6 +60,8 @@ pub struct RepositorySummary {
     pub total_loc: i64,
     pub source_loc: i64,
     pub test_loc: i64,
+    #[serde(default)]
+    pub docs_loc: i64,
     pub loc_change_7d: i64,
     pub loc_change_30d: i64,
     pub loc_change_90d: i64,
@@ -87,6 +89,8 @@ pub struct Snapshot {
     pub total_loc: i64,
     pub source_loc: i64,
     pub test_loc: i64,
+    #[serde(default)]
+    pub docs_loc: i64,
     pub created_at: String,
 }
 
@@ -96,6 +100,8 @@ pub struct HistoryPoint {
     pub total_loc: i64,
     pub source_loc: i64,
     pub test_loc: i64,
+    #[serde(default)]
+    pub docs_loc: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -143,6 +149,8 @@ pub struct DashboardTotals {
     pub total_loc: i64,
     pub source_loc: i64,
     pub test_loc: i64,
+    #[serde(default)]
+    pub docs_loc: i64,
     pub loc_change_30d: i64,
     pub open_prs: i64,
     pub open_issues: i64,
@@ -202,6 +210,30 @@ pub struct SyncResult {
     pub issues_synced: i64,
     pub snapshots_created: i64,
     pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LocCategory {
+    Source,
+    Tests,
+    Docs,
+}
+
+fn default_total_line_categories() -> Vec<LocCategory> {
+    vec![LocCategory::Source, LocCategory::Tests]
+}
+
+fn canonical_total_line_categories(categories: &[LocCategory]) -> Vec<LocCategory> {
+    if categories.is_empty() { return default_total_line_categories(); }
+    [LocCategory::Source, LocCategory::Tests, LocCategory::Docs]
+        .into_iter().filter(|category| categories.contains(category)).collect()
+}
+
+fn deserialize_total_line_categories<'de, D>(deserializer: D) -> Result<Vec<LocCategory>, D::Error>
+where D: serde::Deserializer<'de> {
+    let categories = Vec::<LocCategory>::deserialize(deserializer)?;
+    Ok(canonical_total_line_categories(&categories))
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -273,6 +305,8 @@ pub enum UpdateCheckInterval {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
+    #[serde(default = "default_total_line_categories", deserialize_with = "deserialize_total_line_categories")]
+    pub total_line_categories: Vec<LocCategory>,
     #[serde(default)]
     pub theme_mode: ThemeMode,
     pub activity_refresh_minutes: i64,
@@ -310,6 +344,21 @@ pub struct AppSettings {
 }
 
 impl AppSettings {
+    pub fn normalize_total_line_categories(&mut self) {
+        self.total_line_categories = canonical_total_line_categories(&self.total_line_categories);
+    }
+
+    /// Project display totals from the independent stored category counts.
+    pub fn selected_total_loc(&self, source: i64, tests: i64, docs: i64) -> i64 {
+        let categories = if self.total_line_categories.is_empty() {
+            &[LocCategory::Source, LocCategory::Tests][..]
+        } else {
+            self.total_line_categories.as_slice()
+        };
+        [(LocCategory::Source, source), (LocCategory::Tests, tests), (LocCategory::Docs, docs)]
+            .into_iter().filter(|(category, _)| categories.contains(category)).map(|(_, lines)| lines).sum()
+    }
+
     /// Empty arrays are legacy preferences; always expose a nonempty canonical selection.
     pub fn effective_menu_bar_metrics(&self) -> Vec<MenuBarMetric> {
         if self.menu_bar_metrics.is_empty() { return vec![self.menu_bar_metric]; }
@@ -334,6 +383,7 @@ fn default_personal_refresh_minutes() -> i64 { 5 }
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
+            total_line_categories: default_total_line_categories(),
             theme_mode: ThemeMode::default(),
             activity_refresh_minutes: 1440,
             personal_refresh_minutes: default_personal_refresh_minutes(),

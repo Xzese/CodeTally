@@ -147,15 +147,17 @@ These board screenshots use fictional repositories, tickets, and people from the
 
 ## How line counts work
 
-Every counted line is assigned to either **Source** or **Tests**, so **Total = Source + Tests**. Blank lines and comments are excluded.
+Code lines are assigned to **Source** or **Tests**, and **Total = Source + Tests** by default. In **Settings → Total Lines**, choose which categories are included in dashboard totals, repository totals, growth figures, saved history totals, and the menu bar. Use the three horizontal category buttons; the live preview shows the selected total and its breakdown. Source and Tests start selected; Docs starts deselected. Keep at least one category selected. Changes save automatically and recalculate existing measurements without rescanning. Blank lines and comments are excluded from code counts. **Docs** is a separate category: documentation formats, extensionless README/license/changelog files, and text files anywhere inside a `doc/` or `docs/` directory count as documentation, including JSON benchmark reports and code examples. Docs counts nonblank text lines, including prose, comments, and fenced code, once per file. Documentation takes precedence over test classification.
+
+Use the chart’s **Source**, **Tests**, and **Docs** buttons to show or hide each category. At least one category stays visible. When several are visible, the chart total is their sum; hidden categories are also excluded from the tooltip and chart scale. Source and Tests are shown by default. Your selection is saved on this device and shared between dashboard and repository charts across restarts; it does not change the Total Lines setting or growth figures elsewhere.
 
 Tokei provides language-aware counts for recognized files. A tracked-file fallback covers project code and configuration that Tokei does not recognize, including `.command` files, extensionless scripts, package lists, service definitions, environment examples, workflows, and other text-based build inputs. Shell files that Tokei misses are scanned through its Shell parser. Other unknown text formats count nonblank lines except common full-line comment markers; comment handling for an unknown syntax is therefore approximate.
 
 Test files are identified by conventional paths such as `test`, `tests`, `__tests__`, `spec`, and `specs`, and by common filename patterns including `*.test.*`, `*.spec.*`, `test_*.py`, `*_test.py`, `*Tests.swift`, `*_test.go`, and `*_test.rs`. Per-repository classifier overrides are supported by the backend, although the current UI does not yet provide an editor for them.
 
-The scanner excludes documentation-only languages, binaries, ignored paths, Git metadata, `.repowise`, and common generated or dependency directories such as `node_modules`, `vendor`, `dist`, `build`, `coverage`, `.next`, virtual environments, `target`, and `DerivedData`.
+The scanner excludes binaries, ignored paths, Git metadata, `.repowise`, and common generated or dependency directories such as `node_modules`, `vendor`, `dist`, `build`, `coverage`, `.next`, virtual environments, `target`, and `DerivedData`.
 
-History is sampled monthly from the earliest reachable commit on the default branch, with newer current snapshots added as repository heads change. The 7-, 30-, and 90-day figures are net changes between stored snapshots, not a sum of additions from commits. A missing baseline is displayed as unavailable instead of zero growth.
+History is sampled monthly from the earliest reachable commit on the default branch, with newer current snapshots added as repository heads change. When upgrading to the Docs classifier, historical commits are rescanned to split out documentation; saved measurement dates are preserved, and unfinished rebuilds resume on the next line refresh. The 7-, 30-, and 90-day figures are net changes for the selected Total Lines categories between stored snapshots, not a sum of additions from commits. A missing baseline is displayed as unavailable instead of zero growth.
 
 ## Local data and recovery
 

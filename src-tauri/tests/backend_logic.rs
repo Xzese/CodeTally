@@ -8,7 +8,7 @@ use codetally_lib::db::{DashboardCache, Database};
 use codetally_lib::gitops::{commit_at_or_before, current_commit_optional, earliest_commit, ensure_clone, scan_worktree_with_config};
 use codetally_lib::models::{
     ActivityItem, AppSettings, ClassificationConfig, GithubIssueJson, GithubPullRequestJson,
-    DashboardTotals, GithubRepositoryJson, Issue, MenuBarMetric, PullRequest, Repository,
+    DashboardTotals, LocCategory, GithubRepositoryJson, Issue, MenuBarMetric, PullRequest, Repository,
     Snapshot, SyncProgress, ThemeMode, UpdateCheckInterval,
 };
 use codetally_lib::sync::{self, decide_loc_sync, AppState};
@@ -117,6 +117,7 @@ fn snapshot(repository_id: i64, sha: &str, date: &str, total: i64) -> Snapshot {
         total_loc: total,
         source_loc: total - 20,
         test_loc: 20,
+        docs_loc: 0,
         created_at: date.to_string(),
         ..Snapshot::default()
     }
@@ -131,6 +132,7 @@ fn snapshot_with_counts(repository_id: i64, sha: &str, date: &str, total: i64, s
         total_loc: total,
         source_loc: source,
         test_loc: tests,
+        docs_loc: 0,
         created_at: date.to_string(),
         ..Snapshot::default()
     }
@@ -251,7 +253,12 @@ fn earliest_reachable_git_commit_extends_history_before_later_github_creation_da
     git(&["config", "user.email", "portfolio@example.test"]);
     git(&["config", "user.name", "Portfolio Tests"]);
     std::fs::write(root.join("main.rs"), "fn main() {}\n").expect("first source file");
-    git(&["add", "main.rs"]);
+    std::fs::create_dir_all(root.join("docs")).unwrap();
+    std::fs::create_dir_all(root.join("tests")).unwrap();
+    std::fs::write(root.join("docs/benchmark.json"), "{\n  \"result\": 1\n}\n").unwrap();
+    std::fs::write(root.join("README.md"), "# Guide\nFirst example\n").unwrap();
+    std::fs::write(root.join("tests/check.rs"), "fn check() {}\n").unwrap();
+    git(&["add", "."]);
     let first_commit = Command::new("git")
         .current_dir(&root)
         .args(["commit", "-m", "first"])
@@ -262,7 +269,8 @@ fn earliest_reachable_git_commit_extends_history_before_later_github_creation_da
     assert!(first_commit.success());
     git(&["branch", "-M", "main"]);
     std::fs::write(root.join("main.rs"), "fn main() { println!(\"later\"); }\n").expect("second source file");
-    git(&["add", "main.rs"]);
+    std::fs::write(root.join("docs/benchmark.json"), "{\n  \"result\": 2,\n  \"elapsed\": 3\n}\n").unwrap();
+    git(&["add", "."]);
     let second_commit = Command::new("git")
         .current_dir(&root)
         .args(["commit", "-m", "second"])
@@ -272,7 +280,7 @@ fn earliest_reachable_git_commit_extends_history_before_later_github_creation_da
         .expect("second commit");
     assert!(second_commit.success());
 
-    let (_, first_date) = earliest_commit(&root, "main")
+    let (first_sha, first_date) = earliest_commit(&root, "main")
         .expect("earliest commit lookup")
         .expect("non-empty repository");
     assert!(first_date.starts_with("2024-06-29"), "unexpected earliest commit date: {first_date}");
@@ -302,6 +310,51 @@ fn earliest_reachable_git_commit_extends_history_before_later_github_creation_da
     let branch = || String::from_utf8(Command::new("git").current_dir(&cached).args(["symbolic-ref", "--short", "HEAD"]).output().unwrap().stdout).unwrap();
     assert_eq!(branch().trim(), "main");
     assert_eq!(sync::backfill_one(&state, repo_id).unwrap().snapshots_created, 0, "repeat backfill reuses saved samples");
+    let latest_sha = current_commit_optional(&cached).unwrap().unwrap().0;
+    for (sha, date) in [
+        (&first_sha, "2024-06-29T16:00:00Z"),
+        (&first_sha, "2024-06-30T10:00:00Z"),
+        (&latest_sha, "2024-07-03T09:00:00Z"),
+    ] {
+        database.upsert_observation(&snapshot(repo_id, sha, date, 999)).unwrap();
+    }
+    let conn = Connection::open(&database_path).unwrap();
+    conn.execute("UPDATE code_snapshots SET total_loc=999,source_loc=979,test_loc=20,docs_loc=0", []).unwrap();
+    conn.execute("UPDATE code_snapshots SET snapshot_date='2024-08-15T14:00:00Z' WHERE commit_sha=?1", [&latest_sha]).unwrap();
+    database.set_metadata("loc_analysis_version", "3").unwrap();
+    database.init().unwrap();
+    assert_eq!(database.pending_loc_rebuild(repo_id).unwrap().len(), 5);
+    assert!(database.history(Some(repo_id)).unwrap().is_empty(), "old analysis must not remain visible during recovery");
+    assert_eq!(database.summaries().unwrap()[0].total_loc, 0);
+    Database::new(&database_path).init().unwrap();
+    assert_eq!(database.pending_loc_rebuild(repo_id).unwrap().len(), 5, "pending dates survive startup without duplication");
+    conn.execute_batch("CREATE TRIGGER fail_recovery BEFORE INSERT ON loc_observations WHEN NEW.observation_date='2024-07-03' BEGIN SELECT RAISE(ABORT,'forced recovery failure'); END;").unwrap();
+    let partial = sync::backfill_one(&state, repo_id).unwrap();
+    assert!(!partial.ok);
+    assert!(partial.errors.iter().any(|error| error.contains("forced recovery failure")));
+    assert_eq!(branch().trim(), "main", "partial rebuild must restore the default branch");
+    assert_eq!(database.pending_loc_rebuild(repo_id).unwrap().len(), 1);
+    assert!(!database.repository(repo_id).unwrap().unwrap().loc_backfill_complete);
+    assert!(database.history(Some(repo_id)).unwrap().iter().all(|point| point.total_loc == 2));
+    let cached_measurement = database.snapshot_for_commit(repo_id, &latest_sha).unwrap().unwrap();
+    assert_eq!((cached_measurement.source_loc, cached_measurement.test_loc, cached_measurement.docs_loc), (1, 1, 6));
+    assert_eq!(cached_measurement.snapshot_date, "2024-08-15T14:00:00Z");
+    Database::new(&database_path).init().unwrap();
+    assert_eq!(database.pending_loc_rebuild(repo_id).unwrap().len(), 1);
+    conn.execute_batch("DROP TRIGGER fail_recovery;").unwrap();
+    let resumed = sync::backfill_one(&state, repo_id).unwrap();
+    assert!(resumed.ok, "retry errors: {:?}", resumed.errors);
+    assert_eq!(resumed.snapshots_created, 0, "retry reuses rebuilt commit measurements");
+    assert!(database.pending_loc_rebuild(repo_id).unwrap().is_empty());
+    assert!(database.repository(repo_id).unwrap().unwrap().loc_backfill_complete);
+    let restored = database.history(Some(repo_id)).unwrap();
+    assert_eq!(restored.iter().map(|point| point.snapshot_date.as_str()).collect::<Vec<_>>(), vec!["2024-06-29", "2024-06-30", "2024-07-03", "2024-07-31", "2024-08-15"]);
+    assert_eq!(restored.iter().map(|point| point.docs_loc).collect::<Vec<_>>(), vec![5, 5, 6, 6, 6]);
+    assert_eq!(database.snapshot_for_commit(repo_id, &latest_sha).unwrap().unwrap().snapshot_date, "2024-07-31T23:59:59Z", "monthly dedup can move the SHA sample earlier while its original day remains preserved");
+    assert!(restored.iter().all(|point| point.source_loc == 1 && point.test_loc == 1 && point.total_loc == 2));
+    let daily = conn.query_row("SELECT observed_at FROM loc_observations WHERE repository_id=?1 AND observation_date='2024-06-30'", [repo_id], |row| row.get::<_, String>(0)).unwrap();
+    assert_eq!(daily, "2024-06-30T10:00:00Z", "real daily timestamp wins over preserved sample on the same day");
+    drop(conn);
     database.set_classification_config(repo_id, &ClassificationConfig::default()).unwrap();
     let conn = Connection::open(&database_path).unwrap();
     conn.execute_batch("CREATE TRIGGER fail_sample BEFORE INSERT ON code_snapshots BEGIN SELECT RAISE(ABORT,'forced sample failure'); END;").unwrap();
@@ -345,6 +398,21 @@ fn managed_clone_scopes_branches_and_handles_empty_remote_and_default_branch_cha
     let empty_cache = root.join("empty-cache");
     let cached = ensure_clone(&repo, &empty_cache).unwrap();
     assert!(current_commit_optional(&cached).unwrap().is_none());
+    let (database, database_path) = temp_database("empty-rebuild");
+    let repo_id = database.upsert_repository(&repo).unwrap();
+    database.upsert_snapshot(&snapshot(repo_id, "EMPTY_REPOSITORY", "2024-06-29T12:00:00Z", 999)).unwrap();
+    database.upsert_observation(&snapshot(repo_id, "EMPTY_REPOSITORY", "2024-06-30T12:00:00Z", 999)).unwrap();
+    database.set_metadata("loc_analysis_version", "3").unwrap();
+    database.init().unwrap();
+    let state = AppState { db_path: database_path.clone(), cache_dir: empty_cache.clone(), progress: Arc::new(Mutex::new(SyncProgress::default())), dashboard_cache: Arc::new(Mutex::new(Default::default())), job_lock: Arc::new(Mutex::new(())) };
+    assert!(sync::backfill_one(&state, repo_id).unwrap().ok);
+    assert!(database.pending_loc_rebuild(repo_id).unwrap().is_empty());
+    let history = database.history(Some(repo_id)).unwrap();
+    assert_eq!(history[0].snapshot_date, "2024-06-29");
+    assert_eq!(history[1].snapshot_date, "2024-06-30");
+    assert!(history.iter().all(|point| point.total_loc == 0 && point.source_loc == 0 && point.test_loc == 0 && point.docs_loc == 0));
+    assert!(database.repository(repo_id).unwrap().unwrap().loc_backfill_complete);
+    remove_database(database_path);
     let source = root.join("source");
     git(&root, &["init", "--initial-branch=main", source.to_str().unwrap()]);
     git(&source, &["config", "user.email", "fixture@example.test"]);
@@ -431,6 +499,7 @@ fn automatic_loc_cadence_runs_at_the_1440_minute_boundary_and_manual_sync_forces
 fn cadence_settings_have_expected_defaults_and_validate_supported_intervals() {
     let defaults = AppSettings::default();
     assert_eq!(defaults.theme_mode, ThemeMode::System);
+    assert_eq!(defaults.total_line_categories, vec![LocCategory::Source, LocCategory::Tests]);
     assert_eq!(defaults.activity_refresh_minutes, 1_440);
     assert_eq!(defaults.personal_refresh_minutes, 5);
     assert_eq!(defaults.update_check_interval, UpdateCheckInterval::Daily);
@@ -513,6 +582,7 @@ fn cadence_settings_have_expected_defaults_and_validate_supported_intervals() {
 fn cadence_settings_round_trip_through_persisted_app_metadata() {
     let (database, path) = temp_database("cadence-settings");
     let configured = AppSettings {
+        total_line_categories: vec![LocCategory::Docs, LocCategory::Source, LocCategory::Docs],
         theme_mode: ThemeMode::System,
         activity_refresh_minutes: 60,
         personal_refresh_minutes: 5,
@@ -539,6 +609,7 @@ fn cadence_settings_round_trip_through_persisted_app_metadata() {
 
     let reopened = Database::new(&path);
     let loaded = sync::app_settings(&reopened).expect("load cadence settings");
+    assert_eq!(loaded.total_line_categories, vec![LocCategory::Source, LocCategory::Docs]);
     assert_eq!(loaded.loc_chart_range, codetally_lib::models::LocChartRange::ThreeMonths);
     assert_eq!(loaded.activity_refresh_minutes, 60);
     assert_eq!(loaded.personal_refresh_minutes, 5);
@@ -559,6 +630,24 @@ fn cadence_settings_round_trip_through_persisted_app_metadata() {
             .as_deref(),
         Some("2026-09-08T12:00:00Z")
     );
+    let mut legacy = serde_json::to_value(&loaded).unwrap();
+    legacy.as_object_mut().unwrap().remove("total_line_categories");
+    database.set_metadata(sync::APP_SETTINGS_METADATA_KEY, &legacy.to_string()).unwrap();
+    assert_eq!(sync::app_settings(&database).unwrap().total_line_categories, vec![LocCategory::Source, LocCategory::Tests]);
+    legacy["total_line_categories"] = json!([]);
+    database.set_metadata(sync::APP_SETTINGS_METADATA_KEY, &legacy.to_string()).unwrap();
+    assert_eq!(sync::app_settings(&database).unwrap().total_line_categories, vec![LocCategory::Source, LocCategory::Tests]);
+    let stored: serde_json::Value = serde_json::from_str(&database.metadata(sync::APP_SETTINGS_METADATA_KEY).unwrap().unwrap()).unwrap();
+    assert_eq!(stored["total_line_categories"], json!(["source", "tests"]));
+    sync::save_app_settings(&database, &AppSettings { total_line_categories: Vec::new(), ..loaded.clone() }).unwrap();
+    assert_eq!(sync::app_settings(&database).unwrap().total_line_categories, vec![LocCategory::Source, LocCategory::Tests]);
+    legacy["total_line_categories"] = json!(["docs", "tests", "docs"]);
+    database.set_metadata(sync::APP_SETTINGS_METADATA_KEY, &legacy.to_string()).unwrap();
+    assert_eq!(sync::app_settings(&database).unwrap().total_line_categories, vec![LocCategory::Tests, LocCategory::Docs]);
+    let stored: serde_json::Value = serde_json::from_str(&database.metadata(sync::APP_SETTINGS_METADATA_KEY).unwrap().unwrap()).unwrap();
+    assert_eq!(stored["total_line_categories"], json!(["tests", "docs"]));
+    legacy["total_line_categories"] = json!(["unknown"]);
+    assert!(serde_json::from_value::<AppSettings>(legacy).is_err());
     remove_database(path);
 }
 
@@ -785,6 +874,7 @@ fn menu_bar_metric_titles_select_the_matching_dashboard_total() {
         total_loc: 12_345,
         source_loc: 8_765,
         test_loc: 3_580,
+        docs_loc: 0,
         open_prs: 23,
         open_issues: 41,
         ..DashboardTotals::default()
@@ -803,6 +893,7 @@ fn menu_bar_titles_are_split_so_each_native_item_can_use_an_aligned_icon() {
         total_loc: 12_345,
         source_loc: 8_765,
         test_loc: 3_580,
+        docs_loc: 0,
         open_prs: 23,
         open_issues: 41,
         ..DashboardTotals::default()
@@ -947,7 +1038,9 @@ fn tokei_reports_are_classified_into_source_and_tests_without_docs() {
             "code": 99,
             "reports": [
                 {"name": "src/lib.rs", "stats": {"code": 10}},
-                {"name": "tests/lib_test.rs", "stats": {"code": 4}}
+                {"name": "tests/lib_test.rs", "stats": {"code": 4}},
+                {"name": "tests/docs/lib_test.rs", "stats": {"code": 100}},
+                {"name": "doctor/lib.rs", "stats": {"code": 1}}
             ]
         },
         "TypeScript": {
@@ -972,13 +1065,14 @@ fn tokei_reports_are_classified_into_source_and_tests_without_docs() {
             "name": "README.md",
             "stats": {"code": 0, "blobs": {"Rust": {"code": 500, "blobs": {}}}}
         }]},
+        "JSON": {"reports": [{"name": "packages/docs/benchmark.json", "stats": {"code": 500}}]},
         "Total": {"code": 523}
     });
 
     assert!(is_tokei_report(&output));
     assert!(!is_tokei_report(&json!({"Rust": {"code": 99}})));
     assert!(is_tokei_report(&json!({})));
-    assert_eq!(classify_tokei_json(&output), (37, 30, 7));
+    assert_eq!(classify_tokei_json(&output), (38, 31, 7));
 
     let custom = ClassificationConfig {
         test_paths: vec!["fixtures/unit".to_string()],
@@ -1069,8 +1163,26 @@ fn worktree_scanner_counts_command_and_extensionless_shell_files_without_exclusi
         "#!/bin/sh\necho ignored-by-generic-ignore\n",
     )
     .expect("ignore script");
-    std::fs::write(root.join("README.md"), "Documentation line\n")
+    std::fs::write(root.join("README.md"), "Documentation line\n\n```rust\n// fenced comment\nfn example() {}\n```\n")
         .expect("documentation fixture");
+    for directory in ["packages/Docs/reports", "tests/doc", "docs/tests", "vendor/docs", "generated/docs", "DerivedData/docs"] {
+        std::fs::create_dir_all(root.join(directory)).expect("docs fixture directory");
+    }
+    for (file, contents) in [
+        ("packages/Docs/reports/benchmark.json", "{\n  \"benchmark\": true\n}\n"),
+        ("tests/doc/example.rs", "// doc comment\n\nfn example() {}\n"),
+        ("docs/tests/README.md", "Test guide\n\n```js\n// example\nrun();\n```\n"),
+        ("tests/notes.txt", "Test prose\n# documentation heading\n"),
+        ("docs/helper.command", "#!/bin/sh\n# example comment\necho docs\n"),
+        ("vendor/docs/ignored.md", "Excluded documentation\n"),
+        ("generated/docs/ignored.md", "Generated documentation\n"),
+        ("DerivedData/docs/ignored.md", "Xcode generated documentation\n"),
+        ("docs/ignored.md", "Ignored documentation\n"),
+    ] {
+        std::fs::write(root.join(file), contents).expect("docs fixture");
+    }
+    std::fs::write(root.join("docs/binary.bin"), [0_u8, 1, 2, 3]).expect("docs binary");
+    std::fs::write(root.join(".tokeignore"), "tokei_ignored.command\ndocs/ignored.md\n").expect("docs ignore");
     std::fs::write(root.join("binary.bin"), [0_u8, 1, 2, 3])
         .expect("binary fixture");
     std::fs::write(root.join(".github/workflows/build.yml"), "name: Build\non: push\n")
@@ -1111,12 +1223,14 @@ fn worktree_scanner_counts_command_and_extensionless_shell_files_without_exclusi
     git(&["add", "-f", "generic_ignored.command"]);
     git(&["commit", "-m", "shell fixtures"]);
 
-    let scan = scan_worktree_with_config(&root, None).expect("shell-aware worktree scan");
+    let config = ClassificationConfig { excluded_directories: vec!["generated".into()], ..ClassificationConfig::default() };
+    let scan = scan_worktree_with_config(&root, Some(&config)).expect("shell-aware worktree scan");
     // The multiline command file contains a `#` line inside a quoted string;
     // Tokei counts that as code, so the fallback must preserve parser parity.
     assert_eq!(scan.total_loc, 17, "comments and blank lines must not count");
     assert_eq!(scan.source_loc, 15, "hidden workflow, shell commands, helpers, and extensionless source files must count");
     assert_eq!(scan.test_loc, 2, "test-directory shell files must remain test LOC");
+    assert_eq!(scan.docs_loc, 20, "all nonblank docs lines count once, including fences and comments, before test classification");
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -1151,7 +1265,7 @@ fn sqlite_snapshot_upserts_and_lookup_drive_net_growth() {
         .upsert_snapshot(&snapshot(repo_id, "old-sha", &old_date, 100))
         .expect("first snapshot"));
     assert!(database
-        .upsert_snapshot(&snapshot(repo_id, "head-sha", &current_date, 150))
+        .upsert_snapshot(&Snapshot { docs_loc: 300, ..snapshot(repo_id, "head-sha", &current_date, 150) })
         .expect("current snapshot"));
     assert!(!database
         .upsert_snapshot(&snapshot(repo_id, "head-sha", &current_date, 999))
@@ -1164,10 +1278,13 @@ fn sqlite_snapshot_upserts_and_lookup_drive_net_growth() {
     let observation_date = (now - Duration::days(10)).to_rfc3339();
     let mut observation = snapshot(repo_id, "head-sha", &observation_date, 140);
     assert!(database.upsert_observation(&observation).expect("first daily observation"));
+    observation.docs_loc = 275;
     observation.total_loc = 145;
     observation.source_loc = 125;
     assert!(database.upsert_observation(&observation).expect("same-day observation update"));
     assert_eq!(database.latest_observation(repo_id).expect("latest observation").expect("observation").total_loc, 145);
+    assert_eq!(database.latest_observation(repo_id).unwrap().unwrap().docs_loc, 275);
+    assert_eq!(database.snapshot_for_commit(repo_id, "head-sha").unwrap().unwrap().docs_loc, 300);
     let before_current_snapshot = (now - Duration::days(5)).to_rfc3339();
     assert_eq!(database.measurement_at_or_before(repo_id, &before_current_snapshot).expect("measurement lookup").expect("measurement").total_loc, 145);
 
@@ -1181,6 +1298,7 @@ fn sqlite_snapshot_upserts_and_lookup_drive_net_growth() {
         .find(|item| item.id == repo_id)
         .expect("summary row");
     assert_eq!(summary.total_loc, 150);
+    assert_eq!(summary.docs_loc, 300);
     assert_eq!(summary.loc_change_30d, 50);
     assert!((summary.loc_change_30d_percent - 50.0).abs() < 0.01);
 
@@ -1188,7 +1306,7 @@ fn sqlite_snapshot_upserts_and_lookup_drive_net_growth() {
     // SHA. A newer daily observation must then become the current measurement,
     // while the older observation must not mask the newer snapshot above.
     let reset_date = now.to_rfc3339();
-    let reset = snapshot(repo_id, "old-sha", &reset_date, 145);
+    let reset = Snapshot { docs_loc: 400, ..snapshot(repo_id, "old-sha", &reset_date, 145) };
     assert!(database.upsert_observation(&reset).expect("reset observation"));
     let reset_summary = database
         .summaries()
@@ -1197,6 +1315,8 @@ fn sqlite_snapshot_upserts_and_lookup_drive_net_growth() {
         .find(|item| item.id == repo_id)
         .expect("summary row after reset");
     assert_eq!(reset_summary.total_loc, 145);
+    assert_eq!(reset_summary.docs_loc, 400);
+    assert_eq!(database.history(Some(repo_id)).unwrap().iter().map(|point| point.docs_loc).collect::<Vec<_>>(), vec![0, 275, 300, 400]);
     assert_eq!(reset_summary.loc_change_30d, 45);
     assert!((reset_summary.loc_change_30d_percent - 45.0).abs() < 0.01);
     remove_database(path);
@@ -2048,7 +2168,7 @@ fn sqlite_init_adds_social_counts_to_legacy_repositories_without_losing_history(
             );
             CREATE TABLE app_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             INSERT INTO app_metadata(key, value) VALUES
-                ('loc_analysis_version', '3'),
+                ('loc_analysis_version', '4'),
                 ('history_sampling_version', '1');
             "#,
         )
@@ -2103,6 +2223,7 @@ fn sqlite_init_adds_social_counts_to_legacy_repositories_without_losing_history(
     assert_eq!(snapshot.total_loc, 77);
     assert_eq!(snapshot.source_loc, 60);
     assert_eq!(snapshot.test_loc, 17);
+    assert_eq!(snapshot.docs_loc, 0);
     remove_database(path);
 }
 
@@ -2245,22 +2366,22 @@ fn fork_line_totals_and_history_follow_opt_in_setting_and_exclusions() {
     let current_date = (Utc::now() - Duration::days(1)).to_rfc3339();
     let baseline_date = (Utc::now() - Duration::days(31)).to_rfc3339();
     database
-        .upsert_snapshot(&snapshot_with_counts(active_id, "active-baseline", &baseline_date, 100, 70, 30))
+        .upsert_snapshot(&Snapshot { docs_loc: 10, ..snapshot_with_counts(active_id, "active-baseline", &baseline_date, 100, 70, 30) })
         .expect("active baseline");
     database
-        .upsert_snapshot(&snapshot_with_counts(active_id, "active-current", &current_date, 140, 100, 40))
+        .upsert_snapshot(&Snapshot { docs_loc: 20, ..snapshot_with_counts(active_id, "active-current", &current_date, 140, 100, 40) })
         .expect("active current");
     database
-        .upsert_snapshot(&snapshot_with_counts(included_fork_id, "included-baseline", &baseline_date, 500, 300, 200))
+        .upsert_snapshot(&Snapshot { docs_loc: 100, ..snapshot_with_counts(included_fork_id, "included-baseline", &baseline_date, 500, 300, 200) })
         .expect("included fork baseline");
     database
-        .upsert_snapshot(&snapshot_with_counts(included_fork_id, "included-current", &current_date, 900, 600, 300))
+        .upsert_snapshot(&Snapshot { docs_loc: 200, ..snapshot_with_counts(included_fork_id, "included-current", &current_date, 900, 600, 300) })
         .expect("included fork current");
     database
-        .upsert_snapshot(&snapshot_with_counts(excluded_fork_id, "excluded-baseline", &baseline_date, 700, 400, 300))
+        .upsert_snapshot(&Snapshot { docs_loc: 1000, ..snapshot_with_counts(excluded_fork_id, "excluded-baseline", &baseline_date, 700, 400, 300) })
         .expect("excluded fork baseline");
     database
-        .upsert_snapshot(&snapshot_with_counts(excluded_fork_id, "excluded-current", &current_date, 1_200, 800, 400))
+        .upsert_snapshot(&Snapshot { docs_loc: 2000, ..snapshot_with_counts(excluded_fork_id, "excluded-current", &current_date, 1_200, 800, 400) })
         .expect("excluded fork current");
 
     let default_summaries = database.summaries().expect("default summaries");
@@ -2269,6 +2390,8 @@ fn fork_line_totals_and_history_follow_opt_in_setting_and_exclusions() {
     assert_eq!(default_totals.total_loc, 140);
     assert_eq!(default_totals.source_loc, 100);
     assert_eq!(default_totals.test_loc, 40);
+    assert_eq!(default_totals.docs_loc, 20);
+    assert_eq!(database.history(None).unwrap().iter().map(|point| point.docs_loc).collect::<Vec<_>>(), vec![10, 20]);
     assert_eq!(default_totals.loc_change_30d, 40);
     assert_eq!(
         database
@@ -2299,6 +2422,8 @@ fn fork_line_totals_and_history_follow_opt_in_setting_and_exclusions() {
     assert_eq!(opted_in_totals.total_loc, 1_040);
     assert_eq!(opted_in_totals.source_loc, 700);
     assert_eq!(opted_in_totals.test_loc, 340);
+    assert_eq!(opted_in_totals.docs_loc, 220);
+    assert_eq!(database.history(None).unwrap().iter().map(|point| point.docs_loc).collect::<Vec<_>>(), vec![110, 220]);
     assert_eq!(opted_in_totals.loc_change_30d, 440);
     assert_eq!(
         database
@@ -2383,7 +2508,7 @@ fn sqlite_init_migrates_legacy_loc_analysis_without_losing_repository_data() {
     assert!(!migrated_repo.loc_backfill_complete);
     assert_eq!(database.pull_requests(Some(repo_id), None, 10).expect("PR survives").len(), 1);
     assert_eq!(database.issues(Some(repo_id), None, 10).expect("issue survives").len(), 1);
-    assert_eq!(database.metadata("loc_analysis_version").expect("version").as_deref(), Some("3"));
+    assert_eq!(database.metadata("loc_analysis_version").expect("version").as_deref(), Some("4"));
 
     database
         .upsert_snapshot(&snapshot(repo_id, "new-sha", "2026-09-08T12:00:00Z", 90))
@@ -2396,10 +2521,10 @@ fn sqlite_init_migrates_legacy_loc_analysis_without_losing_repository_data() {
 }
 
 #[test]
-fn sqlite_init_invalidates_cached_loc_counts_when_shell_parser_version_changes() {
-    let (database, path) = temp_database("shell-parser-version");
+fn sqlite_init_invalidates_cached_loc_counts_when_docs_analysis_version_changes() {
+    let (database, path) = temp_database("docs-parser-version");
     let repo_id = database
-        .upsert_repository(&repository("repo-shell-parser", "shell-parser"))
+        .upsert_repository(&repository("repo-docs-parser", "docs-parser"))
         .expect("repository");
     database.set_backfill_complete(repo_id, true).expect("backfill flag");
     database
@@ -2409,13 +2534,16 @@ fn sqlite_init_invalidates_cached_loc_counts_when_shell_parser_version_changes()
         .upsert_observation(&snapshot(repo_id, "cached-sha", "2026-09-08T12:00:00Z", 973))
         .expect("cached LOC observation");
 
-    // Version 2 is the pre-shell-fallback analysis. A later init must discard
-    // both derived LOC tables so the same SHA is rescanned with the corrected
-    // parser instead of reusing its incomplete count.
+    // The pre-docs schema needs additive columns on both derived tables, and
+    // the previous analysis version must be rescanned rather than reused.
+    let connection = Connection::open(&path).unwrap();
+    connection.execute_batch("ALTER TABLE code_snapshots DROP COLUMN docs_loc; ALTER TABLE loc_observations DROP COLUMN docs_loc;").unwrap();
+    drop(connection);
     database
-        .set_metadata("loc_analysis_version", "2")
-        .expect("pre-fallback analysis version");
-    database.init().expect("shell parser migration");
+        .set_metadata("loc_analysis_version", "3")
+        .expect("pre-docs analysis version");
+    database.init().expect("docs parser migration");
+    let rebuilt = Snapshot { docs_loc: 123, ..snapshot(repo_id, "rebuilt", "2026-09-09T12:00:00Z", 10) };
     assert!(database.latest_snapshot(repo_id).expect("snapshot lookup").is_none());
     assert!(database.latest_observation(repo_id).expect("observation lookup").is_none());
     assert!(!database
@@ -2428,8 +2556,13 @@ fn sqlite_init_invalidates_cached_loc_counts_when_shell_parser_version_changes()
             .metadata("loc_analysis_version")
             .expect("analysis version")
             .as_deref(),
-        Some("2")
+        Some("3")
     );
+    database.upsert_snapshot(&rebuilt).unwrap();
+    database.upsert_observation(&rebuilt).unwrap();
+    database.init().unwrap();
+    assert_eq!(database.latest_snapshot(repo_id).unwrap().unwrap().docs_loc, 123);
+    assert_eq!(database.latest_observation(repo_id).unwrap().unwrap().docs_loc, 123);
     remove_database(path);
 }
 
@@ -2511,7 +2644,7 @@ fn dashboard_cache_refreshes_after_commits_and_time_boundaries() {
     let boundary = "2026-04-01T12:00:00Z".parse::<DateTime<Utc>>().unwrap();
     for (days, total) in [(90, 10), (30, 20), (7, 30), (1, 100), (-1, 200)] {
         let date = (boundary - Duration::days(days)).format("%Y-%m-%dT%H:%M:%SZ").to_string();
-        database.upsert_snapshot(&Snapshot { repository_id: id, commit_sha: format!("sha-{days}"), commit_date: date.clone(), snapshot_date: date, total_loc: total, source_loc: total, ..Snapshot::default() }).unwrap();
+        database.upsert_snapshot(&Snapshot { repository_id: id, commit_sha: format!("sha-{days}"), commit_date: date.clone(), snapshot_date: date, total_loc: total, source_loc: total - 2, test_loc: 2, docs_loc: total * 2, ..Snapshot::default() }).unwrap();
     }
     let mut cache = DashboardCache::default();
     let before = database.dashboard_cached_at(&mut cache, boundary - Duration::seconds(1)).unwrap();
@@ -2537,6 +2670,32 @@ fn dashboard_cache_refreshes_after_commits_and_time_boundaries() {
     assert_eq!(committed.totals.open_prs, 1);
     database.mark_sync(id, None).unwrap();
     assert!(database.dashboard_cached_at(&mut cache, now).unwrap().last_sync_at.is_some());
+    database.set_backfill_complete(id, true).unwrap();
+    for (categories, total, growth, history) in [
+        (vec![LocCategory::Docs, LocCategory::Source, LocCategory::Tests], 300, 240, vec![30, 60, 90, 300, 600]),
+        (vec![LocCategory::Source, LocCategory::Docs], 298, 240, vec![28, 58, 88, 298, 598]),
+        (vec![LocCategory::Docs], 200, 160, vec![20, 40, 60, 200, 400]),
+        (vec![LocCategory::Tests], 2, 0, vec![2, 2, 2, 2, 2]),
+    ] {
+        sync::save_app_settings(&database, &AppSettings { total_line_categories: categories, ..AppSettings::default() }).unwrap();
+        let selected = database.dashboard_cached_at(&mut cache, now).unwrap();
+        assert_eq!(selected.totals.total_loc, total);
+        assert_eq!(selected.repositories[0].total_loc, total);
+        assert_eq!(selected.repositories[0].loc_change_30d, growth);
+        assert_eq!(selected.totals.loc_change_30d, growth);
+        assert_eq!(selected.repositories[0].loc_change_7d, if total == 2 { 0 } else if total == 200 { 140 } else { 210 });
+        assert_eq!(selected.repositories[0].loc_change_90d, if total == 2 { 0 } else if total == 200 { 180 } else { 270 });
+        let expected_percent = if total == 2 { 0.0 } else { growth as f64 / (total - growth) as f64 * 100.0 };
+        assert!((selected.repositories[0].loc_change_30d_percent - expected_percent).abs() < 0.001);
+        assert_eq!((selected.totals.source_loc, selected.totals.test_loc, selected.totals.docs_loc), (98, 2, 200));
+        assert_eq!(selected.history.iter().map(|point| point.total_loc).collect::<Vec<_>>(), history);
+        assert_eq!(database.history(Some(id)).unwrap().iter().map(|point| point.total_loc).collect::<Vec<_>>(), history);
+        assert_eq!(codetally_lib::native::metric_title(MenuBarMetric::TotalLines, &selected.totals), format!("{total} lines"));
+        let raw = database.snapshot_for_commit(id, "sha-1").unwrap().unwrap();
+        assert_eq!((raw.total_loc, raw.source_loc, raw.test_loc, raw.docs_loc), (100, 98, 2, 200));
+        assert!(database.repository(id).unwrap().unwrap().loc_backfill_complete);
+    }
+    sync::save_app_settings(&database, &AppSettings::default()).unwrap();
     let now = boundary + Duration::days(1) + Duration::seconds(1);
     let future = database.dashboard_cached_at(&mut cache, now).unwrap();
     assert_eq!(future.totals.total_loc, 200);

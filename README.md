@@ -16,7 +16,7 @@ Built with Tauri, React, TypeScript, Rust, and SQLite. Currently built and verif
 
 ## Features
 
-- Portfolio totals and source/test line history.
+- Portfolio code totals and source/test/docs line history, with saved chart visibility controls.
 - Sortable repositories with language, visibility, activity, and recent growth.
 - Repository detail pages and filterable pull-request and issue feeds.
 - A local Kanban board with notes, priorities, and ticket placement.

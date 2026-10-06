@@ -31,6 +31,7 @@ const repoAlpha: Repository = {
   total_loc: 10_000,
   source_loc: 8_000,
   test_loc: 2_000,
+  docs_loc: 450,
   loc_30d_change: 1_200,
   open_prs: 2,
   open_issues: 3,
@@ -172,6 +173,7 @@ const mixedDashboard: DashboardData = {
 const readyDependencies: DependencyStatus = { gh: true, git: true, tokei: true, gh_authenticated: true, authenticated: true, login: 'sam' }
 const syncOk: SyncResult = { ok: true, message: 'Sync complete', repositories_synced: 2, pull_requests_synced: 2, issues_synced: 2, snapshots_created: 0, errors: [] }
 const defaultAppSettings: AppSettings = {
+  total_line_categories: ['source', 'tests'],
   personal_refresh_minutes: 5,
   kanban_enabled: false,
   activity_refresh_minutes: 1440,
@@ -942,29 +944,40 @@ describe('dashboard UI', () => {
     }
   })
 
-  it('switches the chart metric and time range controls', async () => {
+  it('persists visible chart categories, keeps one visible, and switches time ranges', async () => {
     const user = await renderDashboard()
-    const metricTabs = within(screen.getByRole('tablist', { name: 'Lines metric' }))
+    const categories = () => within(screen.getByRole('group', { name: 'Visible line categories' }))
 
     expect(screen.getByRole('heading', { name: 'Total Lines' })).toBeInTheDocument()
-    expect(metricTabs.getByRole('button', { name: 'Total' })).toHaveClass('active')
-
-    await user.click(metricTabs.getByRole('button', { name: 'Source' }))
-    expect(screen.getByRole('heading', { name: 'Source Lines' })).toBeInTheDocument()
-    expect(metricTabs.getByRole('button', { name: 'Source' })).toHaveClass('active')
-
-    await user.click(metricTabs.getByRole('button', { name: 'Tests' }))
+    expect(categories().getByRole('button', { name: 'Source' })).toHaveAttribute('aria-pressed', 'true')
+    expect(categories().getByRole('button', { name: 'Docs' })).toHaveAttribute('aria-pressed', 'false')
+    await user.click(categories().getByRole('button', { name: 'Source' }))
     expect(screen.getByRole('heading', { name: 'Test Lines' })).toBeInTheDocument()
-    expect(metricTabs.getByRole('button', { name: 'Tests' })).toHaveClass('active')
+    expect(categories().getByRole('button', { name: 'Tests' })).toBeDisabled()
+    await user.click(categories().getByRole('button', { name: 'Tests' }))
+    expect(screen.getByRole('heading', { name: 'Test Lines' })).toBeInTheDocument()
+    await user.click(categories().getByRole('button', { name: 'Docs' }))
+    expect(screen.getByRole('heading', { name: 'Selected Total Lines' })).toBeInTheDocument()
+    await user.click(categories().getByRole('button', { name: 'Tests' }))
+    expect(screen.getByRole('heading', { name: 'Docs Lines' })).toBeInTheDocument()
+    expect(categories().getByRole('button', { name: 'Docs' })).toBeDisabled()
 
     await user.click(screen.getByRole('button', { name: '3M' }))
     expect(screen.getByRole('button', { name: '3M' })).toHaveClass('active')
-    expect(screen.getByRole('button', { name: 'ALL' })).not.toHaveClass('active')
     await waitFor(() => expect(savedSettings()[savedSettings().length - 1]).toEqual(expect.objectContaining({ loc_chart_range: '3M' })))
-
     await user.click(screen.getByRole('button', { name: '30D' }))
     expect(screen.getByRole('button', { name: '30D' })).toHaveClass('active')
     await waitFor(() => expect(savedSettings()[savedSettings().length - 1]).toEqual(expect.objectContaining({ loc_chart_range: '30D' })))
+
+    cleanup()
+    render(<App />)
+    expect(await screen.findByRole('heading', { name: 'Docs Lines' })).toBeInTheDocument()
+    expect(categories().getByRole('button', { name: 'Source' })).toHaveAttribute('aria-pressed', 'false')
+    await user.click(screen.getByRole('row', { name: /alpha/ }))
+    await screen.findByRole('heading', { name: 'alpha' })
+    expect(categories().getByRole('button', { name: 'Docs' })).toHaveAttribute('aria-pressed', 'true')
+    const docsStat = within(screen.getByRole('main')).getAllByText('Docs Lines', { exact: true }).find((entry) => entry.closest('.detail-stat'))
+    expect(docsStat?.closest('.detail-stat')).toHaveTextContent('450')
   })
 
   it('uses Lines labels and sorts repositories by source and test lines', async () => {
@@ -1785,6 +1798,65 @@ describe('dashboard UI', () => {
     await user.click(screen.getByRole('button', { name: 'Retry' }))
     await waitFor(() => expect(control).toBeEnabled())
     expect(control).not.toBeChecked()
+  })
+
+  it('saves Total Lines categories, updates totals in place, and keeps chart visibility separate', async () => {
+    let saved = { ...defaultAppSettings }
+    configureBackend({ setAppSettings: (next) => { saved = normalizeAppSettings({ ...saved, ...next }); return saved } })
+    const backend = invokeMock.getMockImplementation()!
+    invokeMock.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'get_app_settings') return saved
+      if (command === 'get_dashboard') {
+        const key = saved.total_line_categories.join(',')
+        const totals: Record<string, [number, number, number]> = {
+          'source,tests': [16000, 10000, 800],
+          'source,tests,docs': [16450, 10450, 1000],
+          'tests,docs': [3450, 2450, 400],
+          docs: [450, 450, 200]
+        }
+        const [total, alphaTotal, change] = totals[key]
+        return { ...dashboard, totals: { ...dashboard.totals!, total_loc: total, docs_loc: 450, loc_change_30d: change }, repositories: [{ ...repoAlpha, total_loc: alphaTotal }, { ...repoBeta, total_loc: total - alphaTotal }] }
+      }
+      return backend(command, args)
+    })
+    const user = await renderDashboard()
+    await user.click(screen.getByRole('row', { name: /alpha/ }))
+    await screen.findByRole('heading', { name: 'alpha' })
+    const totalStat = () => within(screen.getByRole('main')).getAllByText('Total Lines', { exact: true }).find((entry) => entry.closest('.detail-stat'))?.closest('.detail-stat')
+    expect(totalStat()).toHaveTextContent('10,000')
+    await user.click(screen.getByRole('button', { name: 'Settings' }))
+    const categories = () => within(screen.getByRole('group', { name: 'Categories included in Total Lines' }))
+    expect(categories().getByRole('button', { name: 'Source' })).toHaveAttribute('aria-pressed', 'true')
+    expect(categories().getByRole('button', { name: 'Tests' })).toHaveAttribute('aria-pressed', 'true')
+    expect(categories().getByRole('button', { name: 'Docs' })).toHaveAttribute('aria-pressed', 'false')
+    const totalPreview = () => within(screen.getByRole('region', { name: 'Total Lines preview' }))
+    expect(totalPreview().getByText('16,000')).toBeInTheDocument()
+    expect(totalPreview().getByText('13,000 Source + 3,000 Tests')).toBeInTheDocument()
+    await user.click(categories().getByRole('button', { name: 'Docs' }))
+    expect(totalPreview().getByText('16,450')).toBeInTheDocument()
+    expect(totalPreview().getByText('13,000 Source + 3,000 Tests + 450 Docs')).toBeInTheDocument()
+    await waitFor(() => expect(totalStat()).toHaveTextContent('10,450'))
+    expect(screen.getByRole('heading', { name: 'alpha' })).toBeInTheDocument()
+    expect(within(screen.getByRole('group', { name: 'Visible line categories' })).getByRole('button', { name: 'Docs' })).toHaveAttribute('aria-pressed', 'false')
+    await user.click(categories().getByRole('button', { name: 'Source' }))
+    await waitFor(() => expect(totalStat()).toHaveTextContent('2,450'))
+    await user.click(categories().getByRole('button', { name: 'Tests' }))
+    await waitFor(() => expect(totalStat()).toHaveTextContent('450'))
+    expect(categories().getByRole('button', { name: 'Docs' })).toBeDisabled()
+    await user.click(categories().getByRole('button', { name: 'Docs' }))
+    expect(categories().getByRole('button', { name: 'Docs' })).toHaveAttribute('aria-pressed', 'true')
+    expect(totalPreview().getByText('450', { exact: true })).toBeInTheDocument()
+    expect(totalPreview().getByText('450 Docs')).toBeInTheDocument()
+    expect(saved.total_line_categories).toEqual(['docs'])
+
+    cleanup()
+    render(<App />)
+    await screen.findByRole('heading', { name: 'Code at a glance' })
+    expect(screen.getByText('Includes Docs', { exact: true })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Settings' }))
+    expect(categories().getByRole('button', { name: 'Source' })).toHaveAttribute('aria-pressed', 'false')
+    expect(categories().getByRole('button', { name: 'Tests' })).toHaveAttribute('aria-pressed', 'false')
+    expect(categories().getByRole('button', { name: 'Docs' })).toHaveAttribute('aria-pressed', 'true')
   })
 
   it('persists the fork inclusion setting through off, on, and off states', async () => {

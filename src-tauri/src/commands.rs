@@ -259,6 +259,7 @@ pub fn get_repository_selection(state: State<'_, AppState>) -> Result<Vec<crate:
 #[tauri::command(rename_all = "snake_case")]
 pub fn set_app_settings(app: tauri::AppHandle, state: State<'_, AppState>, mut settings: AppSettings) -> Result<AppSettings, String> {
     settings.normalize_menu_bar_metrics();
+    settings.normalize_total_line_categories();
     sync::save_app_settings(&state.database(), &settings).map_err(|error| error.to_string())?;
     crate::native::apply_activation_policy(&app, &settings).map_err(|error| error.to_string())?;
     crate::native::refresh_menu(&app, &state);

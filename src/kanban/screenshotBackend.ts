@@ -1,14 +1,14 @@
 // Browser-only screenshot fixture. Native screenshot builds use the isolated
 // SQLite fixture through real Tauri commands instead.
 import type { AppSettings, KanbanItem, KanbanPreferences, SyncProgress } from '../types'
-import { DEFAULT_APP_SETTINGS } from '../settings'
+import { DEFAULT_APP_SETTINGS, normalizeAppSettings } from '../settings'
 
 const now = new Date('2026-10-04T12:00:00Z').toISOString()
 const fixtureLogin = 'sample-maintainer'
 const repositories = [
-  { id: 1, github_id: 'fixture-planner', owner: 'example-team', name: 'planner', name_with_owner: 'example-team/planner', url: 'https://github.com/example-team/planner', primary_language: 'TypeScript', is_archived: false, is_fork: false, loc_available: true, total_loc: 18420, source_loc: 14800, test_loc: 3620, open_prs: 1, open_issues: 1 },
-  { id: 2, github_id: 'fixture-mobile', owner: 'example-team', name: 'mobile', name_with_owner: 'example-team/mobile', url: 'https://github.com/example-team/mobile', primary_language: 'TypeScript', is_archived: false, is_fork: false, loc_available: true, total_loc: 24110, source_loc: 19740, test_loc: 4370, open_prs: 1, open_issues: 0 },
-  { id: 3, github_id: 'fixture-api', owner: 'example-labs', name: 'api', name_with_owner: 'example-labs/api', url: 'https://github.com/example-labs/api', primary_language: 'Rust', is_archived: false, is_fork: false, loc_available: true, total_loc: 11970, source_loc: 9150, test_loc: 2820, open_prs: 1, open_issues: 1 }
+  { id: 1, github_id: 'fixture-planner', owner: 'example-team', name: 'planner', name_with_owner: 'example-team/planner', url: 'https://github.com/example-team/planner', primary_language: 'TypeScript', is_archived: false, is_fork: false, loc_available: true, total_loc: 18420, source_loc: 14800, test_loc: 3620, docs_loc: 2500, open_prs: 1, open_issues: 1 },
+  { id: 2, github_id: 'fixture-mobile', owner: 'example-team', name: 'mobile', name_with_owner: 'example-team/mobile', url: 'https://github.com/example-team/mobile', primary_language: 'TypeScript', is_archived: false, is_fork: false, loc_available: true, total_loc: 24110, source_loc: 19740, test_loc: 4370, docs_loc: 900, open_prs: 1, open_issues: 0 },
+  { id: 3, github_id: 'fixture-api', owner: 'example-labs', name: 'api', name_with_owner: 'example-labs/api', url: 'https://github.com/example-labs/api', primary_language: 'Rust', is_archived: false, is_fork: false, loc_available: true, total_loc: 11970, source_loc: 9150, test_loc: 2820, docs_loc: 1400, open_prs: 1, open_issues: 1 }
 ]
 const history = repositories.flatMap((repo) => Array.from({ length: 13 }, (_, index) => {
   const date = new Date(now)
@@ -16,7 +16,7 @@ const history = repositories.flatMap((repo) => Array.from({ length: 13 }, (_, in
   const factor = 0.4 + index * 0.05
   const source = Math.round(repo.source_loc * factor)
   const tests = Math.round(repo.test_loc * factor)
-  return { repository_id: repo.id, snapshot_date: date.toISOString().slice(0, 10), source_loc: source, test_loc: tests, total_loc: source + tests }
+  return { repository_id: repo.id, snapshot_date: date.toISOString().slice(0, 10), source_loc: source, test_loc: tests, docs_loc: Math.round(repo.docs_loc * factor), total_loc: source + tests }
 }))
 const item = (kind: 'pr' | 'issue', repository_id: number, number: number, title: string, state: string, extras: Partial<KanbanItem> = {}): KanbanItem => {
   const repo = repositories[repository_id - 1]
@@ -36,15 +36,31 @@ let settings: AppSettings = { ...DEFAULT_APP_SETTINGS, kanban_enabled: true, run
 let preferences: KanbanPreferences = { kind: 'both', repository_scope: 'all', relationship: 'everyone', search: '', show_completed: false }
 let progress: SyncProgress = { running: false, phase: 'idle', current: 0, total: 0, message: 'Ready' }
 
+function selectedTotal(counts: { source_loc: number; test_loc: number; docs_loc: number }): number {
+  return settings.total_line_categories.reduce((sum, category) => sum + counts[category === 'source' ? 'source_loc' : category === 'tests' ? 'test_loc' : 'docs_loc'], 0)
+}
+
+function projectedHistory() {
+  return history.map((point) => ({ ...point, total_loc: selectedTotal(point) }))
+}
+
+function projectedRepositories() {
+  const cutoff = new Date(now).getTime() - 30 * 86_400_000
+  return repositories.map((repo) => {
+    const baseline = history.filter((point) => point.repository_id === repo.id && new Date(point.snapshot_date).getTime() <= cutoff).at(-1)
+    return { ...repo, total_loc: selectedTotal(repo), loc_change_30d: baseline ? selectedTotal(repo) - selectedTotal(baseline) : 0 }
+  })
+}
+
 export async function screenshotCall(command: string, args: Record<string, unknown> = {}): Promise<unknown> {
   switch (command) {
     case 'check_dependencies': return { gh: true, git: true, tokei: true, gh_authenticated: true, login: fixtureLogin }
     case 'get_github_user': return { login: fixtureLogin }
     case 'get_app_settings': return settings
-    case 'set_app_settings': settings = args.settings as AppSettings; return settings
-    case 'get_dashboard': return { user: { login: fixtureLogin }, repositories, totals: { repositories: 3, total_loc: 54500, source_loc: 43690, test_loc: 10810, loc_change_30d: 720, open_prs: 3, open_issues: 2 }, history, last_sync_at: now, last_lines_refresh_at: now, last_full_refresh_at: now, last_activity_refresh_at: now, last_personal_refresh_at: now, errors: [] }
+    case 'set_app_settings': settings = normalizeAppSettings(args.settings as AppSettings); return settings
+    case 'get_dashboard': return { user: { login: fixtureLogin }, repositories: projectedRepositories(), totals: { repositories: 3, total_loc: selectedTotal({source_loc:43690,test_loc:10810,docs_loc:4800}), source_loc: 43690, test_loc: 10810, docs_loc: 4800, loc_change_30d: projectedRepositories().reduce((sum, repo) => sum + repo.loc_change_30d, 0), open_prs: 3, open_issues: 2 }, history: projectedHistory(), last_sync_at: now, last_lines_refresh_at: now, last_full_refresh_at: now, last_activity_refresh_at: now, last_personal_refresh_at: now, errors: [] }
     case 'get_activity_refresh_at': return now
-    case 'get_loc_history': return args.repository_id ? history.filter((point) => point.repository_id === Number(args.repository_id)) : history
+    case 'get_loc_history': return args.repository_id ? projectedHistory().filter((point) => point.repository_id === Number(args.repository_id)) : projectedHistory()
     case 'get_repository_selection': return repositories.map((repo) => ({ github_id: repo.github_id, name_with_owner: repo.name_with_owner, owner: repo.owner, group: 'company' }))
     case 'get_activity_feed': {
       const kind = args.kind === 'issues' ? 'issue' : 'pr'

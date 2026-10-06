@@ -1,8 +1,8 @@
 import { createPortal } from 'react-dom'
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react'
-import { AlertCircle, ArrowRight, Check, ChevronDown, ChevronUp, Coffee, ExternalLink, Github, Globe2, HardDrive, LoaderCircle, ChartNoAxesColumnIncreasing, CodeXml, FlaskConical, GitPullRequest, CircleDot, Sun, Moon, Monitor, X } from 'lucide-react'
+import { AlertCircle, ArrowRight, Check, ChevronDown, ChevronUp, Coffee, ExternalLink, Github, Globe2, HardDrive, LoaderCircle, ChartNoAxesColumnIncreasing, CodeXml, FlaskConical, FileText, GitPullRequest, CircleDot, Sun, Moon, Monitor, X } from 'lucide-react'
 import { checkForUpdates, getOpenAtLogin, setOpenAtLogin, getAppInfo, getDatabaseLocation, getRepositorySelection, installAppUpdate, openExternalUrl, revealDatabase, type AppInfo, type AppUpdate } from './api'
-import type { AppSettings, MenuBarMetric, RepositorySelection, ThemeMode, UpdateCheckInterval } from './types'
+import type { AppSettings, LocSeries, MenuBarMetric, RepositorySelection, ThemeMode, UpdateCheckInterval } from './types'
 import type { NormalizedMetrics } from './utils'
 import { CombinedMenuPreview, type CombinedMenuPreviewData } from './CombinedMenuPreview'
 import './CombinedMenuPreview.css'
@@ -31,6 +31,11 @@ const UPDATE_CHECK_OPTIONS: { key: UpdateCheckInterval; label: string }[] = [
   { key: 'never', label: 'Never' }
 ]
 const METRIC_ICONS = { total_lines: ChartNoAxesColumnIncreasing, source_lines: CodeXml, test_lines: FlaskConical, open_prs: GitPullRequest, open_issues: CircleDot }
+const TOTAL_CATEGORIES = [
+  { key: 'source', label: 'Source', field: 'source_loc', icon: CodeXml },
+  { key: 'tests', label: 'Tests', field: 'test_loc', icon: FlaskConical },
+  { key: 'docs', label: 'Docs', field: 'docs_loc', icon: FileText }
+] as const
 const WEBSITE_URL = 'https://www.samfaid.com/'
 const BUY_ME_A_COFFEE_URL = 'https://www.buymeacoffee.com/samfaid'
 
@@ -332,6 +337,8 @@ export default function SettingsDrawer({ login, settings, loaded, metrics, menuP
   const compactMetrics = settings.menu_bar_compact_metrics ?? []
   const exploratoryMetric = hoverMetric ?? focusMetric
   const previewMetrics = METRICS.filter((option) => selectedMetrics.includes(option.key) || option.key === exploratoryMetric)
+  const totalCategories = TOTAL_CATEGORIES.filter((category) => settings.total_line_categories.includes(category.key))
+  const previewTotal = totalCategories.reduce((total, category) => total + metrics[category.field], 0)
   const toggleMetric = (metric: MenuBarMetric) => {
     if (selectedMetrics.length === 1 && selectedMetrics.includes(metric)) return
     if (selectedMetrics.includes(metric)) {
@@ -348,6 +355,14 @@ export default function SettingsDrawer({ login, settings, loaded, metrics, menuP
     return { ...current, menu_bar_metrics: next, menu_bar_metric: next[0] }
     })
   }
+  const toggleTotalCategory = (category: LocSeries) => onChange((current) => {
+    const selected = new Set(current.total_line_categories)
+    if (selected.has(category)) {
+      if (selected.size === 1) return current
+      selected.delete(category)
+    } else selected.add(category)
+    return { ...current, total_line_categories: (['source', 'tests', 'docs'] as LocSeries[]).filter((key) => selected.has(key)) }
+  })
   const toggleCompactMetric = (metric: MenuBarMetric) => onChange((current) => {
     const compact = new Set(current.menu_bar_compact_metrics ?? [])
     if (compact.has(metric)) compact.delete(metric)
@@ -371,9 +386,22 @@ export default function SettingsDrawer({ login, settings, loaded, metrics, menuP
       <div className="settings-row settings-menu-visibility"><div className="settings-row-label">Show in menu bar<Help label="Show in menu bar">Show your selected metrics in the macOS menu bar. If you hide them, open CodeTally from Applications or the Dock.</Help></div><input className="mac-switch" role="switch" type="checkbox" aria-label="Show CodeTally in the menu bar" checked={settings.show_menu_bar} onChange={(event) => { const checked = event.target.checked; onChange((current) => ({ ...current, show_menu_bar: checked })) }} /></div>
       <div className="settings-row"><div className="settings-row-label">Combined menu bar item<Help label="Combined menu bar item">Use one CodeTally icon. Open it for all dashboard metrics and the lines-of-code trend. Turn this off to show your selected metrics as separate items.</Help></div><input className="mac-switch" role="switch" type="checkbox" aria-label="Combined menu bar item" checked={settings.menu_bar_combined} onChange={(event) => { const checked = event.target.checked; onChange((current) => ({ ...current, menu_bar_combined: checked })) }} /></div>
       {settings.menu_bar_combined ? <CombinedMenuPreview metrics={metrics} range={settings.loc_chart_range} data={menuPreview} /> : <>
-      <div className="settings-menu-preview"><div className="settings-menu-preview-strip" tabIndex={0} aria-label="Scroll menu bar preview horizontally"><span className="settings-preview-value" aria-label="Menu bar preview">{previewMetrics.map((option) => { const Icon = METRIC_ICONS[option.key]; const fullTitle = menuBarTitle(option.key, metrics); const compact = compactMetrics.includes(option.key); return <span className={`settings-preview-metric${selectedMetrics.includes(option.key) ? '' : ' is-exploratory'}`} key={option.key} aria-label={compact ? `${fullTitle}, compact` : fullTitle} title={fullTitle}><Icon size={13} aria-hidden="true" /><span>{menuBarTitle(option.key, metrics, compact)}</span></span> })}</span></div><span className="settings-preview-caption">{exploratoryMetric && !selectedMetrics.includes(exploratoryMetric) ? 'Preview · select to add' : 'Your menu bar'}</span></div>
+      <div className="settings-menu-preview"><div className="settings-menu-preview-strip"><span className="settings-preview-value" aria-label="Menu bar preview">{previewMetrics.map((option) => { const Icon = METRIC_ICONS[option.key]; const fullTitle = menuBarTitle(option.key, metrics); const compact = compactMetrics.includes(option.key); return <span className={`settings-preview-metric${selectedMetrics.includes(option.key) ? '' : ' is-exploratory'}`} key={option.key} aria-label={compact ? `${fullTitle}, compact` : fullTitle} title={fullTitle}><Icon size={13} aria-hidden="true" /><span>{menuBarTitle(option.key, metrics, compact)}</span></span> })}</span></div><span className="settings-preview-caption">{exploratoryMetric && !selectedMetrics.includes(exploratoryMetric) ? 'Preview · select to add' : 'Your menu bar'}</span></div>
       <div className="settings-metric-options" role="group" aria-label="Menu bar metrics">{METRICS.map((option) => { const selected = selectedMetrics.includes(option.key); const Icon = METRIC_ICONS[option.key]; return <div key={option.key} className="settings-metric-choice" onMouseEnter={() => setHoverMetric(option.key)} onMouseLeave={() => setHoverMetric(null)} onFocusCapture={() => setFocusMetric(option.key)} onBlurCapture={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocusMetric(null) }}><label className="settings-metric-compact-control"><span>Compact</span><input className="mac-switch" role="switch" type="checkbox" aria-label={`Compact ${option.label} in menu bar`} checked={compactMetrics.includes(option.key)} onChange={() => toggleCompactMetric(option.key)} /></label><label className={`settings-metric-option${selected ? ' selected' : ''}`}><input type="checkbox" aria-label={option.label} checked={selected} aria-disabled={selected && selectedMetrics.length === 1} onChange={() => toggleMetric(option.key)} /><Icon className="settings-metric-icon" size={18} aria-hidden="true" /><span className="settings-metric-copy"><strong>{option.label}</strong><small>{menuBarTitle(option.key, metrics)}</small></span><span className="settings-metric-indicator" aria-hidden="true">{selected && <Check size={12} />}</span></label></div> })}</div>
       <p className="settings-metric-hint">Choose the metrics you want to see. Keep at least one selected.</p></>}
+    </section>
+    <section className="settings-section" id="settings-total-lines"><SectionHeading title="Total Lines" help="Choose which line categories count toward Total Lines and growth figures in the dashboard, repository list, and menu bar. Saved history uses the same selection." />
+      <div className="settings-total-options" role="group" aria-label="Categories included in Total Lines">{TOTAL_CATEGORIES.map((category) => {
+        const selected = settings.total_line_categories.includes(category.key)
+        const lastSelected = selected && settings.total_line_categories.length === 1
+        const Icon = category.icon
+        return <button type="button" className="settings-total-option" key={category.key} aria-pressed={selected} disabled={lastSelected} title={lastSelected ? 'Keep at least one category selected' : undefined} onClick={() => toggleTotalCategory(category.key)}><Icon size={16} aria-hidden="true" /><span>{category.label}</span><span className="settings-total-indicator" aria-hidden="true">{selected && <Check size={12} />}</span></button>
+      })}</div>
+      <div className="settings-total-preview" role="region" aria-label="Total Lines preview">
+        <span className="settings-preview-caption">Total Lines preview</span>
+        <output aria-live="polite"><strong>{previewTotal.toLocaleString('en-US')}</strong><span>lines</span><small>{totalCategories.map((category) => `${metrics[category.field].toLocaleString('en-US')} ${category.label}`).join(' + ')}</small></output>
+      </div>
+      <p className="settings-metric-hint">Source and Tests are included by default; Docs is optional. Keep at least one selected. Chart visibility is a separate preference.</p>
     </section>
     <section className="settings-section"><SectionHeading title="Kanban" help="Combine pull requests and issues from your tracked repositories on one board. Manual columns, priorities, and notes stay on this Mac and do not update GitHub." />
       <div className="settings-row"><label htmlFor="kanban-enabled">Enable Kanban board</label><input id="kanban-enabled" className="mac-switch" role="switch" type="checkbox" checked={settings.kanban_enabled} onChange={(event) => { const checked = event.target.checked; onChange((current) => ({ ...current, kanban_enabled: checked })) }} /></div>

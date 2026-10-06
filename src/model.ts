@@ -1,5 +1,5 @@
 import type { Issue, LocSnapshot, PullRequest, Repository, TimeRange } from './types'
-import { activityRepo, inTimeRange, issueUpdated, prUpdated, repoActivity, repoChange, repoForks, repoOpenIssues, repoOpenPrs, repoName, repoSource, repoStars, repoTests, repoTotal, snapshotDate, snapshotSource, snapshotTests, snapshotTotal } from './utils'
+import { activityRepo, inTimeRange, issueUpdated, prUpdated, repoActivity, repoChange, repoForks, repoOpenIssues, repoOpenPrs, repoName, repoSource, repoDocs, repoStars, repoTests, repoTotal, snapshotDate, snapshotSource, snapshotDocs, snapshotTests, snapshotTotal } from './utils'
 
 export type FeedState = 'all' | 'open' | 'merged' | 'closed'
 
@@ -25,13 +25,14 @@ export function filterIssues(items: Issue[], state: FeedState, repository = 'all
     .sort((a, b) => new Date(issueUpdated(b)).getTime() - new Date(issueUpdated(a)).getTime())
 }
 
-export function sortRepositories(items: Repository[], sort: 'name' | 'loc' | 'source' | 'tests' | 'growth' | 'prs' | 'issues' | 'stars' | 'forks' | 'activity', direction: 'asc' | 'desc' = 'desc'): Repository[] {
+export function sortRepositories(items: Repository[], sort: 'name' | 'loc' | 'source' | 'tests' | 'docs' | 'growth' | 'prs' | 'issues' | 'stars' | 'forks' | 'activity', direction: 'asc' | 'desc' = 'desc'): Repository[] {
   return [...items].sort((a, b) => {
     let result: number
     if (sort === 'name') result = repoName(a).localeCompare(repoName(b))
     else if (sort === 'loc') result = repoTotal(a) - repoTotal(b)
     else if (sort === 'source') result = repoSource(a) - repoSource(b)
     else if (sort === 'tests') result = repoTests(a) - repoTests(b)
+    else if (sort === 'docs') result = repoDocs(a) - repoDocs(b)
     else if (sort === 'growth') result = repoChange(a) - repoChange(b)
     else if (sort === 'prs') result = repoOpenPrs(a) - repoOpenPrs(b)
     else if (sort === 'issues') result = repoOpenIssues(a) - repoOpenIssues(b)
@@ -48,6 +49,7 @@ export interface ChartPoint {
   total: number
   source: number
   tests: number
+  docs: number
 }
 
 export function aggregateHistory(snapshots: LocSnapshot[], repositoryId?: number | string | null, range: TimeRange = 'ALL'): ChartPoint[] {
@@ -58,10 +60,11 @@ export function aggregateHistory(snapshots: LocSnapshot[], repositoryId?: number
     .forEach((snapshot) => {
       const date = snapshotDate(snapshot)
       if (!date) return
-      const row = rows.get(date) ?? { date, timestamp: new Date(date).getTime(), total: 0, source: 0, tests: 0 }
+      const row = rows.get(date) ?? { date, timestamp: new Date(date).getTime(), total: 0, source: 0, tests: 0, docs: 0 }
       row.total += snapshotTotal(snapshot)
       row.source += snapshotSource(snapshot)
       row.tests += snapshotTests(snapshot)
+      row.docs += snapshotDocs(snapshot)
       rows.set(date, row)
     })
   return [...rows.values()].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())

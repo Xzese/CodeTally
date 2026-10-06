@@ -1,6 +1,7 @@
 export type FeedKind = 'prs' | 'issues'
 export type ActivityRelationship = 'everyone' | 'author' | 'assignee' | 'author_or_assignee'
-export type LocMetric = 'total' | 'source' | 'tests'
+export type LocMetric = 'total' | 'source' | 'tests' | 'docs'
+export type LocSeries = 'source' | 'tests' | 'docs'
 export type TimeRange = '30D' | '3M' | '1Y' | '3Y' | 'ALL'
 
 export interface DependencyStatus {
@@ -58,6 +59,8 @@ export interface Repository {
   sourceLoc?: number
   test_loc?: number
   testLoc?: number
+  docs_loc?: number
+  docsLoc?: number
   loc_7d_change?: number
   loc_30d_change?: number
   loc_90d_change?: number
@@ -94,6 +97,8 @@ export interface LocSnapshot {
   sourceLoc?: number
   test_loc?: number
   testLoc?: number
+  docs_loc?: number
+  docsLoc?: number
 }
 
 export interface PullRequest {
@@ -165,6 +170,8 @@ export interface DashboardMetrics {
   sourceLoc?: number
   test_loc?: number
   testLoc?: number
+  docs_loc?: number
+  docsLoc?: number
   loc_change_30d?: number
   loc_30d_change?: number
   loc30dChange?: number
@@ -244,6 +251,7 @@ export type ThemeMode = 'light' | 'dark' | 'system'
 export type UpdateCheckInterval = 'daily' | 'weekly' | 'monthly' | 'never'
 
 export interface AppSettings {
+  total_line_categories: LocSeries[]
   kanban_enabled: boolean
   theme_mode: ThemeMode
   activity_relationship: ActivityRelationship

@@ -104,7 +104,24 @@ pub fn is_documentation_language(language: &str) -> bool {
             | "asciidoc"
             | "adoc"
             | "org"
+            | "textile"
     )
+}
+
+/// Documentation takes precedence over tests, regardless of the file language.
+/// Match directory components rather than substrings so `doctor` stays source.
+pub fn is_documentation_path(path: &str) -> bool {
+    let normal = path.replace('\\', "/").to_ascii_lowercase();
+    let components: Vec<_> = normal.split('/').collect();
+    if components.iter().take(components.len().saturating_sub(1)).any(|part| matches!(*part, "doc" | "docs")) {
+        return true;
+    }
+    let name = components.last().copied().unwrap_or("");
+    if matches!(name, "readme" | "license" | "copying" | "changelog") {
+        return true;
+    }
+    let extension = std::path::Path::new(name).extension().and_then(|value| value.to_str()).unwrap_or("");
+    matches!(extension, "adoc" | "asciidoc" | "markdown" | "md" | "mdown" | "mkd" | "org" | "rst" | "rest" | "text" | "textile" | "txt")
 }
 
 /// Parse `tokei --output json --files` output. Tokei has changed the exact
@@ -164,9 +181,19 @@ pub fn classify_tokei_json_with_config(value: &Value, config: &ClassificationCon
 /// scanner's narrow shell-script fallback without double-counting recognized
 /// source files.
 pub fn tokei_report_paths(value: &Value) -> BTreeSet<String> {
+    report_paths(value, false)
+}
+
+/// Documentation reports are counted from their original contents, once.
+pub fn tokei_documentation_paths(value: &Value) -> BTreeSet<String> {
+    report_paths(value, true)
+}
+
+fn report_paths(value: &Value, documentation_only: bool) -> BTreeSet<String> {
     let mut paths = BTreeSet::new();
     let Some(languages) = value.as_object() else { return paths; };
-    for summary in languages.values() {
+    for (language, summary) in languages {
+        if documentation_only && !is_documentation_language(language) { continue; }
         let Some(summary_obj) = summary.as_object() else { continue; };
         let Some(reports) = summary_obj.get("reports") else { continue; };
         match reports {
@@ -254,6 +281,9 @@ fn classify_file_report(value: &Value, name: &str, config: &ClassificationConfig
         .or_else(|| object.get("path").and_then(Value::as_str))
         .unwrap_or(name);
 
+    if is_documentation_path(path) {
+        return (0, 0);
+    }
     classify_stats(object.get("stats").unwrap_or(value), path, config)
 }
 

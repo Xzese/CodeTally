@@ -1560,6 +1560,7 @@ fn explicit_work_item_sync_does_not_touch_loc_even_when_all_loc_triggers_are_due
         total_loc: 120,
         source_loc: 100,
         test_loc: 20,
+        docs_loc: 0,
         created_at: "2026-09-01T00:00:00Z".into(),
         ..Snapshot::default()
     };
