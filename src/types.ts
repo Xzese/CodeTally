@@ -258,7 +258,6 @@ export interface AppSettings {
   personal_refresh_minutes: number
   activity_refresh_minutes: number
   lines_refresh_minutes: number
-  refresh_lines_on_change: boolean
   include_forks_in_totals: boolean
   include_personal_repositories: boolean
   include_company_repositories: boolean

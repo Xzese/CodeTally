@@ -10,7 +10,6 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   activity_relationship: 'author',
   update_check_interval: 'daily',
   lines_refresh_minutes: 1440,
-  refresh_lines_on_change: true,
   include_forks_in_totals: false,
   run_in_background: true,
   menu_bar_metric: 'total_lines',

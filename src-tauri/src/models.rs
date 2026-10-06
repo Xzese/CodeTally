@@ -283,7 +283,6 @@ pub struct AppSettings {
     #[serde(default)]
     pub update_check_interval: UpdateCheckInterval,
     pub lines_refresh_minutes: i64,
-    pub refresh_lines_on_change: bool,
     #[serde(default = "default_run_in_background")]
     pub run_in_background: bool,
     #[serde(default)]
@@ -341,7 +340,6 @@ impl Default for AppSettings {
             activity_relationship: ActivityRelationship::default(),
             update_check_interval: UpdateCheckInterval::default(),
             lines_refresh_minutes: 1440,
-            refresh_lines_on_change: true,
             run_in_background: true,
             menu_bar_metric: MenuBarMetric::default(),
             loc_chart_range: LocChartRange::default(),

@@ -315,7 +315,7 @@ fn earliest_reachable_git_commit_extends_history_before_later_github_creation_da
 }
 
 #[test]
-fn automatic_loc_cadence_skips_unchanged_repositories_but_scans_pushed_changes() {
+fn automatic_loc_cadence_waits_for_the_sweep_even_after_pushed_changes() {
     let now: DateTime<Utc> = "2026-09-08T12:00:00Z".parse().expect("cadence instant");
     let recent_sweep = "2026-09-08T11:30:00Z";
     let unchanged = completed_repository("cadence-unchanged", "unchanged", "2026-09-08T10:00:00Z", "2026-09-08T10:00:00Z");
@@ -326,7 +326,7 @@ fn automatic_loc_cadence_skips_unchanged_repositories_but_scans_pushed_changes()
     assert!(!unchanged_decision.force_fetch);
 
     let changed_decision = decide_loc_sync(&changed, now, Some(recent_sweep), false);
-    assert!(changed_decision.run);
+    assert!(!changed_decision.run);
     assert!(!changed_decision.force_fetch);
 }
 
@@ -435,7 +435,6 @@ fn cadence_settings_have_expected_defaults_and_validate_supported_intervals() {
     assert_eq!(defaults.personal_refresh_minutes, 5);
     assert_eq!(defaults.update_check_interval, UpdateCheckInterval::Daily);
     assert_eq!(defaults.lines_refresh_minutes, 1_440);
-    assert!(defaults.refresh_lines_on_change);
     assert!(defaults.run_in_background);
     assert_eq!(defaults.menu_bar_metric, MenuBarMetric::TotalLines);
     assert!(defaults.menu_bar_metrics.is_empty());
@@ -520,7 +519,6 @@ fn cadence_settings_round_trip_through_persisted_app_metadata() {
         activity_relationship: codetally_lib::models::ActivityRelationship::Author,
         update_check_interval: UpdateCheckInterval::Weekly,
         lines_refresh_minutes: 60,
-        refresh_lines_on_change: false,
         run_in_background: false,
         menu_bar_metric: MenuBarMetric::OpenPrs,
         loc_chart_range: codetally_lib::models::LocChartRange::ThreeMonths,
@@ -546,7 +544,6 @@ fn cadence_settings_round_trip_through_persisted_app_metadata() {
     assert_eq!(loaded.personal_refresh_minutes, 5);
     assert_eq!(loaded.update_check_interval, UpdateCheckInterval::Weekly);
     assert_eq!(loaded.lines_refresh_minutes, 60);
-    assert!(!loaded.refresh_lines_on_change);
     assert!(!loaded.run_in_background);
     assert_eq!(loaded.menu_bar_metric, MenuBarMetric::OpenPrs);
     assert_eq!(loaded.effective_menu_bar_metrics(), vec![MenuBarMetric::OpenPrs]);
@@ -628,7 +625,6 @@ fn legacy_saved_app_settings_keep_cadence_and_receive_new_defaults() {
     assert_eq!(loaded.activity_refresh_minutes, 1_440);
     assert_eq!(loaded.update_check_interval, UpdateCheckInterval::Daily);
     assert_eq!(loaded.lines_refresh_minutes, 60);
-    assert!(!loaded.refresh_lines_on_change);
     assert!(loaded.run_in_background);
     assert_eq!(loaded.theme_mode, ThemeMode::System);
     assert_eq!(loaded.menu_bar_metric, MenuBarMetric::OpenPrs);
@@ -667,7 +663,6 @@ fn legacy_refresh_defaults_migrate_and_reject_later_custom_repo_intervals() {
     assert_eq!(migrated.activity_refresh_minutes, 1_440);
     assert_eq!(migrated.update_check_interval, UpdateCheckInterval::Monthly);
     assert_eq!(migrated.lines_refresh_minutes, 1_440);
-    assert!(!migrated.refresh_lines_on_change);
     assert_eq!(migrated.menu_bar_metric, MenuBarMetric::OpenPrs);
 
     let custom = AppSettings {
@@ -697,6 +692,7 @@ fn v3_line_count_default_migration_preserves_an_existing_custom_interval() {
 
     let loaded = sync::app_settings(&database).expect("load custom line-count setting");
     assert_eq!(loaded.lines_refresh_minutes, 45);
+    assert!(serde_json::to_value(&loaded).unwrap().get("refresh_lines_on_change").is_none(), "the retired code-change option must be ignored in old saved settings");
     let reloaded = sync::app_settings(&database).expect("reload custom line-count setting");
     assert_eq!(reloaded.lines_refresh_minutes, 45);
     remove_database(path);
@@ -713,7 +709,6 @@ fn repo_refresh_migration_moves_custom_cadences_to_daily() {
     let migrated = sync::app_settings(&database).expect("migrate old Repo Refresh default");
     assert_eq!(migrated.activity_refresh_minutes, 1440);
     assert_eq!(migrated.personal_refresh_minutes, 17);
-    assert!(!migrated.refresh_lines_on_change);
     assert_eq!(sync::app_settings(&database).unwrap().activity_refresh_minutes, 1440);
 
     assert_eq!(database.metadata(sync::REFRESH_CADENCE_V5_METADATA_KEY).unwrap().as_deref(), Some("1"));
@@ -844,12 +839,9 @@ fn menu_bar_titles_are_split_so_each_native_item_can_use_an_aligned_icon() {
 }
 
 #[test]
-fn cadence_settings_disable_pushed_change_scans_but_keep_new_and_manual_scans() {
+fn scheduled_loc_checks_keep_new_and_manual_scans() {
     let now: DateTime<Utc> = "2026-09-08T12:00:00Z".parse().expect("cadence instant");
-    let settings = AppSettings {
-        refresh_lines_on_change: false,
-        ..AppSettings::default()
-    };
+    let settings = AppSettings::default();
     let changed = completed_repository("cadence-setting-changed", "setting-changed", "2026-09-08T11:00:00Z", "2026-09-08T10:00:00Z");
     let new_repository = repository("cadence-setting-new", "setting-new");
 

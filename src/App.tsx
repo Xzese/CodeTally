@@ -1,7 +1,7 @@
 import { listen } from '@tauri-apps/api/event'
 import { lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { AlertCircle, ArrowDown, ArrowLeft, ArrowUp, CodeXml, Database, FlaskConical, Home, PanelsTopLeft, Check, ChevronDown, ChevronUp, CircleCheck, CircleDot, ExternalLink, GitBranch, GitPullRequest, Github, HardDrive, ListFilter, LoaderCircle, PanelRightClose, PanelRightOpen, Settings, Terminal, X, Zap } from 'lucide-react'
-import { checkDependencies, getActivityFeed, getActivityRefreshAt, getPersonalRefreshAt, getAppSettings, getDashboard, getGithubUser, getLocHistory, getSyncProgress, openExternalUrl, setAppSettings, syncActivity, syncGithubData, syncPersonalWorkItems, syncWorkItems } from './api'
+import { checkDependencies, getActivityFeed, getActivityRefreshAt, getPersonalRefreshAt, getAppSettings, getDashboard, getGithubUser, getLocHistory, getSyncProgress, openExternalUrl, setAppSettings, syncGithubData, syncPersonalWorkItems, syncWorkItems } from './api'
 import type { ActivityRelationship, AppSettings, DashboardData, DependencyStatus, FeedKind, Issue, LocSnapshot, PullRequest, Repository, SyncProgress, TimeRange } from './types'
 import { aggregateHistory, filterIssues, filterPullRequests, isDraft, isMerged, reuseUnchangedRecords, sameFields, sortRepositories, type FeedState } from './model'
 import { activityRepo, exactDate, formatCompact, formatCount, formatSigned, issueUpdated, normalizeDashboard, normalizeLabels, prUpdated, relativeTime, repoActivity, repoBaseline30Available, repoChange, repoChangePercent, repoForks, repoLocAvailable, repoName, repoOpenIssues, repoOpenPrs, repoSource, repoStars, repoTests, repoTotal, repositoryId, repositoryLabel } from './utils'
@@ -331,7 +331,7 @@ function App() {
     let completionError: string | null = null
     let completionProgress: SyncProgress | null = null
     try {
-      const result = await (automatic ? syncActivity() : syncGithubData())
+      const result = await (automatic ? syncPersonalWorkItems() : syncGithubData())
       completionProgress = await getSyncProgress().catch(() => null)
       completionMessage = result.message
       completionError = result.errors?.[0] ?? null
@@ -354,6 +354,7 @@ function App() {
   useEffect(() => {
     if (startupRef.current) return
     startupRef.current = true
+    // Startup only refreshes personal tickets; native scheduling owns repo and LOC work.
     void loadData(true).then((hasCachedRepositories) => { if (hasCachedRepositories && import.meta.env.VITE_CODETALLY_SCREENSHOT_MODE !== '1') void refreshData(true) })
   }, [loadData, refreshData])
 
