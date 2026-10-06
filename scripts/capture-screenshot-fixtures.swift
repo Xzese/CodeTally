@@ -328,7 +328,7 @@ do {
         try openRepositoryDetails(app, repository: "planner")
         try saveWindow(pid, outputDir, "repository-detail")
         try clickRoute("Overview", app: app)
-        try scrollToVisible("Lines metric", app: app)
+        try scrollToVisible("Visible line categories", app: app)
         try saveWindow(pid, outputDir, "analytics")
         try clickRoute("Overview", app: app)
         for (route, file) in [

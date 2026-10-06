@@ -82,7 +82,13 @@ pub fn app_settings(db: &Database) -> AppResult<AppSettings> {
             [REFRESH_CADENCE_V5_METADATA_KEY])?;
         tx.commit()?;
     }
-    if validate_app_settings(&settings).is_ok() { Ok(settings) } else { Ok(AppSettings::default()) }
+    if validate_app_settings(&settings).is_err() { return Ok(AppSettings::default()); }
+    settings.normalize_total_line_categories();
+    let stored: serde_json::Value = serde_json::from_str(&value).unwrap_or_default();
+    if stored.get("total_line_categories") != Some(&serde_json::to_value(&settings.total_line_categories)?) {
+        db.set_metadata(APP_SETTINGS_METADATA_KEY, &serde_json::to_string(&settings)?)?;
+    }
+    Ok(settings)
 }
 
 pub fn validate_app_settings(settings: &AppSettings) -> AppResult<()> {
@@ -103,6 +109,7 @@ pub fn save_app_settings(db: &Database, settings: &AppSettings) -> AppResult<()>
     let previous = app_settings(db)?;
     let mut settings = settings.clone();
     settings.normalize_menu_bar_metrics();
+    settings.normalize_total_line_categories();
     db.set_metadata(APP_SETTINGS_METADATA_KEY, &serde_json::to_string(&settings)?)?;
     db.set_metadata(REFRESH_CADENCE_V2_METADATA_KEY, "1")?;
     db.set_metadata(REFRESH_CADENCE_V3_METADATA_KEY, "1")?;
@@ -788,13 +795,15 @@ fn sync_loc(state: &AppState, repo: &Repository, force_fetch: bool) -> AppResult
     // retrying a failing rev-list on every refresh.
     if current_commit_optional(&path)?.is_none() {
         let now = Utc::now();
-        let empty = Snapshot { id: 0, repository_id: repo.id, commit_sha: "EMPTY_REPOSITORY".into(), commit_date: now.to_rfc3339(), snapshot_date: now.to_rfc3339(), total_loc: 0, source_loc: 0, test_loc: 0, created_at: now.to_rfc3339() };
-        let created = if db.upsert_snapshot(&empty)? { 1 } else { 0 };
+        let empty = Snapshot { id: 0, repository_id: repo.id, commit_sha: "EMPTY_REPOSITORY".into(), commit_date: now.to_rfc3339(), snapshot_date: now.to_rfc3339(), total_loc: 0, source_loc: 0, test_loc: 0, docs_loc: 0, created_at: now.to_rfc3339() };
+        let (recovered, errors) = recover_loc_rebuild_at_path(&db, repo, &path, &config)?;
+        let created = recovered + if db.upsert_snapshot(&empty)? { 1 } else { 0 };
         db.upsert_observation(&empty)?;
+        if let Some(error) = errors.first() { return Err(AppError::InvalidArgument(error.clone())); }
         db.set_backfill_complete(repo.id, true)?;
         return Ok(created);
     }
-    if !repo.loc_backfill_complete {
+    if !repo.loc_backfill_complete || !db.pending_loc_rebuild(repo.id)?.is_empty() {
         match backfill_repo_at_path(state, repo, &path) {
             Ok(count) => {
                 created += count;
@@ -808,7 +817,7 @@ fn sync_loc(state: &AppState, repo: &Repository, force_fetch: bool) -> AppResult
     if measurement.is_none() {
         state.set_progress(SyncProgress { running: true, phase: "scanning_current".into(), repository_name: Some(repo.name_with_owner.clone()), message: format!("Scanning {}", repo.name_with_owner), ..state.progress() });
         let scan = scan_at_commit_with_config(&path, &sha, &repo.default_branch, Some(&config))?;
-        let snapshot = Snapshot { id: 0, repository_id: repo.id, commit_sha: sha.clone(), commit_date, snapshot_date: Utc::now().to_rfc3339(), total_loc: scan.total_loc, source_loc: scan.source_loc, test_loc: scan.test_loc, created_at: Utc::now().to_rfc3339() };
+        let snapshot = Snapshot { id: 0, repository_id: repo.id, commit_sha: sha.clone(), commit_date, snapshot_date: Utc::now().to_rfc3339(), total_loc: scan.total_loc, source_loc: scan.source_loc, test_loc: scan.test_loc, docs_loc: scan.docs_loc, created_at: Utc::now().to_rfc3339() };
         if db.upsert_snapshot(&snapshot)? { created += 1; }
         measurement = Some(snapshot);
     }
@@ -818,7 +827,7 @@ fn sync_loc(state: &AppState, repo: &Repository, force_fetch: bool) -> AppResult
     let should_observe = latest_observation.as_ref().map(|item| item.commit_sha != sha || item.snapshot_date.get(..10).unwrap_or(&item.snapshot_date) != today.as_str()).unwrap_or(true);
     if should_observe {
         if let Some(measurement) = measurement {
-            let observation = Snapshot { id: 0, repository_id: repo.id, commit_sha: measurement.commit_sha, commit_date: measurement.commit_date, snapshot_date: now.to_rfc3339(), total_loc: measurement.total_loc, source_loc: measurement.source_loc, test_loc: measurement.test_loc, created_at: now.to_rfc3339() };
+            let observation = Snapshot { id: 0, repository_id: repo.id, commit_sha: measurement.commit_sha, commit_date: measurement.commit_date, snapshot_date: now.to_rfc3339(), total_loc: measurement.total_loc, source_loc: measurement.source_loc, test_loc: measurement.test_loc, docs_loc: measurement.docs_loc, created_at: now.to_rfc3339() };
             db.upsert_observation(&observation)?;
         }
     }
@@ -833,15 +842,69 @@ fn backfill_repo(state: &AppState, repo: &Repository) -> AppResult<i64> {
     db.set_fetched_pushed_at(repo.id, repo.pushed_at.as_deref())?;
     if current_commit_optional(&path)?.is_none() {
         let now = Utc::now();
-        let empty = Snapshot { id: 0, repository_id: repo.id, commit_sha: "EMPTY_REPOSITORY".into(), commit_date: now.to_rfc3339(), snapshot_date: now.to_rfc3339(), total_loc: 0, source_loc: 0, test_loc: 0, created_at: now.to_rfc3339() };
-        let created = if db.upsert_snapshot(&empty)? { 1 } else { 0 };
+        let empty = Snapshot { id: 0, repository_id: repo.id, commit_sha: "EMPTY_REPOSITORY".into(), commit_date: now.to_rfc3339(), snapshot_date: now.to_rfc3339(), total_loc: 0, source_loc: 0, test_loc: 0, docs_loc: 0, created_at: now.to_rfc3339() };
+        let config = db.classification_config(repo.id)?;
+        let (recovered, errors) = recover_loc_rebuild_at_path(&db, repo, &path, &config)?;
+        let created = recovered + if db.upsert_snapshot(&empty)? { 1 } else { 0 };
         db.upsert_observation(&empty)?;
+        if let Some(error) = errors.first() { return Err(AppError::InvalidArgument(error.clone())); }
         db.set_backfill_complete(repo.id, true)?;
         return Ok(created);
     }
     let created = backfill_repo_at_path(state, repo, &path)?;
     if created >= 0 { state.database().set_backfill_complete(repo.id, true)?; }
     Ok(created)
+}
+
+/// Recover dated measurements before monthly backfill. New snapshots are also
+/// the durable per-commit cache, so repeated days and retries scan each SHA once.
+fn recover_loc_rebuild_at_path(db: &Database, repo: &Repository, path: &Path, config: &crate::models::ClassificationConfig) -> AppResult<(i64, Vec<String>)> {
+    let pending = db.pending_loc_rebuild(repo.id)?;
+    if pending.is_empty() { return Ok((0, Vec::new())); }
+    let can_scan = current_commit_optional(path)?.is_some();
+    let mut failed = BTreeSet::new();
+    let mut errors = Vec::new();
+    let mut created = 0;
+    for item in pending {
+        if failed.contains(&item.commit_sha) { continue; }
+        let measurement = if let Some(cached) = db.snapshot_for_commit(repo.id, &item.commit_sha)? {
+            cached
+        } else {
+            let scan = if item.commit_sha == "EMPTY_REPOSITORY" {
+                crate::gitops::LocScan::default()
+            } else if can_scan {
+                match scan_at_commit_detached(path, &item.commit_sha, Some(config)) {
+                    Ok(scan) => scan,
+                    Err(error) => {
+                        errors.push(format!("Could not rebuild saved measurement {}: {error}", item.commit_sha));
+                        failed.insert(item.commit_sha.clone());
+                        continue;
+                    }
+                }
+            } else {
+                errors.push(format!("Could not rebuild saved measurement {} from an empty repository", item.commit_sha));
+                failed.insert(item.commit_sha.clone());
+                continue;
+            };
+            let commit_date = if item.kind == "snapshot" || item.commit_sha == "EMPTY_REPOSITORY" {
+                item.commit_date.clone()
+            } else {
+                current_commit(path)?.1
+            };
+            let snapshot = Snapshot {
+                repository_id: repo.id, commit_sha: item.commit_sha.clone(), commit_date,
+                snapshot_date: item.snapshot_date.clone(), created_at: item.created_at.clone(),
+                total_loc: scan.total_loc, source_loc: scan.source_loc, test_loc: scan.test_loc, docs_loc: scan.docs_loc,
+                ..Snapshot::default()
+            };
+            if db.upsert_snapshot(&snapshot)? { created += 1; }
+            snapshot
+        };
+        // The restored row and queue removal commit together. A database error
+        // leaves the item pending and its scanned SHA cached for the next retry.
+        db.restore_loc_rebuild(&item, &measurement)?;
+    }
+    Ok((created, errors))
 }
 
 fn backfill_repo_at_path(state: &AppState, repo: &Repository, path: &Path) -> AppResult<i64> {
@@ -854,8 +917,7 @@ fn backfill_repo_at_path(state: &AppState, repo: &Repository, path: &Path) -> Ap
         state.set_progress(SyncProgress { running: true, phase: "backfilling".into(), current: prior.current, total: prior.total, repository_current: prior.repository_current, repository_total: prior.repository_total, snapshot_current: 0, snapshot_total: dates.len() as i64, repository_name: Some(repo.name_with_owner.clone()), message: "Selecting monthly commits".into(), ..SyncProgress::default() });
         let db = state.database();
         let config = db.classification_config(repo.id)?;
-        let mut created = 0;
-        let mut errors = Vec::new();
+        let (mut created, mut errors) = recover_loc_rebuild_at_path(&db, repo, path, &config)?;
         for (index, sample_date) in dates.iter().enumerate() {
             state.set_progress(SyncProgress { running: true, phase: "backfilling".into(), current: prior.current, total: prior.total, repository_current: prior.repository_current, repository_total: prior.repository_total, snapshot_current: index as i64, snapshot_total: dates.len() as i64, repository_name: Some(repo.name_with_owner.clone()), message: format!("Analysing snapshot {}/{}", index + 1, dates.len()), ..SyncProgress::default() });
             let Some((sha, commit_date)) = commit_at_or_before_nonempty(path, &repo.default_branch, sample_date)? else {
@@ -873,7 +935,7 @@ fn backfill_repo_at_path(state: &AppState, repo: &Repository, path: &Path) -> Ap
             }
             match scan_at_commit_detached(path, &sha, Some(&config)) {
                 Ok(scan) => {
-                    let snapshot = Snapshot { id: 0, repository_id: repo.id, commit_sha: sha, commit_date, snapshot_date: sample_date.clone(), total_loc: scan.total_loc, source_loc: scan.source_loc, test_loc: scan.test_loc, created_at: Utc::now().to_rfc3339() };
+                    let snapshot = Snapshot { id: 0, repository_id: repo.id, commit_sha: sha, commit_date, snapshot_date: sample_date.clone(), total_loc: scan.total_loc, source_loc: scan.source_loc, test_loc: scan.test_loc, docs_loc: scan.docs_loc, created_at: Utc::now().to_rfc3339() };
                     if db.upsert_snapshot(&snapshot)? { created += 1; }
                 }
                 Err(error) => errors.push(error.to_string()),

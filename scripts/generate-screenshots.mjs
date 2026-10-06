@@ -120,18 +120,19 @@ settings.update({
 })
 db.execute("UPDATE app_metadata SET value=? WHERE key='app_settings'", (json.dumps(settings, separators=(",", ":")),))
 repos = db.execute("SELECT id, name_with_owner FROM repositories ORDER BY id").fetchall()
-targets = [(18420, 14800), (24110, 19740), (11970, 9150)]
+targets = [(18420, 14800, 2500), (24110, 19740, 900), (11970, 9150, 1400)]
 today = datetime.date(2026, 10, 4)
-for (repo_id, _), (total_target, source_target) in zip(repos, targets):
+for (repo_id, _), (total_target, source_target, docs_target) in zip(repos, targets):
     for offset in range(30):
         day = today - datetime.timedelta(days=29-offset)
         total = total_target - (29-offset)*18
         source = source_target - (29-offset)*13
         test = total - source
+        docs = docs_target - (29-offset)*7
         stamp = day.isoformat() + "T09:30:00Z"
         sha = "fixture-%d-%s" % (repo_id, day.isoformat())
-        db.execute("""INSERT INTO code_snapshots(repository_id,commit_sha,commit_date,snapshot_date,total_loc,source_loc,test_loc,created_at)
-                      VALUES(?,?,?,?,?,?,?,?)""", (repo_id, sha, stamp, stamp, total, source, test, stamp))
+        db.execute("""INSERT INTO code_snapshots(repository_id,commit_sha,commit_date,snapshot_date,total_loc,source_loc,test_loc,docs_loc,created_at)
+                      VALUES(?,?,?,?,?,?,?,?,?)""", (repo_id, sha, stamp, stamp, total, source, test, docs, stamp))
 db.commit()
 db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 db.close()

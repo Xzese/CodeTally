@@ -1,10 +1,11 @@
-import type { ActivityRelationship, AppSettings, MenuBarMetric, UpdateCheckInterval } from './types'
+import type { ActivityRelationship, AppSettings, LocSeries, MenuBarMetric, UpdateCheckInterval } from './types'
 
 const METRIC_ORDER: MenuBarMetric[] = ['total_lines', 'source_lines', 'test_lines', 'open_prs', 'open_issues']
 const REPO_REFRESH_INTERVALS = [60, 1440, 10080, 43200]
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
   kanban_enabled: true,
+  total_line_categories: ['source', 'tests'],
   activity_refresh_minutes: 1440,
   personal_refresh_minutes: 5,
   activity_relationship: 'author',
@@ -34,9 +35,11 @@ export function normalizeAppSettings(settings: Partial<AppSettings>): AppSetting
   const updateCheckInterval: UpdateCheckInterval = settings.update_check_interval === 'daily' || settings.update_check_interval === 'weekly' || settings.update_check_interval === 'monthly' || settings.update_check_interval === 'never'
     ? settings.update_check_interval
     : DEFAULT_APP_SETTINGS.update_check_interval
+  const totalCategories = (['source', 'tests', 'docs'] as LocSeries[]).filter((category) => settings.total_line_categories?.includes(category))
   return {
     ...DEFAULT_APP_SETTINGS,
     ...settings,
+    total_line_categories: totalCategories.length ? totalCategories : [...DEFAULT_APP_SETTINGS.total_line_categories],
     activity_refresh_minutes: REPO_REFRESH_INTERVALS.includes(settings.activity_refresh_minutes ?? NaN)
       ? settings.activity_refresh_minutes!
       : DEFAULT_APP_SETTINGS.activity_refresh_minutes,

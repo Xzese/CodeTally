@@ -220,18 +220,21 @@ mod tests {
                 total_loc: 10,
                 source_loc: 8,
                 test_loc: 2,
+                docs_loc: 0,
             },
             HistoryPoint {
                 snapshot_date: "2026-09-01".into(),
                 total_loc: 100,
                 source_loc: 80,
                 test_loc: 20,
+                docs_loc: 0,
             },
             HistoryPoint {
                 snapshot_date: "2026-09-28".into(),
                 total_loc: 120,
                 source_loc: 95,
                 test_loc: 25,
+                docs_loc: 0,
             },
         ];
         let total = chart_data(&history, MenuBarMetric::TotalLines, LocChartRange::ThirtyDays, today);

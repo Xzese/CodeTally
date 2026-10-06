@@ -486,7 +486,7 @@ mod tests {
     fn combined_menu_keeps_all_totals_and_restores_separate_selection() {
         let mut settings = AppSettings { menu_bar_metrics: vec![MenuBarMetric::OpenPrs, MenuBarMetric::OpenIssues], menu_bar_combined: true, ..AppSettings::default() };
         assert_eq!(super::visible_menu_metrics(&settings), vec![MenuBarMetric::TotalLines]);
-        let totals = crate::models::DashboardTotals { repositories: 8, total_loc: 12428, source_loc: 10000, test_loc: 2428, loc_change_30d: -1200, open_prs: 3, open_issues: 5 };
+        let totals = crate::models::DashboardTotals { repositories: 8, total_loc: 12428, source_loc: 10000, test_loc: 2428, docs_loc: 0, loc_change_30d: -1200, open_prs: 3, open_issues: 5 };
         assert_eq!(super::summary_rows(&totals).into_iter().map(|(_, row)| row).collect::<Vec<_>>(), vec!["12,428 total lines", "8 repositories", "10,000 source lines", "2,428 test lines", "-1,200 lines · 30-day change", "3 open PRs", "5 open issues"]);
         settings.menu_bar_combined = false;
         assert_eq!(super::visible_menu_metrics(&settings), vec![MenuBarMetric::OpenPrs, MenuBarMetric::OpenIssues]);
@@ -532,8 +532,8 @@ mod tests {
     fn loc_trend_uses_cached_daily_values_for_the_selected_metric() {
         let today = NaiveDate::from_ymd_opt(2026, 9, 28).unwrap();
         let points = vec![
-            HistoryPoint { snapshot_date: "2026-09-20".into(), total_loc: 100, source_loc: 80, test_loc: 20 },
-            HistoryPoint { snapshot_date: "2026-09-27".into(), total_loc: 200, source_loc: 80, test_loc: 120 },
+            HistoryPoint { snapshot_date: "2026-09-20".into(), total_loc: 100, source_loc: 80, test_loc: 20, docs_loc: 50 },
+            HistoryPoint { snapshot_date: "2026-09-27".into(), total_loc: 200, source_loc: 80, test_loc: 120, docs_loc: 30 },
         ];
         let (total, recorded) = loc_sparkline(&points, MenuBarMetric::TotalLines, today).unwrap();
         assert_eq!(total.chars().count(), 30);
@@ -543,6 +543,15 @@ mod tests {
         let (source, _) = loc_sparkline(&points, MenuBarMetric::SourceLines, today).unwrap();
         assert!(source.ends_with("▄▄"));
         assert_ne!(total, source);
+        let settings = AppSettings { total_line_categories: vec![crate::models::LocCategory::Docs], ..AppSettings::default() };
+        let docs = points.iter().cloned().map(|mut point| {
+            point.total_loc = settings.selected_total_loc(point.source_loc, point.test_loc, point.docs_loc);
+            point
+        }).collect::<Vec<_>>();
+        let (docs_total, _) = loc_sparkline(&docs, MenuBarMetric::TotalLines, today).unwrap();
+        assert!(docs_total.ends_with("▁▁"));
+        assert_ne!(docs_total, total);
+        assert_eq!(points[1].total_loc, 200);
         assert!(loc_sparkline(&[], MenuBarMetric::TestLines, today).is_none());
     }
 }

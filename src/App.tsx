@@ -1,10 +1,10 @@
 import { listen } from '@tauri-apps/api/event'
 import { lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
-import { AlertCircle, ArrowDown, ArrowLeft, ArrowUp, CodeXml, Database, FlaskConical, Home, PanelsTopLeft, Check, ChevronDown, ChevronUp, CircleCheck, CircleDot, ExternalLink, GitBranch, GitPullRequest, Github, HardDrive, ListFilter, LoaderCircle, PanelRightClose, PanelRightOpen, Settings, Terminal, X, Zap } from 'lucide-react'
+import { AlertCircle, ArrowDown, ArrowLeft, ArrowUp, CodeXml, Database, FlaskConical, FileText, Home, PanelsTopLeft, Check, ChevronDown, ChevronUp, CircleCheck, CircleDot, ExternalLink, GitBranch, GitPullRequest, Github, HardDrive, ListFilter, LoaderCircle, PanelRightClose, PanelRightOpen, Settings, Terminal, X, Zap } from 'lucide-react'
 import { checkDependencies, getActivityFeed, getActivityRefreshAt, getPersonalRefreshAt, getAppSettings, getDashboard, getGithubUser, getLocHistory, getSyncProgress, openExternalUrl, setAppSettings, syncGithubData, syncPersonalWorkItems, syncWorkItems } from './api'
-import type { ActivityRelationship, AppSettings, DashboardData, DependencyStatus, FeedKind, Issue, LocSnapshot, PullRequest, Repository, SyncProgress, TimeRange } from './types'
+import type { ActivityRelationship, AppSettings, DashboardData, DependencyStatus, FeedKind, Issue, LocSnapshot, PullRequest, Repository, SyncProgress, TimeRange, LocSeries } from './types'
 import { aggregateHistory, filterIssues, filterPullRequests, isDraft, isMerged, reuseUnchangedRecords, sameFields, sortRepositories, type FeedState } from './model'
-import { activityRepo, exactDate, formatCompact, formatCount, formatSigned, issueUpdated, normalizeDashboard, normalizeLabels, prUpdated, relativeTime, repoActivity, repoBaseline30Available, repoChange, repoChangePercent, repoForks, repoLocAvailable, repoName, repoOpenIssues, repoOpenPrs, repoSource, repoStars, repoTests, repoTotal, repositoryId, repositoryLabel } from './utils'
+import { activityRepo, exactDate, formatCompact, formatCount, formatSigned, issueUpdated, normalizeDashboard, normalizeLabels, prUpdated, relativeTime, repoActivity, repoBaseline30Available, repoChange, repoChangePercent, repoForks, repoLocAvailable, repoName, repoOpenIssues, repoOpenPrs, repoSource, repoDocs, repoStars, repoTests, repoTotal, repositoryId, repositoryLabel } from './utils'
 import codetallyMark from './assets/codetally-mark.webp'
 import codetallyAppIcon from '../src-tauri/icons/icon.png'
 import SettingsDrawer from './SettingsDrawer'
@@ -24,7 +24,7 @@ function HistoryChart(props: React.ComponentProps<typeof LocChart>) {
 
 type Screen = 'dashboard' | 'detail' | 'kanban'
 type ActivityView = FeedKind | 'all'
-type RepoSort = 'name' | 'loc' | 'source' | 'tests' | 'growth' | 'prs' | 'issues' | 'stars' | 'forks' | 'activity'
+type RepoSort = 'name' | 'loc' | 'source' | 'tests' | 'docs' | 'growth' | 'prs' | 'issues' | 'stars' | 'forks' | 'activity'
 const NARROW_FEED_WIDTH = 1000
 
 const EMPTY_DEPS: DependencyStatus = { gh: false, git: false, tokei: false, gh_authenticated: false, authenticated: false, login: null }
@@ -99,7 +99,21 @@ function App() {
   useLayoutEffect(() => {
     if (screen === 'dashboard' && overviewRef.current) overviewRef.current.scrollTop = 0
   }, [screen])
-  const [metric, setMetric] = useState<'total' | 'source' | 'tests'>('total')
+  const [visibleSeries, setVisibleSeries] = useState<LocSeries[]>(() => {
+    try {
+      const saved: unknown = JSON.parse(window.localStorage.getItem('codetally.chart.series') ?? 'null')
+      if (Array.isArray(saved)) {
+        const valid = (['source', 'tests', 'docs'] as const).filter((key) => saved.includes(key))
+        if (valid.length) return valid
+      }
+    } catch { /* Use the default if preferences are unavailable. */ }
+    return ['source', 'tests']
+  })
+  const changeSeries = useCallback((next: LocSeries[]) => {
+    if (!next.length) return
+    setVisibleSeries(next)
+    try { window.localStorage.setItem('codetally.chart.series', JSON.stringify(next)) } catch { /* Keep this session's selection. */ }
+  }, [])
   const [repoSort, setRepoSort] = useState<RepoSort>('loc')
   const [repoSortDirection, setRepoSortDirection] = useState<'asc' | 'desc'>('desc')
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -135,6 +149,7 @@ function App() {
   const settingsPendingRef = useRef(false)
   const settingsWorkerRef = useRef(false)
   const settingsRefreshRef = useRef(false)
+  const settingsTotalsRefreshRef = useRef(false)
   const [systemDark, setSystemDark] = useState(() => window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? true)
   useEffect(() => {
     const preference = window.matchMedia?.('(prefers-color-scheme: dark)')
@@ -200,7 +215,7 @@ function App() {
       const embeddedHistory = next.loc_history ?? next.locHistory ?? next.history
       const historyResult = await Promise.allSettled([embeddedHistory !== undefined ? Promise.resolve(embeddedHistory) : getLocHistory({ range: 'ALL' })])
       const history = historyResult[0].status === 'fulfilled' ? historyResult[0].value : []
-      if (selectionRevision !== selectionRevisionRef.current || dashboardVersion !== cachedRefreshVersionRef.current || settingsRefreshRef.current) { setBusy(false); return false }
+      if (selectionRevision !== selectionRevisionRef.current || dashboardVersion !== cachedRefreshVersionRef.current || settingsRefreshRef.current || settingsTotalsRefreshRef.current) { setBusy(false); return false }
       applyDashboard({ ...next, loc_history: next.loc_history ?? next.locHistory ?? next.history ?? history }, true, preserveFeedCache)
       hasCachedRepositories = next.repositories?.some((repo) => !(repo.is_archived ?? repo.isArchived)) ?? false
       if (historyResult[0].status === 'rejected' && !next.loc_history && !next.locHistory && !next.history) setError('Line history isn\'t available yet. Import a repository to start tracking it.')
@@ -250,10 +265,10 @@ function App() {
     const requestVersion = ++cachedRefreshVersionRef.current
     try {
       const [dashboardResult] = await Promise.allSettled([getDashboard()])
-      if (selectionRevision !== selectionRevisionRef.current || settingsRefreshRef.current || finalRefreshRef.current || requestVersion !== cachedRefreshVersionRef.current || dashboardResult.status !== 'fulfilled') return
+      if (selectionRevision !== selectionRevisionRef.current || settingsRefreshRef.current || settingsTotalsRefreshRef.current || finalRefreshRef.current || requestVersion !== cachedRefreshVersionRef.current || dashboardResult.status !== 'fulfilled') return
       const next = dashboardResult.value
       const history = next.loc_history ?? next.locHistory ?? next.history ?? await getLocHistory({ range: 'ALL' }).catch(() => [])
-      if (selectionRevision !== selectionRevisionRef.current || settingsRefreshRef.current || finalRefreshRef.current || requestVersion !== cachedRefreshVersionRef.current) return
+      if (selectionRevision !== selectionRevisionRef.current || settingsRefreshRef.current || settingsTotalsRefreshRef.current || finalRefreshRef.current || requestVersion !== cachedRefreshVersionRef.current) return
       applyDashboard({ ...next, loc_history: next.loc_history ?? next.locHistory ?? next.history ?? history }, false)
       if (screen === 'detail' && selectedRepoId !== null) {
         try {
@@ -634,6 +649,7 @@ function App() {
     range
   ), [dashboard.loc_history, detailHistory, range, screen, selectedRepo])
 
+  const totalHint = `Includes ${appSettings.total_line_categories.map((category) => category === 'source' ? 'Source' : category === 'tests' ? 'Tests' : 'Docs').join(' + ')}`
   const metrics = dashboard.metrics
   const sortedRepositories = useMemo(() => sortRepositories(activeRepositories, repoSort, repoSortDirection), [activeRepositories, repoSort, repoSortDirection])
   const filteredPrs = useMemo(() => filterPullRequests(dashboard.pull_requests, feedState, groupedFeedScope ? 'all' : feedRepo).filter((item) => !groupedFeedScope || scopedFeedRepositories.some((repo) => isRepoActivity(item, repo))), [dashboard.pull_requests, feedRepo, feedState, groupedFeedScope, scopedFeedRepositories])
@@ -662,15 +678,22 @@ function App() {
         const oldExcluded = new Set(previous.excluded_repository_ids.map(String))
         const newExcluded = new Set(saved.excluded_repository_ids.map(String))
         settingsRefreshRef.current ||= previous.include_personal_repositories !== saved.include_personal_repositories || previous.include_company_repositories !== saved.include_company_repositories || previous.include_forks_in_totals !== saved.include_forks_in_totals || oldExcluded.size !== newExcluded.size || [...oldExcluded].some((id) => !newExcluded.has(id))
+        settingsTotalsRefreshRef.current ||= previous.total_line_categories.join(',') !== saved.total_line_categories.join(',')
         // Acknowledgements never replace optimistic intent. A newer click may have
         // arrived while this write was in flight; only flush its latest snapshot.
-        if (settingsPendingRef.current || !settingsRefreshRef.current) continue
+        if (settingsPendingRef.current || (!settingsRefreshRef.current && !settingsTotalsRefreshRef.current)) continue
         const revision = settingsRevisionRef.current
         cachedRefreshVersionRef.current += 1
         const [raw, history] = await Promise.all([getDashboard(), getLocHistory({ range: 'ALL' })])
         if (revision !== settingsRevisionRef.current) continue
+        const resetSelection = settingsRefreshRef.current
         settingsRefreshRef.current = false
+        settingsTotalsRefreshRef.current = false
         cachedRefreshVersionRef.current += 1
+        if (!resetSelection) {
+          applyDashboard({ ...raw, loc_history: raw.loc_history ?? raw.locHistory ?? raw.history ?? history }, false)
+          continue
+        }
         setScreen('dashboard')
         setSelectedRepo(null)
         setDetailHistory(null)
@@ -698,6 +721,10 @@ function App() {
     const oldExcluded = new Set(previous.excluded_repository_ids.map(String))
     const newExcluded = new Set(next.excluded_repository_ids.map(String))
     const selectionChanged = previous.include_personal_repositories !== next.include_personal_repositories || previous.include_company_repositories !== next.include_company_repositories || previous.include_forks_in_totals !== next.include_forks_in_totals || oldExcluded.size !== newExcluded.size || [...oldExcluded].some((id) => !newExcluded.has(id))
+    if (previous.total_line_categories.join(',') !== next.total_line_categories.join(',')) {
+      cachedRefreshVersionRef.current += 1
+      settingsTotalsRefreshRef.current = true
+    }
     if (selectionChanged) {
       selectionRevisionRef.current += 1
       cachedRefreshVersionRef.current += 1
@@ -787,13 +814,13 @@ function App() {
               {deps.gh && !dependenciesAuthenticated(deps) && <GitHubConnection deps={deps} login={login} compact checking={checkingDependencies} onRetry={checkSetupConnection} />}
               {activeRepositories.length === 0 ? <EmptySelectionState onOpenSettings={() => setSettingsOpen(true)} /> : <>
                 <div className="page-heading"><div><p className="eyebrow">Your repositories</p><h1>Code at a glance</h1><p className="page-subtitle">Here’s what’s happening across your code.</p></div><span className="overview-period"><CircleDot size={12} /> Local overview</span></div>
-                <SummaryStrip metrics={metrics} partialLoc={partialLoc} />
-                <HistoryChart history={visibleHistory} metric={metric} range={range} onMetric={setMetric} onRange={setRange} />
-                <RepositoryTable repositories={sortedRepositories} login={login} sort={repoSort} direction={repoSortDirection} onSort={handleRepositorySort} onSelect={openRepository} />
+                <SummaryStrip totalHint={totalHint} metrics={metrics} partialLoc={partialLoc} />
+                <HistoryChart history={visibleHistory} visibleSeries={visibleSeries} range={range} onSeries={changeSeries} onRange={setRange} />
+                <RepositoryTable totalHint={totalHint} repositories={sortedRepositories} login={login} sort={repoSort} direction={repoSortDirection} onSort={handleRepositorySort} onSelect={openRepository} />
               </>}
             </main>
           ) : selectedRepo ? (
-            <RepositoryDetails repo={selectedRepo} history={visibleHistory} historyLoading={detailLoading} metric={metric} range={range} onMetric={setMetric} onRange={setRange} onBack={backToDashboard} pullRequests={detailPrs} issues={detailIssues} onOpenUrl={handleOpenUrl} />
+            <RepositoryDetails totalHint={totalHint} repo={selectedRepo} history={visibleHistory} historyLoading={detailLoading} visibleSeries={visibleSeries} range={range} onSeries={changeSeries} onRange={setRange} onBack={backToDashboard} pullRequests={detailPrs} issues={detailIssues} onOpenUrl={handleOpenUrl} />
           ) : null}
           {screen !== 'kanban' && narrowFeed && <button className="activity-backdrop" type="button" aria-label="Close activity sidebar" aria-hidden={!feedOpen} tabIndex={feedOpen ? 0 : -1} onClick={() => setNarrowFeedOpen(false)} />}
           {screen !== 'kanban' && <ActivitySidebar loading={feedPending} hidden={!feedOpen} asOf={feedRelationship === 'everyone' ? dashboard.last_activity_refresh_at : dashboard.last_personal_refresh_at} onActivityRefreshed={refreshPersonalCache} syncBusy={syncActive} activityProgress={syncProgress} login={login} kind={feedKind} state={feedState} relationship={feedRelationship} repository={feedRepo} lockedRepository={screen === 'detail' && selectedRepo ? String(repositoryId(selectedRepo)) : null} repositories={activeRepositories} prs={filteredPrs} issues={filteredIssues} onKind={handleFeedKind} onState={handleFeedState} onRelationship={handleFeedRelationship} onRepository={handleFeedRepository} onOpenUrl={handleOpenUrl} />}
@@ -869,21 +896,21 @@ function EmptySelectionState({ onOpenSettings }: { onOpenSettings: () => void })
   return <section className="empty-selection" aria-labelledby="empty-selection-heading"><div className="empty-selection-icon"><ListFilter size={20} /></div><p className="eyebrow">Dashboard paused</p><h1 id="empty-selection-heading">No repositories selected</h1><p>Choose repositories in Settings to bring them back to the dashboard. Your saved history stays here, and any update already running may finish.</p><button className="button primary" type="button" onClick={onOpenSettings}><Settings size={15} /> Open Settings</button></section>
 }
 
-const SummaryStrip = memo(function SummaryStrip({ metrics, partialLoc }: { metrics: ReturnType<typeof toDashboard>['metrics']; partialLoc: boolean }) {
+const SummaryStrip = memo(function SummaryStrip({ metrics, partialLoc, totalHint }: { totalHint: string; metrics: ReturnType<typeof toDashboard>['metrics']; partialLoc: boolean }) {
   const cards = [
-    { label: 'Total Lines', value: metrics.total_loc, icon: CodeXml, tone: 'blue', hint: 'Lines of code' },
+    { label: 'Total Lines', value: metrics.total_loc, icon: CodeXml, tone: 'blue', hint: totalHint },
     { label: 'Repositories', value: metrics.repositories, icon: Database, tone: 'purple', hint: 'Tracked repositories' },
     { label: 'Open PRs', value: metrics.open_prs, icon: GitPullRequest, tone: 'purple', hint: 'Pull requests' },
     { label: 'Open issues', value: metrics.open_issues, icon: CircleDot, tone: 'red', hint: 'Issues to follow up' }
   ]
   return <>
     <div className="summary-strip">{cards.map(({ label, value, icon: Icon, tone, hint }) => <div className={`summary-item ${tone}`} key={label}><span className="summary-icon"><Icon size={22} /></span><strong>{formatCount(value)}</strong><span className="summary-label">{label}</span><small>{hint}</small></div>)}</div>
-    <div className="summary-breakdown"><span><CodeXml size={14} /> Source Lines <strong>{formatCount(metrics.source_loc)}</strong></span><span><FlaskConical size={14} /> Test Lines <strong>{formatCount(metrics.test_loc)}</strong></span><span><ArrowUp size={14} /> 30-day change <strong className={metrics.loc_30d_change >= 0 ? 'positive' : 'negative'}>{formatSigned(metrics.loc_30d_change, true)}</strong></span></div>
+    <div className="summary-breakdown"><span><CodeXml size={14} /> Source Lines <strong>{formatCount(metrics.source_loc)}</strong></span><span><FlaskConical size={14} /> Test Lines <strong>{formatCount(metrics.test_loc)}</strong></span><span><FileText size={14} /> Docs Lines <strong>{formatCount(metrics.docs_loc)}</strong></span><span><ArrowUp size={14} /> 30-day change <strong className={metrics.loc_30d_change >= 0 ? 'positive' : 'negative'}>{formatSigned(metrics.loc_30d_change, true)}</strong></span></div>
     {partialLoc && <p className="summary-partial-notice" role="status"><AlertCircle size={13} /><span>Partial data: line totals and change exclude repositories whose line counts are not available yet.</span></p>}
   </>
 })
 
-const RepositoryTable = memo(function RepositoryTable({ repositories, login, sort, direction, onSort, onSelect }: { repositories: Repository[]; login: string; sort: RepoSort; direction: 'asc' | 'desc'; onSort: (sort: RepoSort) => void; onSelect: (repo: Repository) => void }) {
+const RepositoryTable = memo(function RepositoryTable({ totalHint, repositories, login, sort, direction, onSort, onSelect }: { totalHint: string; repositories: Repository[]; login: string; sort: RepoSort; direction: 'asc' | 'desc'; onSort: (sort: RepoSort) => void; onSelect: (repo: Repository) => void }) {
   const [hiddenIds, setHiddenIds] = useState<Set<string>>(() => new Set())
   const [excludeForks, setExcludeForks] = useState(() => {
     try { return window.localStorage.getItem('codetally.table.exclude-forks') === 'true' }
@@ -900,8 +927,8 @@ const RepositoryTable = memo(function RepositoryTable({ repositories, login, sor
     for (const id of ids) { if (visible) next.delete(id); else next.add(id) }
     return next
   })
-  const columns: Array<{ key: RepoSort; label: string; title: string }> = [{ key: 'name', label: 'Repository', title: 'Repository' }, { key: 'loc', label: 'Total', title: 'Total lines' }, { key: 'source', label: 'Source', title: 'Source lines' }, { key: 'tests', label: 'Tests', title: 'Test lines' }, { key: 'growth', label: '30d', title: '30-day change' }, { key: 'prs', label: 'PRs', title: 'Open pull requests' }, { key: 'issues', label: 'Issues', title: 'Open issues' }, { key: 'stars', label: 'Stars', title: 'GitHub stars' }, { key: 'forks', label: 'Forks', title: 'GitHub forks' }, { key: 'activity', label: 'Activity', title: 'Last activity' }]
-  return <section className="repos-panel"><div className="panel-heading table-heading"><div><p className="eyebrow">Your repositories</p><h2>Repositories</h2></div><TrackedRepositoryMenu repositories={repositories} login={login} hiddenIds={hiddenIds} excludeForks={excludeForks} onExcludeForks={changeExcludeForks} onVisibilityChange={setVisible} onShowAll={() => { setHiddenIds(new Set()); changeExcludeForks(false) }} /></div>{visibleRepositories.length ? <div className="table-scroll" role="region" tabIndex={0} aria-label="Repository table"><table><thead><tr>{columns.map((column) => <th key={column.key}><button className={sort === column.key ? 'sort-button active' : 'sort-button'} title={`Sort by ${column.title}`} onClick={() => onSort(column.key)}>{column.label}{sort === column.key && (direction === 'asc' ? <ChevronUp size={13} /> : <ChevronDown size={13} />)}</button></th>)}</tr></thead><tbody>{visibleRepositories.map((repo) => { const isPrivate = repo.is_private ?? repo.isPrivate ?? false; return <tr key={String(repositoryId(repo))} onClick={() => onSelect(repo)} tabIndex={0} onKeyDown={(event) => { if (event.key === 'Enter') onSelect(repo) }}><td><div className="repo-cell"><span className="repo-glyph"><GitBranch size={14} /></span><span><strong>{repoName(repo)}</strong><small><span className="repo-meta-text">{repo.owner ?? repositoryLabel(repo).split('/')[0]}{repo.primary_language ?? repo.primaryLanguage ? ` · ${repo.primary_language ?? repo.primaryLanguage}` : ''}</span><em className={`repo-visibility ${isPrivate ? 'private' : 'public'}`}>{isPrivate ? 'Private' : 'Public'}</em></small></span></div></td><td className="number-cell" title={!repoLocAvailable(repo) ? 'Lines are not available for this repository' : undefined}>{repoLocDisplay(repo, repoTotal(repo))}</td><td className="number-cell" title={!repoLocAvailable(repo) ? 'Lines are not available for this repository' : undefined}>{repoLocDisplay(repo, repoSource(repo))}</td><td className="number-cell" title={!repoLocAvailable(repo) ? 'Lines are not available for this repository' : undefined}>{repoLocDisplay(repo, repoTests(repo))}</td><td className={repoGrowthClass(repo)} title={repoGrowthTitle(repo)}>{repoChangeDisplay(repo)}</td><td className="number-cell">{formatCount(repoOpenPrs(repo))}</td><td className="number-cell">{formatCount(repoOpenIssues(repo))}</td><td className="number-cell">{formatCount(repoStars(repo))}</td><td className="number-cell">{formatCount(repoForks(repo))}</td><td><span className="relative" title={exactDate(repoActivity(repo))}>{relativeTime(repoActivity(repo))}</span></td></tr> })}</tbody></table></div> : <div className="empty-state"><GitBranch size={22} /><p>{excludeForks ? 'No non-fork repositories match this view' : repositories.length ? 'All repositories are hidden' : 'No repositories selected'}</p></div>}</section>
+  const columns: Array<{ key: RepoSort; label: string; title: string }> = [{ key: 'name', label: 'Repository', title: 'Repository' }, { key: 'loc', label: 'Total', title: totalHint }, { key: 'source', label: 'Source', title: 'Source lines' }, { key: 'tests', label: 'Tests', title: 'Test lines' }, { key: 'docs', label: 'Docs', title: 'Documentation lines' }, { key: 'growth', label: '30d', title: '30-day change' }, { key: 'prs', label: 'PRs', title: 'Open pull requests' }, { key: 'issues', label: 'Issues', title: 'Open issues' }, { key: 'stars', label: 'Stars', title: 'GitHub stars' }, { key: 'forks', label: 'Forks', title: 'GitHub forks' }, { key: 'activity', label: 'Activity', title: 'Last activity' }]
+  return <section className="repos-panel"><div className="panel-heading table-heading"><div><p className="eyebrow">Your repositories</p><h2>Repositories</h2></div><TrackedRepositoryMenu repositories={repositories} login={login} hiddenIds={hiddenIds} excludeForks={excludeForks} onExcludeForks={changeExcludeForks} onVisibilityChange={setVisible} onShowAll={() => { setHiddenIds(new Set()); changeExcludeForks(false) }} /></div>{visibleRepositories.length ? <div className="table-scroll" role="region" tabIndex={0} aria-label="Repository table"><table><thead><tr>{columns.map((column) => <th key={column.key}><button className={sort === column.key ? 'sort-button active' : 'sort-button'} title={`Sort by ${column.title}`} onClick={() => onSort(column.key)}>{column.label}{sort === column.key && (direction === 'asc' ? <ChevronUp size={13} /> : <ChevronDown size={13} />)}</button></th>)}</tr></thead><tbody>{visibleRepositories.map((repo) => { const isPrivate = repo.is_private ?? repo.isPrivate ?? false; return <tr key={String(repositoryId(repo))} onClick={() => onSelect(repo)} tabIndex={0} onKeyDown={(event) => { if (event.key === 'Enter') onSelect(repo) }}><td><div className="repo-cell"><span className="repo-glyph"><GitBranch size={14} /></span><span><strong>{repoName(repo)}</strong><small><span className="repo-meta-text">{repo.owner ?? repositoryLabel(repo).split('/')[0]}{repo.primary_language ?? repo.primaryLanguage ? ` · ${repo.primary_language ?? repo.primaryLanguage}` : ''}</span><em className={`repo-visibility ${isPrivate ? 'private' : 'public'}`}>{isPrivate ? 'Private' : 'Public'}</em></small></span></div></td><td className="number-cell" title={!repoLocAvailable(repo) ? 'Lines are not available for this repository' : undefined}>{repoLocDisplay(repo, repoTotal(repo))}</td><td className="number-cell" title={!repoLocAvailable(repo) ? 'Lines are not available for this repository' : undefined}>{repoLocDisplay(repo, repoSource(repo))}</td><td className="number-cell" title={!repoLocAvailable(repo) ? 'Lines are not available for this repository' : undefined}>{repoLocDisplay(repo, repoTests(repo))}</td><td className="number-cell">{repoLocDisplay(repo, repoDocs(repo))}</td><td className={repoGrowthClass(repo)} title={repoGrowthTitle(repo)}>{repoChangeDisplay(repo)}</td><td className="number-cell">{formatCount(repoOpenPrs(repo))}</td><td className="number-cell">{formatCount(repoOpenIssues(repo))}</td><td className="number-cell">{formatCount(repoStars(repo))}</td><td className="number-cell">{formatCount(repoForks(repo))}</td><td><span className="relative" title={exactDate(repoActivity(repo))}>{relativeTime(repoActivity(repo))}</span></td></tr> })}</tbody></table></div> : <div className="empty-state"><GitBranch size={22} /><p>{excludeForks ? 'No non-fork repositories match this view' : repositories.length ? 'All repositories are hidden' : 'No repositories selected'}</p></div>}</section>
 })
 
 function SelectionCheckbox({ label, checked, mixed = false, disabled = false, onChange }: { label: string; checked: boolean; mixed?: boolean; disabled?: boolean; onChange: (checked: boolean) => void }) {
@@ -1114,9 +1141,9 @@ function IssueItem({ item, onOpen }: { item: Issue; onOpen: () => void }) {
   return <button className="feed-item issue-item" data-activity-key={`issue-${activityRepo(item)}-${item.number}`} onClick={onOpen}><span className={`feed-item-icon issue-${state.toLowerCase()}`}><ActivityIcon size={24} aria-hidden="true" /></span><div className="feed-item-content"><div className="feed-item-top"><span className="feed-repo">{activityRepo(item) || 'Repository'} <b>#{item.number}</b></span><ExternalLink size={13} /></div><strong className="feed-title">{item.title}</strong><div className="feed-meta"><span className={`badge ${state.toLowerCase()}`}>{state}</span><span title={exactDate(date)}>Updated {relativeTime(date)}</span></div>{labels.length ? <div className="label-row">{labels.slice(0, 4).map((label) => <span key={label}>{label}</span>)}</div> : null}</div></button>
 }
 
-const RepositoryDetails = memo(function RepositoryDetails({ repo, history, historyLoading, metric, range, onMetric, onRange, onBack, pullRequests, issues, onOpenUrl }: { repo: Repository; history: { date: string; timestamp: number; total: number; source: number; tests: number }[]; historyLoading: boolean; metric: 'total' | 'source' | 'tests'; range: TimeRange; onMetric: (metric: 'total' | 'source' | 'tests') => void; onRange: (range: TimeRange) => void; onBack: () => void; pullRequests: PullRequest[]; issues: Issue[]; onOpenUrl: (url: string | undefined) => void }) {
+const RepositoryDetails = memo(function RepositoryDetails({ totalHint, repo, history, historyLoading, visibleSeries, range, onSeries, onRange, onBack, pullRequests, issues, onOpenUrl }: { totalHint: string; repo: Repository; history: { date: string; timestamp: number; total: number; source: number; tests: number; docs: number }[]; historyLoading: boolean; visibleSeries: LocSeries[]; range: TimeRange; onSeries: (series: LocSeries[]) => void; onRange: (range: TimeRange) => void; onBack: () => void; pullRequests: PullRequest[]; issues: Issue[]; onOpenUrl: (url: string | undefined) => void }) {
   const isPrivate = repo.is_private ?? repo.isPrivate ?? false
-  return <main className="main-column detail-column"><button className="back-button" onClick={onBack}><ArrowLeft size={15} /> Back to repositories</button><div className="detail-heading"><div><p className="eyebrow">Repository details</p><h1>{repoName(repo)}</h1><p className="detail-subtitle">{repositoryLabel(repo)} {repo.primary_language ?? repo.primaryLanguage ? <><span>·</span> {repo.primary_language ?? repo.primaryLanguage}</> : null} <em className={`repo-visibility ${isPrivate ? 'private' : 'public'}`}>{isPrivate ? 'Private' : 'Public'}</em></p></div>{repo.url && <button className="button secondary" onClick={() => onOpenUrl(repo.url)}><Github size={15} /> Open on GitHub <ExternalLink size={14} /></button>}</div><div className="detail-stats"><DetailStat label="Total Lines" value={detailLocValue(repo, repoTotal(repo))} /><DetailStat label="Source Lines" value={detailLocValue(repo, repoSource(repo))} /><DetailStat label="Test Lines" value={detailLocValue(repo, repoTests(repo))} /><DetailStat label="30-day change" value={detailChangeValue(repo)} tone={repoLocAvailable(repo) && repoBaseline30Available(repo) ? (repoChange(repo) >= 0 ? 'positive' : 'negative') : undefined} title={repoGrowthTitle(repo)} /><DetailStat label="Open PRs" value={formatCount(repoOpenPrs(repo))} /><DetailStat label="Open issues" value={formatCount(repoOpenIssues(repo))} /><DetailStat label="Stars" value={formatCount(repoStars(repo))} /><DetailStat label="Forks" value={formatCount(repoForks(repo))} /><DetailStat label="Last activity" value={relativeTime(repoActivity(repo))} title={exactDate(repoActivity(repo))} /></div>{historyLoading ? <div className="detail-loading"><LoaderCircle size={16} className="spin" /> Loading repository history…</div> : <HistoryChart history={history} metric={metric} range={range} onMetric={onMetric} onRange={onRange} />}<div className="detail-activity"><ActivityList title="Recent pull requests" items={pullRequests.slice(0, 5)} kind="prs" onOpenUrl={onOpenUrl} /><ActivityList title="Recent issues" items={issues.slice(0, 5)} kind="issues" onOpenUrl={onOpenUrl} /></div></main>
+  return <main className="main-column detail-column"><button className="back-button" onClick={onBack}><ArrowLeft size={15} /> Back to repositories</button><div className="detail-heading"><div><p className="eyebrow">Repository details</p><h1>{repoName(repo)}</h1><p className="detail-subtitle">{repositoryLabel(repo)} {repo.primary_language ?? repo.primaryLanguage ? <><span>·</span> {repo.primary_language ?? repo.primaryLanguage}</> : null} <em className={`repo-visibility ${isPrivate ? 'private' : 'public'}`}>{isPrivate ? 'Private' : 'Public'}</em></p></div>{repo.url && <button className="button secondary" onClick={() => onOpenUrl(repo.url)}><Github size={15} /> Open on GitHub <ExternalLink size={14} /></button>}</div><div className="detail-stats"><DetailStat label="Total Lines" value={detailLocValue(repo, repoTotal(repo))} title={totalHint} /><DetailStat label="Source Lines" value={detailLocValue(repo, repoSource(repo))} /><DetailStat label="Test Lines" value={detailLocValue(repo, repoTests(repo))} /><DetailStat label="Docs Lines" value={detailLocValue(repo, repoDocs(repo))} /><DetailStat label="30-day change" value={detailChangeValue(repo)} tone={repoLocAvailable(repo) && repoBaseline30Available(repo) ? (repoChange(repo) >= 0 ? 'positive' : 'negative') : undefined} title={repoGrowthTitle(repo)} /><DetailStat label="Open PRs" value={formatCount(repoOpenPrs(repo))} /><DetailStat label="Open issues" value={formatCount(repoOpenIssues(repo))} /><DetailStat label="Stars" value={formatCount(repoStars(repo))} /><DetailStat label="Forks" value={formatCount(repoForks(repo))} /><DetailStat label="Last activity" value={relativeTime(repoActivity(repo))} title={exactDate(repoActivity(repo))} /></div>{historyLoading ? <div className="detail-loading"><LoaderCircle size={16} className="spin" /> Loading repository history…</div> : <HistoryChart history={history} visibleSeries={visibleSeries} range={range} onSeries={onSeries} onRange={onRange} />}<div className="detail-activity"><ActivityList title="Recent pull requests" items={pullRequests.slice(0, 5)} kind="prs" onOpenUrl={onOpenUrl} /><ActivityList title="Recent issues" items={issues.slice(0, 5)} kind="issues" onOpenUrl={onOpenUrl} /></div></main>
 })
 
 function DetailStat({ label, value, tone, title }: { label: string; value: string; tone?: string; title?: string }) {
