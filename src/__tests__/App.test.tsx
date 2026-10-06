@@ -178,7 +178,6 @@ const defaultAppSettings: AppSettings = {
   activity_relationship: 'author',
   update_check_interval: 'daily',
   lines_refresh_minutes: 1440,
-  refresh_lines_on_change: true,
   run_in_background: true,
   menu_bar_metric: 'total_lines' as const,
   loc_chart_range: 'ALL' as const,
@@ -291,7 +290,7 @@ function configureBackend({ dependencies = readyDependencies, syncResult = syncO
         return args?.kind === 'issues' ? issues : prs
       case 'sync_github_data':
         return fullSyncPromise ?? syncPromise ?? syncResult
-      case 'sync_activity':
+      case 'sync_personal_work_items':
         return activitySyncPromise ?? syncPromise ?? syncResult
       case 'get_app_settings':
         if (appSettingsResponses?.length) {
@@ -428,9 +427,10 @@ describe('dashboard UI', () => {
     await user.click(screen.getByRole('button', { name: 'Settings' }))
     expect(within(screen.getByRole('dialog', { name: 'Settings' })).getByText('sam')).toBeInTheDocument()
     const historyReads = invokeMock.mock.calls.filter(([command]) => command === 'get_loc_history').length
+    const personalRefreshes = invokeMock.mock.calls.filter(([command]) => command === 'sync_personal_work_items').length
     await user.click(screen.getByRole('button', { name: 'Refresh All Tickets' }))
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('sync_work_items', undefined))
-    expect(invokeMock.mock.calls.some(([command]) => command === 'sync_personal_work_items')).toBe(false)
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'sync_personal_work_items')).toHaveLength(personalRefreshes)
     expect(invokeMock.mock.calls.filter(([command]) => command === 'get_loc_history')).toHaveLength(historyReads)
   })
 
@@ -1224,7 +1224,7 @@ describe('dashboard UI', () => {
 
     try {
       await screen.findByRole('heading', { name: 'Code at a glance' })
-      await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('sync_activity', undefined))
+      await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('sync_personal_work_items', undefined))
       await waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === 'get_sync_progress').length).toBeGreaterThanOrEqual(1))
 
       activitySync.resolve(syncOk)
@@ -1241,7 +1241,7 @@ describe('dashboard UI', () => {
     }
   })
 
-  it('uses the PR and issue sync on startup while manual Refresh uses the full sync', async () => {
+  it('uses the fast personal ticket sync on startup while manual Refresh uses the full sync', async () => {
     configureBackend()
     render(<App />)
 
@@ -1249,7 +1249,8 @@ describe('dashboard UI', () => {
       for (let index = 0; index < 14; index += 1) await Promise.resolve()
     })
     expect(screen.getByRole('heading', { name: 'Code at a glance' })).toBeInTheDocument()
-    expect(invokeMock.mock.calls.some(([command]) => command === 'sync_activity')).toBe(true)
+    expect(invokeMock.mock.calls.some(([command]) => command === 'sync_personal_work_items')).toBe(true)
+    expect(invokeMock.mock.calls.some(([command]) => command === 'sync_activity' || command === 'sync_work_items')).toBe(false)
     expect(invokeMock.mock.calls.some(([command]) => command === 'sync_github_data')).toBe(false)
 
     fireEvent.click(screen.getByRole('button', { name: 'Settings' }))
@@ -1298,7 +1299,7 @@ describe('dashboard UI', () => {
 
       const dashboardCallsBeforeEvent = invokeMock.mock.calls.filter(([command]) => command === 'get_dashboard').length
       const feedCallsBeforeEvent = invokeMock.mock.calls.filter(([command]) => command === 'get_activity_feed').length
-      const syncActivityCallsBeforeEvent = invokeMock.mock.calls.filter(([command]) => command === 'sync_activity').length
+      const syncActivityCallsBeforeEvent = invokeMock.mock.calls.filter(([command]) => command === 'sync_personal_work_items').length
       await act(async () => {
         backgroundSyncListener()
         await Promise.resolve()
@@ -1306,14 +1307,14 @@ describe('dashboard UI', () => {
       await waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === 'get_dashboard').length).toBeGreaterThan(dashboardCallsBeforeEvent))
       await waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === 'get_activity_feed').length).toBeGreaterThan(feedCallsBeforeEvent))
       expect(screen.getByText('17,000')).toBeInTheDocument()
-      expect(invokeMock.mock.calls.filter(([command]) => command === 'sync_activity').length).toBe(syncActivityCallsBeforeEvent)
+      expect(invokeMock.mock.calls.filter(([command]) => command === 'sync_personal_work_items').length).toBe(syncActivityCallsBeforeEvent)
     } finally {
       activitySync.resolve(syncOk)
     }
   })
 
   it('loads cadence settings, autosaves each updated refresh choice, and keeps Settings open', async () => {
-    configureBackend({ appSettingsResponses: [{ activity_refresh_minutes: 30, lines_refresh_minutes: 720, refresh_lines_on_change: false }] })
+    configureBackend({ appSettingsResponses: [{ activity_refresh_minutes: 30, lines_refresh_minutes: 720 }] })
     const user = await renderDashboard()
 
     await user.click(screen.getByRole('button', { name: 'Settings' }))
@@ -1326,12 +1327,11 @@ describe('dashboard UI', () => {
     await user.click(within(personalRefresh).getByRole('radio', { name: '15 minutes' }))
     await waitFor(() => expect(savedSettings()[savedSettings().length - 1]).toEqual(expect.objectContaining({ personal_refresh_minutes: 15, activity_refresh_minutes: 1440 })))
     const updateChecks = within(await screen.findByRole('region', { name: 'About CodeTally' })).getByRole('radiogroup', { name: 'Check for Updates' })
-    const codeChangeRefresh = screen.getByRole('switch', { name: /Refresh Lines of Code when code changes/i })
+    expect(screen.queryByRole('switch', { name: /Refresh Lines of Code when code changes/i })).not.toBeInTheDocument()
     await waitFor(() => {
       expect(within(activityRefresh).getByRole('radio', { name: 'Daily' })).toBeChecked()
       expect(within(activityRefresh).queryByRole('radio', { name: /Current setting/ })).not.toBeInTheDocument()
       expect(within(updateChecks).getByRole('radio', { name: 'Daily' })).toBeChecked()
-      expect(codeChangeRefresh).not.toBeChecked()
     })
     for (const label of ['Daily', 'Weekly', 'Monthly', 'Never']) {
       expect(within(updateChecks).getByRole('radio', { name: label })).toBeInTheDocument()
@@ -1349,7 +1349,6 @@ describe('dashboard UI', () => {
     await user.click(within(activityRefresh).getByRole('radio', { name: 'Hourly' }))
     expect(screen.getByText(/Hourly repository refreshes/)).toHaveTextContent('API limits')
     await user.click(within(activityRefresh).getByRole('radio', { name: 'Daily' }))
-    await user.click(codeChangeRefresh)
     for (const interval of ['daily', 'weekly', 'monthly', 'never'] as const) {
       await user.click(within(updateChecks).getByRole('radio', { name: interval[0].toUpperCase() + interval.slice(1) }))
       await waitFor(() => expect(savedSettings()[savedSettings().length - 1]).toEqual(expect.objectContaining({ update_check_interval: interval })))
@@ -1360,7 +1359,6 @@ describe('dashboard UI', () => {
       expect(writes[writes.length - 1]).toEqual(expect.objectContaining({
         activity_refresh_minutes: 1440,
         lines_refresh_minutes: 720,
-        refresh_lines_on_change: true,
         update_check_interval: 'never'
       }))
     })

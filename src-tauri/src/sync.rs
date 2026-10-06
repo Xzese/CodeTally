@@ -115,7 +115,7 @@ pub fn save_app_settings(db: &Database, settings: &AppSettings) -> AppResult<()>
     Ok(())
 }
 
-/// Decide whether an automatic activity refresh should also inspect LOC.
+/// Decide whether the scheduled repository refresh should inspect LOC.
 /// This function is intentionally independent of the database and wall clock
 /// access so cadence behavior can be tested without invoking GitHub or Git.
 pub fn decide_loc_sync(repo: &Repository, now: DateTime<Utc>, last_sweep_at: Option<&str>, force_full: bool) -> LocSyncDecision {
@@ -128,10 +128,9 @@ pub fn decide_loc_sync_with_settings(repo: &Repository, now: DateTime<Utc>, last
     }
     let sweep_due = loc_sweep_due_with_interval(last_sweep_at, now, settings.activity_refresh_minutes);
     let first_scan = !repo.loc_backfill_complete || repo.local_path.is_none();
-    let pushed_at_changed = settings.refresh_lines_on_change && repo.last_fetched_pushed_at != repo.pushed_at;
     let fetch_cursor_missing = repo.last_fetched_pushed_at.is_none() && repo.local_path.is_some();
     LocSyncDecision {
-        run: first_scan || pushed_at_changed || sweep_due,
+        run: first_scan || sweep_due,
         force_fetch: sweep_due || fetch_cursor_missing,
     }
 }
@@ -309,9 +308,8 @@ pub fn sync_all(state: &AppState) -> AppResult<SyncResult> {
     Ok(result)
 }
 
-/// Refresh repository metadata and activity frequently, scanning LOC only for
-/// repositories that are new, changed, incomplete, or due for the periodic
-/// verification sweep.
+/// Scheduled repository refresh, including activity and line-count work for
+/// repositories that are new, incomplete, or due for the periodic sweep.
 pub fn sync_activity(state: &AppState) -> AppResult<SyncResult> {
     let settings = app_settings(&state.database())?;
     if !settings.include_personal_repositories && !settings.include_company_repositories {
