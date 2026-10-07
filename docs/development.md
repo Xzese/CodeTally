@@ -88,6 +88,8 @@ flowchart LR
 
 The frontend does not talk to GitHub or SQLite directly. It invokes Rust commands through Tauri, and the backend serializes synchronization jobs so multiple refreshes cannot mutate the cache simultaneously.
 
+On the first launch of an updated version, installations with saved repositories automatically run a Force Refresh on the first available five-second scheduler tick. The request survives restarts and retries at most once per minute until a full refresh succeeds, then normal refresh intervals resume. Disabling both repository groups defers the request until a group is reenabled. Fresh installations still require an explicit first import. Screenshot fixtures never queue an update refresh.
+
 ## Efficiency and regression checks
 
 Dashboard polls reuse cached summaries and history while SQLite is unchanged. A persistent read-only observer checks `PRAGMA data_version`, so commits from synchronization or another connection invalidate the cache. Growth cutoffs also expire it when a measurement crosses the current, 7-day, 30-day, or 90-day boundary; entries live at most one minute. A write during a rebuild prevents that result from being cached.

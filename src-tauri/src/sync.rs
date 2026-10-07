@@ -30,7 +30,39 @@ pub const REFRESH_CADENCE_V2_METADATA_KEY: &str = "refresh_cadence_v2";
 pub const REFRESH_CADENCE_V3_METADATA_KEY: &str = "refresh_cadence_v3";
 pub const REFRESH_CADENCE_V4_METADATA_KEY: &str = "refresh_cadence_v4";
 pub const REFRESH_CADENCE_V5_METADATA_KEY: &str = "refresh_cadence_v5";
+const UPDATE_REFRESH_VERSION_KEY: &str = "update_refresh_version";
+const COMPLETED_UPDATE_REFRESH_VERSION_KEY: &str = "completed_update_refresh_version";
 const REPO_REFRESH_INTERVALS: [i64; 4] = [60, 1_440, 10_080, 43_200];
+
+/// Queue a full refresh once per installed version, including installations
+/// whose LOC migration already ran in an earlier release. First import stays
+/// an explicit user action; a failed refresh remains pending across restarts.
+pub fn prepare_update_refresh(db: &Database, version: &str) -> AppResult<()> {
+    db.set_metadata(UPDATE_REFRESH_VERSION_KEY, version)?;
+    if db.repositories()?.is_empty() {
+        db.set_metadata(COMPLETED_UPDATE_REFRESH_VERSION_KEY, version)?;
+    }
+    Ok(())
+}
+
+pub fn update_refresh_pending(db: &Database) -> AppResult<bool> {
+    let requested = db.metadata(UPDATE_REFRESH_VERSION_KEY)?;
+    Ok(requested.is_some() && requested != db.metadata(COMPLETED_UPDATE_REFRESH_VERSION_KEY)?)
+}
+
+fn complete_update_refresh(db: &Database, result: &mut SyncResult) {
+    if !result.ok { return; }
+    let completed = (|| -> AppResult<()> {
+        if let Some(version) = db.metadata(UPDATE_REFRESH_VERSION_KEY)? {
+            db.set_metadata(COMPLETED_UPDATE_REFRESH_VERSION_KEY, &version)?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = completed {
+        result.ok = false;
+        result.errors.push(format!("Update refresh completion: {error}"));
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LocSyncDecision {
@@ -311,6 +343,7 @@ pub fn sync_all(state: &AppState) -> AppResult<SyncResult> {
         result.errors.push(format!("Line-count sweep timestamp: {error}"));
     }
     record_refresh_timestamps(&state.database(), &mut result, true);
+    complete_update_refresh(&state.database(), &mut result);
     finish_progress(state, result.errors.first().cloned());
     Ok(result)
 }
@@ -969,4 +1002,39 @@ fn finish_progress(state: &AppState, error: Option<String>) {
         error,
         repository_name: prior.repository_name,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn update_refresh_survives_failure_and_restart_and_finishes_once_per_version() {
+        let path = std::env::temp_dir().join(format!("codetally-update-refresh-{}-{}.sqlite3", std::process::id(), Utc::now().timestamp_nanos_opt().unwrap()));
+        let db = Database::new(&path);
+        db.init().unwrap();
+        prepare_update_refresh(&db, "0.1.15").unwrap();
+        assert!(!update_refresh_pending(&db).unwrap(), "first import remains explicit");
+        db.upsert_repository(&Repository { github_id: "saved".into(), owner: "me".into(), name: "saved".into(), name_with_owner: "me/saved".into(), ..Repository::default() }).unwrap();
+        // v0.1.15 may already have performed its migration without rebuilding.
+        prepare_update_refresh(&db, "0.1.16").unwrap();
+        assert!(update_refresh_pending(&db).unwrap());
+        save_app_settings(&db, &AppSettings { include_personal_repositories: false, include_company_repositories: false, ..AppSettings::default() }).unwrap();
+        let state = AppState { db_path: path.clone(), cache_dir: path.with_extension("cache"), progress: Arc::new(Mutex::new(SyncProgress::default())), job_lock: Arc::new(Mutex::new(())), dashboard_cache: Arc::new(Mutex::new(Default::default())) };
+        assert!(sync_all(&state).unwrap().ok);
+        assert!(update_refresh_pending(&db).unwrap(), "disabled groups defer the rebuild until reenabled");
+        complete_update_refresh(&db, &mut SyncResult { ok: false, ..SyncResult::default() });
+        let reopened = Database::new(&path);
+        reopened.init().unwrap();
+        prepare_update_refresh(&reopened, "0.1.16").unwrap();
+        assert!(update_refresh_pending(&reopened).unwrap(), "failed or interrupted work retries after restart");
+        complete_update_refresh(&reopened, &mut SyncResult { ok: true, ..SyncResult::default() });
+        prepare_update_refresh(&reopened, "0.1.16").unwrap();
+        assert!(!update_refresh_pending(&reopened).unwrap(), "success restores normal scheduling on later launches");
+        prepare_update_refresh(&reopened, "0.1.17").unwrap();
+        assert!(update_refresh_pending(&reopened).unwrap(), "the next installed update queues new work");
+        std::fs::remove_file(&path).unwrap();
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
 }

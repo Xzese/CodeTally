@@ -111,6 +111,10 @@ pub fn run() {
             std::fs::create_dir_all(&cache_dir).map_err(|error| error.to_string())?;
             let database = db::Database::new(&db_path);
             database.init().map_err(|error| error.to_string())?;
+            if !screenshot_mode() {
+                sync::prepare_update_refresh(&database, &app.package_info().version.to_string())
+                    .map_err(|error| error.to_string())?;
+            }
             let settings = sync::app_settings(&database).map_err(|error| error.to_string())?;
             if let Some(parent) = app_data_dir.parent().filter(|_| !screenshot_mode()) {
                 let legacy_cache_dir = parent.join(LEGACY_APP_DATA_DIRECTORY).join("repositories");
