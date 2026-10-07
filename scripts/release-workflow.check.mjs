@@ -50,7 +50,7 @@ test('every job uses the selected commit with read-only source access', () => {
   // The remaining publication entry points are nightly and manual main runs.
   const triggers = workflow.on ?? workflow.true; // Ruby YAML 1.1 parses "on" as true.
   assert.deepEqual(Object.keys(triggers).sort(), ['schedule', 'workflow_dispatch']);
-  assert.deepEqual(triggers.schedule, [{ cron: '0 2 * * *' }]);
+  assert.deepEqual(triggers.schedule, [{ cron: '0 0 * * *' }]);
   assert.equal(source.if, "github.ref == 'refs/heads/main'");
   const checkouts = (job) => job.steps.filter((step) => step.uses?.startsWith('actions/checkout@'));
   assert.deepEqual(source.permissions, { contents: 'read' });

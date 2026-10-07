@@ -40,7 +40,7 @@ To prevent merging failing changes, configure repository branch protection or a 
 
 ### Automated GitHub releases
 
-The [release workflow](../.github/workflows/release.yml) runs nightly at **02:00 UTC** and publishes the exact `main` commit that triggered the scheduled run. It records that commit once, then uses the same SHA for version selection, tests, builds, and the published tag. Later changes to `main` wait for the next run.
+The [release workflow](../.github/workflows/release.yml) runs nightly at **00:00 UTC** and publishes the exact `main` commit that triggered the scheduled run. It records that commit once, then uses the same SHA for version selection, tests, builds, and the published tag. Later changes to `main` wait for the next run.
 
 Nightly and manual runs use the built-in `GITHUB_TOKEN`; no custom source-selection credentials are required. Source selection has read-only repository access and does not update `main`. Only publication has repository write access, to create the tag and upload the release assets. There is no separate release branch.
 
