@@ -424,11 +424,15 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         refresh_menu(&app, &state);
         let mut last_repo_attempt = Instant::now();
         let mut last_personal_attempt = Instant::now();
+        let mut last_update_attempt: Option<Instant> = None;
         loop {
             std::thread::sleep(Duration::from_secs(5));
             let db = state.database();
             let Ok(settings) = sync::app_settings(&db) else { continue; };
-            let repo_due = refresh_due(last_repo_attempt.elapsed(), settings.activity_refresh_minutes);
+            let update_due = (settings.include_personal_repositories || settings.include_company_repositories)
+                && sync::update_refresh_pending(&db).unwrap_or(false)
+                && last_update_attempt.is_none_or(|attempt| attempt.elapsed() >= Duration::from_secs(60));
+            let repo_due = update_due || refresh_due(last_repo_attempt.elapsed(), settings.activity_refresh_minutes);
             let personal_due = refresh_due(last_personal_attempt.elapsed(), settings.personal_refresh_minutes);
             if !repo_due && !personal_due { continue; }
             // Never queue an automatic refresh behind an active manual job.
@@ -443,7 +447,10 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
             }
             // One scheduler coordinates the broad repository pass and the fast
             // personal search; neither runs behind a manual job.
-            let outcome = if repo_due { sync::sync_activity(&state) } else { sync::sync_personal_work_items(&state) };
+            let outcome = if update_due {
+                sync::sync_all(&state)
+            } else if repo_due { sync::sync_activity(&state) } else { sync::sync_personal_work_items(&state) };
+            if update_due { last_update_attempt = Some(Instant::now()); }
             if let Err(error) = &outcome {
                 let mut progress = state.progress();
                 progress.running = false;
