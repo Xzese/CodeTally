@@ -233,18 +233,29 @@ with open(log, "a", encoding="utf-8") as stream:
 def emit(value):
     print(json.dumps(value, separators=(",", ":")))
 
-def repository(repo_id, name):
+def repository(repo_id, name, owner="me", stars=0, forks=0, language=None):
     return {
-        "id": repo_id, "name": name, "nameWithOwner": "me/" + name,
-        "url": "https://github.com/me/" + name,
-        "sshUrl": "git@github.com:me/" + name + ".git",
+        "id": repo_id, "name": name, "nameWithOwner": owner + "/" + name,
+        "url": "https://github.com/" + owner + "/" + name,
+        "sshUrl": "git@github.com:" + owner + "/" + name + ".git",
         "isPrivate": False, "isFork": False, "isArchived": False,
-        "stargazerCount": 0, "forkCount": 0,
+        "stargazerCount": stars, "forkCount": forks,
         "defaultBranchRef": {"name": "main"},
+        "primaryLanguage": {"name": language} if language else None,
         "createdAt": "2024-01-01T00:00:00Z",
         "updatedAt": "2026-09-10T00:00:00Z",
         "pushedAt": "2026-09-10T00:00:00Z",
     }
+
+def activity_repository(repo_id):
+    if mode == "rename-transfer" and repo_id == "repo-1":
+        return repository(repo_id, "renamed", "new-owner", 41, 7, "Go")
+    if mode == "rename-transfer" and repo_id == "repo-2":
+        return repository(repo_id, "one")
+    name = {"repo-1": "one", "repo-2": "two"}.get(repo_id)
+    if name is None:
+        name = repo_id[5:] if repo_id and repo_id.startswith("repo-") else (repo_id or "unknown")
+    return repository(repo_id, name)
 
 def variables_from_args():
     values = {}
@@ -283,13 +294,26 @@ if args[:2] == ["api", "graphql"]:
     if mode == "transient" and graphql_calls <= 2:
         print("operation timed out", file=sys.stderr)
         raise SystemExit(1)
+    if mode == "http-transient" and graphql_calls <= 2:
+        status = 502 if graphql_calls == 1 else 503
+        message = "Bad Gateway" if status == 502 else "Service Unavailable"
+        with open(log, "a", encoding="utf-8") as stream:
+            stream.write("HTTP " + str(status) + " " + message + "\n")
+        if status == 502:
+            # The installed app's exact failure had only stderr status text.
+            print("gh: HTTP 502", file=sys.stderr)
+        else:
+            # Also exercise retry classification from response headers alone.
+            print("HTTP/2.0 503 Service Unavailable\n\n{}")
+        raise SystemExit(1)
     if mode == "retry-exhausted":
-        print("connection reset by peer", file=sys.stderr)
+        print("HTTP/2.0 503 Service Unavailable\n\n{}")
+        print("gh: HTTP 503 Service Unavailable", file=sys.stderr)
         raise SystemExit(1)
     if mode == "permanent":
         print("permission denied", file=sys.stderr)
         raise SystemExit(1)
-    if mode == "missing-repository" and variables.get("name") == "one":
+    if mode == "missing-repository" and variables.get("repositoryId") == "repo-1":
         emit({"data": {"repository": None}, "errors": [{"type": "NOT_FOUND", "path": ["repository"], "message": "Repository not found"}]})
         print("gh: Could not resolve to a Repository with the name 'me/one'.", file=sys.stderr)
         raise SystemExit(1)
@@ -301,7 +325,7 @@ if args[:2] == ["api", "graphql"]:
         print('HTTP/2.0 401 Unauthorized\r\nContent-Type: application/json\r\n\r\n{"message":"Bad credentials"}')
         print("gh: Bad credentials (HTTP 401)", file=sys.stderr)
         raise SystemExit(1)
-    if mode == "permission-denied" and variables.get("name") == "one":
+    if mode == "permission-denied" and variables.get("repositoryId") == "repo-1":
         print("gh: Resource not accessible (HTTP 403)", file=sys.stderr)
         raise SystemExit(1)
 
@@ -311,6 +335,12 @@ if args[:2] == ["api", "graphql"]:
         raise SystemExit(0)
 
     aliases = re.findall(r"\b(prOpen|issueOpen|prClosed|issueClosed):(pullRequests|issues)\(", query)
+    if mode == "null-repository" and aliases:
+        emit({"data": {"rateLimit": {"remaining": 5000}, "repository": None}})
+        raise SystemExit(0)
+    if mode == "missing-repository-field":
+        emit({"data": {"rateLimit": {"remaining": 5000, "resetAt": "2099-01-01T00:00:00Z"}}})
+        raise SystemExit(0)
     if not aliases:
         start = 100 if variables.get("after") == "OWNED_100" else 0
         if mode == "discovery-failed" and start:
@@ -413,9 +443,15 @@ if args[:2] == ["api", "graphql"]:
                            "CLOSED" if closed else "OPEN", timestamp)]
         return filter_nodes(alias, nodes), more, "CURSOR_" + alias + "_" + str(page_number) if more else None
 
+    repository_id = variables.get("repositoryId")
+    repo_data = activity_repository(repository_id)
+    if mode == "mismatched-repository" and repository_id == "repo-1":
+        repo_data["id"] = "different-github-node"
     data = {"rateLimit": {"remaining": 0 if mode == "low-final" else 5000,
                           "resetAt": "2099-01-01T00:00:00Z"},
-            "repository": {"openPRs": {"totalCount": 17}, "openIssues": {"totalCount": 23}}}
+            "repository": repo_data}
+    data["repository"]["openPRs"] = {"totalCount": 17}
+    data["repository"]["openIssues"] = {"totalCount": 23}
     for alias, _connection in aliases:
         nodes, more, cursor = page_for(alias)
         data["repository"][alias] = {"nodes": nodes,
@@ -529,6 +565,116 @@ fn paginated_activity_import_keeps_all_pages_and_preserves_server_counts() {
 }
 
 #[test]
+fn activity_refresh_tracks_repository_rename_and_transfer_by_node_identity() {
+    let root = unique_root("rename-transfer");
+    let fake = FakeGh::new("rename-transfer", "rename-transfer", 2);
+    let repo = repository("repo-1", "one");
+    let mut name_reuse = repository("repo-2", "other");
+    name_reuse.owner = "reused-owner".into();
+    name_reuse.name_with_owner = "reused-owner/other".into();
+    name_reuse.url = "https://github.com/reused-owner/other".into();
+    name_reuse.ssh_url = "git@github.com:reused-owner/other.git".into();
+    let (database, database_path) = seed_database(&root, &[repo, name_reuse]);
+    let stored_repos = database.repositories().expect("repositories");
+    let stored = stored_repos.iter().find(|repo| repo.github_id == "repo-1").expect("original node").clone();
+    let reused_name = stored_repos.iter().find(|repo| repo.github_id == "repo-2").expect("repository reusing old name").clone();
+    let original_path = stored.local_path.clone().expect("seeded clone path");
+    database.mark_sync(stored.id, Some("previous refresh error")).expect("seed sync error");
+    database.upsert_snapshot(&Snapshot {
+        id: 0,
+        repository_id: stored.id,
+        commit_sha: "before-transfer".into(),
+        commit_date: "2026-08-01T00:00:00Z".into(),
+        snapshot_date: "2026-08-01T00:00:00Z".into(),
+        total_loc: 123,
+        source_loc: 100,
+        test_loc: 20,
+        docs_loc: 3,
+        created_at: "2026-08-01T00:00:00Z".into(),
+    }).expect("seed history");
+    database.set_metadata("github_discovered_at", &Utc::now().to_rfc3339()).expect("skip discovery");
+    let app = state(database_path.clone(), &root);
+
+    let result = fake.with_path(|| sync::sync_activity(&app).expect("renamed repository refresh"));
+    assert!(result.ok, "refresh should succeed: {:?}", result.errors);
+    assert_eq!(result.activity_repositories_synced, 2);
+    let calls = fake.calls();
+    assert!(calls.contains("repositoryId=repo-1"), "activity lookup should address the saved node ID: {calls}");
+    assert!(calls.contains("repositoryId=repo-2"), "the repository reusing the old name has a separate node ID: {calls}");
+    assert!(!calls.contains("name=one"), "activity lookup should not address the stale repository name: {calls}");
+
+    let refreshed = database.repository(stored.id).expect("repository lookup").expect("same repository row");
+    assert_eq!(refreshed.id, stored.id);
+    assert_eq!(refreshed.github_id, "repo-1");
+    assert_eq!(refreshed.owner, "new-owner");
+    assert_eq!(refreshed.name, "renamed");
+    assert_eq!(refreshed.name_with_owner, "new-owner/renamed");
+    assert_eq!(refreshed.url, "https://github.com/new-owner/renamed");
+    assert_eq!(refreshed.primary_language.as_deref(), Some("Go"));
+    assert_eq!(refreshed.star_count, 41);
+    assert_eq!(refreshed.fork_count, 7);
+    assert_eq!(refreshed.local_path.as_deref(), Some(original_path.as_str()));
+    assert_eq!(refreshed.last_error, None);
+    assert!(pull_requests(&database, stored.id).iter().all(|item| item.repository == "new-owner/renamed"));
+    assert!(issues(&database, stored.id).iter().all(|item| item.repository == "new-owner/renamed"));
+    assert!(database.history(Some(stored.id)).expect("retained history").iter().any(|point| point.snapshot_date == "2026-08-01"));
+    let reused_name = database.repository(reused_name.id).expect("repository lookup").expect("reused old name row");
+    assert_eq!(reused_name.github_id, "repo-2");
+    assert_eq!(reused_name.name_with_owner, "me/one", "the old name can now identify a different node");
+
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_file(database_path);
+}
+
+#[test]
+fn missing_or_mismatched_activity_repository_identity_preserves_cached_data() {
+    use codetally_lib::error::AppError;
+
+    let root = unique_root("invalid-activity-identity");
+    let mut fake = FakeGh::new("invalid-activity-identity", "pages", 1);
+    let repo = repository("repo-1", "one");
+    let (database, database_path) = seed_database(&root, std::slice::from_ref(&repo));
+    let stored = database.repositories().expect("repositories").remove(0);
+    fake.with_path(|| github_sync::sync_activity(&database, &stored).expect("seed activity cache"));
+    let old_repository = database.repository(stored.id).expect("repository lookup").expect("cached repository");
+    let old_repository_json = serde_json::to_value(&old_repository).expect("repository JSON");
+    let old_prs = serde_json::to_value(pull_requests(&database, stored.id)).expect("cached PR JSON");
+    let old_issues = serde_json::to_value(issues(&database, stored.id)).expect("cached issue JSON");
+    let cursor_keys = [
+        format!("github_activity_v2:{}:pullRequests:true", stored.id),
+        format!("github_activity_v2:{}:issues:true", stored.id),
+        format!("github_activity_v2:{}:pullRequests:false", stored.id),
+        format!("github_activity_v2:{}:issues:false", stored.id),
+    ];
+    let old_cursors: Vec<_> = cursor_keys.iter().map(|key| database.metadata(key).expect("activity cursor")).collect();
+
+    for (mode, expected) in [
+        ("missing-repository", "unavailable"),
+        ("null-repository", "unavailable"),
+        ("missing-repository-field", "invalid"),
+        ("mismatched-repository", "invalid"),
+    ] {
+        fake.scenario = format!("{mode}:1");
+        fake.clear_calls();
+        let error = fake.with_path(|| github_sync::sync_activity(&database, &stored).expect_err("invalid repository identity should fail"));
+        if expected == "unavailable" {
+            assert!(matches!(error, AppError::RepositoryUnavailable), "{mode}: {error:?}");
+        } else {
+            assert!(matches!(error, AppError::InvalidArgument(_)), "{mode}: {error:?}");
+        }
+        assert_eq!(serde_json::to_value(database.repository(stored.id).expect("repository lookup").unwrap()).expect("repository JSON"), old_repository_json, "{mode} must preserve canonical metadata");
+        assert_eq!(serde_json::to_value(pull_requests(&database, stored.id)).expect("cached PR JSON"), old_prs, "{mode} must preserve cached PRs");
+        assert_eq!(serde_json::to_value(issues(&database, stored.id)).expect("cached issue JSON"), old_issues, "{mode} must preserve cached issues");
+        for (key, old_cursor) in cursor_keys.iter().zip(&old_cursors) {
+            assert_eq!(database.metadata(key).expect("activity cursor").as_deref(), old_cursor.as_deref(), "{mode} must preserve feed checkpoints");
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_file(database_path);
+}
+
+#[test]
 fn transient_graphql_failures_are_retried_before_activity_import_fails() {
     let root = unique_root("transient-retry");
     let fake = FakeGh::new("transient-retry", "transient", 1);
@@ -549,6 +695,29 @@ fn transient_graphql_failures_are_retried_before_activity_import_fails() {
 }
 
 #[test]
+fn transient_http_502_and_503_failures_are_retried_before_activity_import() {
+    let root = unique_root("http-transient-retry");
+    let fake = FakeGh::new("http-transient-retry", "http-transient", 1);
+    let repo = repository("repo-1", "one");
+    let (database, database_path) = seed_database(&root, std::slice::from_ref(&repo));
+    let stored = database.repositories().expect("repositories").remove(0);
+
+    let imported = fake.with_path(|| {
+        github_sync::sync_activity(&database, &stored)
+            .expect("transient HTTP gateway failures should be retried")
+    });
+    assert!(imported.2, "activity feeds should finish after HTTP retries");
+    assert_eq!(pull_requests(&database, stored.id).len(), 4);
+    assert_eq!(issues(&database, stored.id).len(), 4);
+    assert_eq!(fake.calls().matches("api graphql").count(), 4);
+    assert!(fake.calls().contains("HTTP 502 Bad Gateway"));
+    assert!(fake.calls().contains("HTTP 503 Service Unavailable"));
+
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_file(database_path);
+}
+
+#[test]
 fn exhausted_transient_graphql_retries_preserve_cached_activity() {
     let root = unique_root("retry-exhausted");
     let mut fake = FakeGh::new("retry-exhausted", "pages", 1);
@@ -562,7 +731,7 @@ fn exhausted_transient_graphql_retries_preserve_cached_activity() {
     let error = fake.with_path(|| {
         github_sync::sync_activity(&database, &stored).expect_err("exhausted transient failures should be reported")
     });
-    assert!(error.to_string().contains("connection reset by peer"));
+    assert!(error.to_string().contains("HTTP 503 Service Unavailable"));
     assert_eq!(fake.calls().matches("api graphql").count(), 4, "retry exhaustion should make one initial request and three retries: {}", fake.calls());
     assert_eq!(pull_requests(&database, stored.id).len(), 4, "cached pull requests should survive retry exhaustion");
     assert_eq!(issues(&database, stored.id).len(), 4, "cached issues should survive retry exhaustion");
@@ -1206,11 +1375,11 @@ fn rate_limit_stops_following_repositories_and_pause_survives_restart() {
     assert!(first_message.to_ascii_lowercase().contains("paused"));
     let calls = fake.calls();
     assert!(
-        calls.lines().any(|call| call.contains("name=one")),
+        calls.lines().any(|call| call.contains("repositoryId=repo-1")),
         "first repository should reach GraphQL"
     );
     assert!(
-        !calls.lines().any(|call| call.contains("name=two")),
+        !calls.lines().any(|call| call.contains("repositoryId=repo-2")),
         "rate limit must prevent following repositories: {calls}"
     );
     assert!(database
@@ -1340,7 +1509,7 @@ fn authentication_failures_stop_refresh_and_preserve_committed_pages() {
         if refresh == "personal" {
             assert_eq!(calls.lines().filter(|call| call.starts_with("api graphql")).count(), 1, "authentication failure skips totals refresh");
         }
-        assert!(!calls.contains("name=two"), "authentication failure stops subsequent repositories: {calls}");
+        assert!(!calls.contains("repositoryId=repo-2"), "authentication failure stops subsequent repositories: {calls}");
         assert!(!calls.lines().any(|call| call.starts_with("repo list")), "failed identity request stops discovery");
         let one = database.repositories().unwrap().into_iter().find(|repo| repo.name == "one").unwrap();
         assert_eq!(pull_requests(&database, one.id).len(), expected_pages * 2);
@@ -1365,7 +1534,7 @@ fn authentication_failures_stop_refresh_and_preserve_committed_pages() {
     assert!(!result.ok);
     assert!(!result.message.contains("not authenticated"));
     assert_eq!(result.activity_repositories_synced, 1);
-    assert!(fake.calls().contains("name=two"));
+    assert!(fake.calls().contains("repositoryId=repo-2"));
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -1396,8 +1565,8 @@ fn excluded_repositories_are_skipped_by_activity_sync_but_selected_repositories_
     assert_eq!(result.activity_repositories_synced, 1);
     assert!(database.metadata(sync::LAST_FULL_REFRESH_METADATA_KEY).expect("broad refresh marker").is_some());
     let calls = fake.calls();
-    assert!(calls.lines().any(|call| call.contains("name=one")), "selected repository should reach GitHub: {calls}");
-    assert!(!calls.lines().any(|call| call.contains("name=two")), "excluded repository must not reach GitHub: {calls}");
+    assert!(calls.lines().any(|call| call.contains("repositoryId=repo-1")), "selected repository should reach GitHub: {calls}");
+    assert!(!calls.lines().any(|call| call.contains("repositoryId=repo-2")), "excluded repository must not reach GitHub: {calls}");
 
     let _ = std::fs::remove_dir_all(root);
     let _ = std::fs::remove_file(database_path);
@@ -1458,7 +1627,7 @@ fn unavailable_repository_is_removed_with_cached_data_and_other_repositories_con
     let result = fake.with_path(|| sync::sync_activity(&sync_state).unwrap());
     assert!(result.ok, "missing repository must not fail refresh: {:?}", result.errors);
     assert_eq!(result.activity_repositories_synced, 1);
-    assert_eq!(fake.calls().lines().filter(|call| call.contains("name=one")).count(), 1);
+    assert_eq!(fake.calls().lines().filter(|call| call.contains("repositoryId=repo-1")).count(), 1);
     assert!(database.repository(stored.id).unwrap().is_none());
     assert!(!database.repository_selection().unwrap().iter().any(|repo| repo.github_id == stored.github_id));
     assert!(!database.summaries().unwrap().iter().any(|repo| repo.id == stored.id));
@@ -1473,13 +1642,13 @@ fn unavailable_repository_is_removed_with_cached_data_and_other_repositories_con
     fake.clear_calls();
     let restarted = state(sync_state.db_path.clone(), &root);
     assert!(fake.with_path(|| sync::sync_activity(&restarted).unwrap()).ok);
-    assert!(!fake.calls().contains("name=one"));
-    assert!(fake.calls().contains("name=two"));
+    assert!(!fake.calls().contains("repositoryId=repo-1"));
+    assert!(fake.calls().contains("repositoryId=repo-2"));
 
     fake.clear_calls();
     let manual = fake.with_path(|| sync::sync_one(&restarted, stored.id).expect_err("removed repository should no longer be addressable"));
     assert!(manual.to_string().contains("was not found"));
-    assert!(!fake.calls().contains("name=one"));
+    assert!(!fake.calls().contains("repositoryId=repo-1"));
 
     fake.scenario = "pages:2".into();
     fake.with_path(|| sync::discover(&restarted).unwrap());
