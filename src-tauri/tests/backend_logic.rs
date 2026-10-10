@@ -458,6 +458,31 @@ fn managed_clone_scopes_branches_and_handles_empty_remote_and_default_branch_cha
     git(&source, &["push", "origin", ":main"]);
     let dangling_head = ensure_clone(&repo, &root.join("dangling-head-cache")).unwrap();
     assert_eq!(current_commit_optional(&dangling_head).unwrap().unwrap().0, unused_sha, "a deleted remote HEAD must not hide the valid discovered branch");
+
+    // A transfer can move the remote while discovery still leaves the clone
+    // at its old owner/name cache path. Reuse that managed path and retarget
+    // origin before fetching the moved repository.
+    let moved_remote = root.join("moved-remote.git");
+    std::fs::rename(&remote, &moved_remote).unwrap();
+    let moved_url = format!("file://{}", moved_remote.display());
+    git(&source, &["remote", "set-url", "origin", &moved_url]);
+    git(&source, &["checkout", "unused"]);
+    std::fs::write(source.join("unused.rs"), "fn moved() {}\n").unwrap();
+    git(&source, &["add", "."]);
+    git(&source, &["commit", "-m", "after transfer"]);
+    git(&source, &["push", "origin", "unused"]);
+    let transferred_sha = git(&source, &["rev-parse", "HEAD"]);
+    repo.owner = "new-owner".into();
+    repo.name = "renamed".into();
+    repo.name_with_owner = "new-owner/renamed".into();
+    repo.url = moved_url.clone();
+    repo.ssh_url = "git@github.com:new-owner/renamed.git".into();
+    repo.local_path = Some(fresh.to_string_lossy().into_owned());
+    let reused = ensure_clone(&repo, &fresh_cache).unwrap();
+    assert_eq!(reused, fresh, "a managed saved path should survive an owner/name change");
+    assert_eq!(git(&reused, &["remote", "get-url", "origin"]), moved_url);
+    assert_eq!(current_commit_optional(&reused).unwrap().unwrap().0, transferred_sha);
+    assert!(!fresh_cache.join("new-owner").join("renamed").exists(), "transfer should not create a second clone");
     let _ = std::fs::remove_dir_all(root);
 }
 

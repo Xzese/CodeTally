@@ -9,6 +9,7 @@ use std::time::Duration as StdDuration;
 pub const PAUSE_KEY: &str = "github_pause_until";
 // Four total attempts with 250 ms, 500 ms, and 1 s waits between retries.
 const GRAPHQL_TRANSIENT_RETRIES: u32 = 3;
+const REPOSITORY_FIELDS: &str = "id name nameWithOwner url sshUrl isPrivate isFork isArchived stargazerCount forkCount defaultBranchRef{name} primaryLanguage{name} createdAt updatedAt pushedAt";
 const GRAPHQL_RETRY_BASE_MILLIS: u64 = 250;
 const GRAPHQL_RETRY_MAX_MILLIS: u64 = 2_000;
 
@@ -84,7 +85,11 @@ fn transient_network_failure(error: &AppError, stdout: &str, stderr: &str) -> bo
     if limited(&message) {
         return false;
     }
-    message.contains("reset by peer") || message.contains("operation timed out") || message.contains("i/o timeout")
+    let status = stdout.lines().next().filter(|line| line.starts_with("HTTP/"))
+        .and_then(|line| line.split_whitespace().nth(1)).and_then(|code| code.parse::<u16>().ok());
+    matches!(status, Some(500 | 502 | 503 | 504))
+        || [500, 502, 503, 504].iter().any(|code| message.contains(&format!("http {code}")))
+        || message.contains("reset by peer") || message.contains("operation timed out") || message.contains("i/o timeout")
 }
 
 fn graphql_retry_delay(retry: u32) -> StdDuration {
@@ -138,7 +143,7 @@ pub fn parse_response(db: &Database, success: bool, stdout: &str, stderr: &str) 
 /// Identity, quota and the first owned-repository page share a request.
 /// Accumulate complete metadata before discovery publishes it to SQLite.
 pub(crate) fn discover_owned(db: &Database, include_owned: bool) -> AppResult<(crate::models::GithubUser, Vec<Repository>)> {
-    let fields = "id name nameWithOwner url sshUrl isPrivate isFork isArchived stargazerCount forkCount defaultBranchRef{name} primaryLanguage{name} createdAt updatedAt pushedAt";
+    let fields = REPOSITORY_FIELDS;
     let query = if include_owned {
         format!("query($after:String){{rateLimit{{remaining resetAt}} viewer{{login repositories(first:100,after:$after,ownerAffiliations:[OWNER]){{nodes{{{fields}}} pageInfo{{hasNextPage endCursor}}}}}}}}")
     } else {
@@ -199,7 +204,7 @@ struct Feed {
 }
 
 fn activity_query(repo: &Repository, feeds: &[Feed], requested: &[usize], board_enabled: bool) -> (String, Value) {
-    let mut variables = json!({"owner": repo.owner, "name": repo.name});
+    let mut variables = json!({"repositoryId": repo.github_id});
     let mut definitions = String::new();
     let mut selections = String::new();
     for &index in requested {
@@ -219,7 +224,7 @@ fn activity_query(repo: &Repository, feeds: &[Feed], requested: &[usize], board_
         let identity_fields = if !board_enabled { "" } else if feed.kind == 0 { "id " } else { "id stateReason " };
         selections.push_str(&format!(" {}:{connection}(first:100,after:${variable},states:{states}{filter},orderBy:{{field:UPDATED_AT,direction:DESC}}){{nodes{{{identity_fields}{fields}}} pageInfo{{hasNextPage endCursor}}}}", feed.alias));
     }
-    let query = format!("query($owner:String!,$name:String!{definitions}){{rateLimit{{remaining resetAt}} repository(owner:$owner,name:$name){{openPRs:pullRequests(states:OPEN){{totalCount}} openIssues:issues(states:OPEN){{totalCount}}{selections}}}}}");
+    let query = format!("query($repositoryId:ID!{definitions}){{rateLimit{{remaining resetAt}} repository:node(id:$repositoryId){{... on Repository{{{REPOSITORY_FIELDS} openPRs:pullRequests(states:OPEN){{totalCount}} openIssues:issues(states:OPEN){{totalCount}}{selections}}}}}}}");
     (query, variables)
 }
 
@@ -322,6 +327,7 @@ pub fn sync_activity(db: &Database, repo: &Repository) -> AppResult<(i64, i64, b
 }
 
 pub(crate) fn sync_activity_reporting(db: &Database, repo: &Repository, counts: &mut [i64; 2]) -> AppResult<(i64, i64, bool)> {
+    let mut canonical_repo = repo.clone();
     let cycle_started = Utc::now().to_rfc3339();
     let board_enabled = crate::sync::app_settings(db)?.kanban_enabled;
     let mut feeds = Vec::with_capacity(4);
@@ -342,7 +348,7 @@ pub(crate) fn sync_activity_reporting(db: &Database, repo: &Repository, counts: 
     for _ in 0..5 {
         let requested: Vec<_> = feeds.iter().enumerate().filter_map(|(index, feed)| (!feed.done).then_some(index)).collect();
         if requested.is_empty() { break; }
-        let (query, variables) = activity_query(repo, &feeds, &requested, board_enabled);
+        let (query, variables) = activity_query(&canonical_repo, &feeds, &requested, board_enabled);
         let response = match graphql(db, &query, variables) {
             Ok(response) => response,
             Err(error) => {
@@ -350,8 +356,21 @@ pub(crate) fn sync_activity_reporting(db: &Database, repo: &Repository, counts: 
                 return Err(error);
             }
         };
+        let repository = response["data"].get("repository")
+            .ok_or_else(|| AppError::InvalidArgument("GitHub response missing repository".into()))?;
+        if repository.is_null() { return Err(AppError::RepositoryUnavailable); }
+        let metadata: crate::models::GithubRepositoryJson = serde_json::from_value(repository.clone())?;
+        if metadata.id != repo.github_id {
+            return Err(AppError::InvalidArgument("GitHub response repository identity does not match the saved repository".into()));
+        }
+        // Names and owners can change between discovery runs. Address the saved
+        // identity and refresh its canonical metadata without replacing history,
+        // selection preferences, local clone or durable pagination checkpoints.
+        let refreshed = github::repository_from_json(metadata);
+        db.upsert_repository(&refreshed)?;
+        canonical_repo = db.repository(repo.id)?.ok_or(AppError::RepositoryNotFound(repo.id))?;
         for index in requested {
-            publish_feed_page(db, repo, &mut feeds[index], &response["data"]["repository"], board_enabled, counts)?;
+            publish_feed_page(db, &canonical_repo, &mut feeds[index], repository, board_enabled, counts)?;
         }
     }
     Ok((counts[0], counts[1], feeds.iter().all(|feed| feed.done)))

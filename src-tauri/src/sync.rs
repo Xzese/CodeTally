@@ -796,7 +796,10 @@ fn sync_repo_data(state: &AppState, repo: &Repository, run_loc: bool, force_fetc
     if activity_fetched {
         match github_sync::ensure_available(&db) {
             Err(error) => errors.push(error.to_string()),
-            Ok(()) if run_loc => match sync_loc(state, repo, force_fetch) {
+            Ok(()) if run_loc => match db.repository(repo.id).and_then(|updated| {
+                let updated = updated.ok_or(AppError::RepositoryNotFound(repo.id))?;
+                sync_loc(state, &updated, force_fetch)
+            }) {
                 Ok(created) => { snapshots = created; loc_completed = true; }
                 Err(error) => errors.push(error.to_string()),
             },

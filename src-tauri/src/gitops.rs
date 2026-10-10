@@ -64,8 +64,14 @@ pub fn ensure_clone(repo: &Repository, cache_root: &Path) -> AppResult<PathBuf> 
 /// the existing `ensure_clone` API keeps its historical fetch-by-default
 /// behavior for compatibility.
 pub fn ensure_clone_with_fetch(repo: &Repository, cache_root: &Path, fetch: bool) -> AppResult<PathBuf> {
-    let local = cache_path(cache_root, repo);
+    let local = reusable_managed_clone(repo, cache_root).unwrap_or_else(|| cache_path(cache_root, repo));
     if local.join(".git").is_dir() {
+        let remote_url = https_clone_url(repo);
+        match run_git(Some(&local), &["remote".into(), "get-url".into(), "origin".into()]) {
+            Ok(output) if String::from_utf8_lossy(&output.stdout).trim() == remote_url => {},
+            Ok(_) => { run_git(Some(&local), &["remote".into(), "set-url".into(), "origin".into(), remote_url])?; },
+            Err(_) => { run_git(Some(&local), &["remote".into(), "add".into(), "origin".into(), remote_url])?; },
+        }
         if fetch {
             fetch_default_branch(&local, &repo.default_branch)?;
         }
@@ -87,6 +93,14 @@ pub fn ensure_clone_with_fetch(repo: &Repository, cache_root: &Path, fetch: bool
     }
     checkout_branch(&local, &repo.default_branch)?;
     Ok(local)
+}
+
+fn reusable_managed_clone(repo: &Repository, cache_root: &Path) -> Option<PathBuf> {
+    let saved = Path::new(repo.local_path.as_deref()?);
+    let canonical_root = cache_root.canonicalize().ok()?;
+    let canonical_saved = saved.canonicalize().ok()?;
+    (canonical_saved.starts_with(canonical_root) && canonical_saved.join(".git").is_dir())
+        .then(|| saved.to_path_buf())
 }
 
 fn default_branch(branch: &str) -> &str {
