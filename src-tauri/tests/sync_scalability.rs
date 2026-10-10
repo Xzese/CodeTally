@@ -137,6 +137,7 @@ struct FakeGh {
     bin: PathBuf,
     log: PathBuf,
     scenario: String,
+    activity_timestamp: String,
 }
 
 impl FakeGh {
@@ -161,6 +162,10 @@ impl FakeGh {
             bin,
             log,
             scenario: format!("{scenario}:{repositories}"),
+            // Capture once for both seeded rows and fake API responses. Keep
+            // activity within the rolling import window on every test date.
+            activity_timestamp: (Utc::now() - Duration::days(1))
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         }
     }
 
@@ -177,6 +182,7 @@ impl FakeGh {
         let original_path = std::env::var_os("PATH");
         let original_log = std::env::var_os("CODETALLY_FAKE_GH_LOG");
         let original_scenario = std::env::var_os("CODETALLY_FAKE_GH_SCENARIO");
+        let original_timestamp = std::env::var_os("CODETALLY_FAKE_GH_TIMESTAMP");
         let mut paths = vec![self.bin.clone()];
         if let Some(path) = original_path.as_ref() {
             paths.extend(std::env::split_paths(path));
@@ -184,6 +190,7 @@ impl FakeGh {
         std::env::set_var("PATH", std::env::join_paths(paths).expect("fake gh PATH"));
         std::env::set_var("CODETALLY_FAKE_GH_LOG", &self.log);
         std::env::set_var("CODETALLY_FAKE_GH_SCENARIO", &self.scenario);
+        std::env::set_var("CODETALLY_FAKE_GH_TIMESTAMP", &self.activity_timestamp);
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation));
         match original_path {
@@ -192,6 +199,7 @@ impl FakeGh {
         }
         restore_env("CODETALLY_FAKE_GH_LOG", original_log);
         restore_env("CODETALLY_FAKE_GH_SCENARIO", original_scenario);
+        restore_env("CODETALLY_FAKE_GH_TIMESTAMP", original_timestamp);
         drop(_lock);
         match result {
             Ok(value) => value,
@@ -368,7 +376,7 @@ if args[:2] == ["api", "graphql"]:
         raise SystemExit(1)
 
     timestamp = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-    fixed_timestamp = "2026-09-10T00:00:00Z"
+    fixed_timestamp = os.environ["CODETALLY_FAKE_GH_TIMESTAMP"]
 
     def make_node(alias, kind, number, title, state, updated, ci=None):
         closed = alias.endswith("Closed")
@@ -771,7 +779,7 @@ fn single_page_incremental_refresh_imports_state_and_ci_changes_at_the_same_time
     let (database, database_path) = seed_database(&root, std::slice::from_ref(&repo));
     let stored = database.repositories().expect("repositories").remove(0);
 
-    let same_update = "2026-09-10T00:00:00Z".to_string();
+    let same_update = fake.activity_timestamp.clone();
     database
         .upsert_pull_request(&codetally_lib::models::PullRequest {
             repository_id: stored.id,
@@ -846,7 +854,7 @@ fn single_page_incremental_refresh_imports_state_and_ci_changes_at_the_same_time
         .find(|item| item.number == 8)
         .expect("CI refresh PR");
     assert_eq!(
-        ci_refresh.updated_at, "2026-09-10T00:00:00Z",
+        ci_refresh.updated_at, fake.activity_timestamp,
         "the API timestamp is unchanged"
     );
     assert_eq!(
