@@ -1,7 +1,7 @@
 //! Native lifecycle and scheduling remain active when the dashboard is hidden.
 use crate::models::{AppSettings, DashboardTotals, HistoryPoint, MenuBarMetric};
 use crate::sync::{self, AppState};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 #[cfg(any(test, not(target_os = "macos")))]
 use chrono::{Duration as ChronoDuration, NaiveDate};
 use std::time::{Duration, Instant};
@@ -422,8 +422,8 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     }
     std::thread::spawn(move || {
         refresh_menu(&app, &state);
-        let mut last_repo_attempt = Instant::now();
-        let mut last_personal_attempt = Instant::now();
+        let mut last_repo_attempt = None;
+        let mut last_personal_attempt = None;
         let mut last_update_attempt: Option<Instant> = None;
         loop {
             std::thread::sleep(Duration::from_secs(5));
@@ -432,8 +432,11 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
             let update_due = (settings.include_personal_repositories || settings.include_company_repositories)
                 && sync::update_refresh_pending(&db).unwrap_or(false)
                 && last_update_attempt.is_none_or(|attempt| attempt.elapsed() >= Duration::from_secs(60));
-            let repo_due = update_due || refresh_due(last_repo_attempt.elapsed(), settings.activity_refresh_minutes);
-            let personal_due = refresh_due(last_personal_attempt.elapsed(), settings.personal_refresh_minutes);
+            let now = Utc::now();
+            let Ok(repo_refreshed_at) = db.metadata(sync::LAST_FULL_REFRESH_METADATA_KEY) else { continue; };
+            let Ok(personal_refreshed_at) = db.metadata(sync::LAST_PERSONAL_REFRESH_METADATA_KEY) else { continue; };
+            let repo_due = update_due || refresh_due(repo_refreshed_at.as_deref(), last_repo_attempt, now, settings.activity_refresh_minutes);
+            let personal_due = refresh_due(personal_refreshed_at.as_deref(), last_personal_attempt, now, settings.personal_refresh_minutes);
             if !repo_due && !personal_due { continue; }
             // Never queue an automatic refresh behind an active manual job.
             let Ok(_job) = state.job_lock.try_lock() else {
@@ -441,8 +444,6 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
             };
             // First import remains an explicit user action.
             if !db.repositories().is_ok_and(|repos| !repos.is_empty()) {
-                last_repo_attempt = Instant::now();
-                last_personal_attempt = Instant::now();
                 continue;
             }
             // One scheduler coordinates the broad repository pass and the fast
@@ -458,10 +459,10 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
                 state.set_progress(progress);
             }
             if repo_due {
-                last_repo_attempt = Instant::now();
-                if outcome.as_ref().is_ok_and(|result| result.ok) { last_personal_attempt = Instant::now(); }
+                last_repo_attempt = Some(Utc::now());
+                if outcome.as_ref().is_ok_and(|result| result.ok) { last_personal_attempt = last_repo_attempt; }
             } else {
-                last_personal_attempt = Instant::now();
+                last_personal_attempt = Some(Utc::now());
             }
             drop(_job);
             refresh_menu(&app, &state);
@@ -478,16 +479,20 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-fn refresh_due(elapsed: Duration, interval_minutes: i64) -> bool {
-    elapsed >= Duration::from_secs(interval_minutes.max(1) as u64 * 60)
+/// Saved completion times survive relaunches and wall time catches up after
+/// sleep. Attempts keep failed jobs on their cadence without recording success;
+/// a later manual refresh also moves the next automatic refresh forward.
+fn refresh_due(last_refreshed_at: Option<&str>, last_attempt: Option<DateTime<Utc>>, now: DateTime<Utc>, interval_minutes: i64) -> bool {
+    let last_refresh = last_refreshed_at.and_then(|value| value.parse::<DateTime<Utc>>().ok());
+    let latest = last_refresh.into_iter().chain(last_attempt).filter(|time| *time <= now).max();
+    latest.is_none_or(|time| now.signed_duration_since(time) >= chrono::Duration::minutes(interval_minutes.max(1)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{group_menu_tickets, hides_dock_icon, loc_sparkline, refresh_due, MenuTicket};
     use crate::models::{AppSettings, HistoryPoint, MenuBarMetric};
-    use chrono::NaiveDate;
-    use std::time::Duration;
+    use chrono::{Duration, NaiveDate, Utc};
 
     #[test]
     fn combined_menu_keeps_all_totals_and_restores_separate_selection() {
@@ -515,10 +520,41 @@ mod tests {
     #[test]
     fn personal_search_and_repo_refresh_have_independent_due_times() {
         let settings = AppSettings::default();
-        assert!(!refresh_due(Duration::from_secs(4 * 60), settings.personal_refresh_minutes));
-        assert!(refresh_due(Duration::from_secs(5 * 60), settings.personal_refresh_minutes));
-        assert!(!refresh_due(Duration::from_secs(5 * 60), settings.activity_refresh_minutes));
-        assert!(refresh_due(Duration::from_secs(24 * 60 * 60), settings.activity_refresh_minutes));
+        let refreshed = "2026-10-09T14:14:18+00:00";
+        let start = refreshed.parse::<chrono::DateTime<Utc>>().unwrap();
+        assert!(!refresh_due(Some(refreshed), None, start + Duration::minutes(4), settings.personal_refresh_minutes));
+        assert!(refresh_due(Some(refreshed), None, start + Duration::minutes(5), settings.personal_refresh_minutes));
+        assert!(!refresh_due(Some(refreshed), None, start + Duration::minutes(5), settings.activity_refresh_minutes));
+        // Relaunching with no in-process attempts must preserve the saved due
+        // time. The same wall-clock jump covers a sleeping Mac waking overdue.
+        assert!(!refresh_due(Some(refreshed), None, start + Duration::hours(24) - Duration::seconds(1), settings.activity_refresh_minutes));
+        assert!(refresh_due(Some(refreshed), None, start + Duration::hours(24), settings.activity_refresh_minutes));
+        let wake = start + Duration::days(2);
+        assert!(refresh_due(Some(refreshed), None, wake, settings.activity_refresh_minutes));
+        let personal = (wake - Duration::minutes(1)).to_rfc3339();
+        assert!(!refresh_due(Some(&personal), None, wake, settings.personal_refresh_minutes));
+    }
+
+    #[test]
+    fn attempts_throttle_failures_and_manual_completion_reschedules_refresh() {
+        let start = "2026-10-09T14:14:18+00:00".parse::<chrono::DateTime<Utc>>().unwrap();
+        let stale = (start - Duration::days(2)).to_rfc3339();
+        assert!(!refresh_due(Some(&stale), Some(start), start + Duration::minutes(5), 1440));
+        assert!(refresh_due(Some(&stale), Some(start), start + Duration::days(1), 1440));
+        let manual = (start + Duration::hours(12)).to_rfc3339();
+        assert!(!refresh_due(Some(&manual), Some(start), start + Duration::days(1), 1440));
+        assert!(refresh_due(Some(&manual), Some(start), start + Duration::hours(36), 1440));
+    }
+
+    #[test]
+    fn missing_invalid_or_future_refresh_times_do_not_postpone_work() {
+        let now = "2026-10-11T00:00:00+00:00".parse::<chrono::DateTime<Utc>>().unwrap();
+        let future = (now + Duration::days(1)).to_rfc3339();
+        for saved in [None, Some(""), Some("invalid"), Some(future.as_str())] {
+            assert!(refresh_due(saved, None, now, 1440));
+            assert!(!refresh_due(saved, Some(now), now, 1440));
+        }
+        assert!(refresh_due(None, Some(now + Duration::hours(1)), now, 1440));
     }
 
     #[test]
