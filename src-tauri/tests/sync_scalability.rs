@@ -318,6 +318,12 @@ if args[:2] == ["api", "graphql"]:
         print("HTTP/2.0 503 Service Unavailable\n\n{}")
         print("gh: HTTP 503 Service Unavailable", file=sys.stderr)
         raise SystemExit(1)
+    if mode in ("truncated-cli", "truncated-body") and graphql_calls <= 2:
+        if mode == "truncated-cli":
+            print("unexpected end of JSON input", file=sys.stderr)
+            raise SystemExit(1)
+        print('{"data":')
+        raise SystemExit(0)
     if mode == "permanent":
         print("permission denied", file=sys.stderr)
         raise SystemExit(1)
@@ -333,7 +339,7 @@ if args[:2] == ["api", "graphql"]:
         print('HTTP/2.0 401 Unauthorized\r\nContent-Type: application/json\r\n\r\n{"message":"Bad credentials"}')
         print("gh: Bad credentials (HTTP 401)", file=sys.stderr)
         raise SystemExit(1)
-    if mode == "permission-denied" and variables.get("repositoryId") == "repo-1":
+    if (mode == "permission-denied" and variables.get("repositoryId") == "repo-1") or (mode == "resume-asym" and variables.get("prOpenAfter", "").startswith("CURSOR_")):
         print("gh: Resource not accessible (HTTP 403)", file=sys.stderr)
         raise SystemExit(1)
 
@@ -351,7 +357,10 @@ if args[:2] == ["api", "graphql"]:
         raise SystemExit(0)
     if not aliases:
         start = 100 if variables.get("after") == "OWNED_100" else 0
-        if mode == "discovery-failed" and start:
+        if mode == "discovery-cursor-error" and start:
+            emit({"data": {"rateLimit": {"remaining": 5000}}, "errors": [{"type": "INVALID_CURSOR", "message": "Invalid cursor", "path": ["viewer", "repositories"]}]})
+            raise SystemExit(0)
+        if mode in ("discovery-failed", "job-discovery-failed") and start:
             print("repository discovery page failed", file=sys.stderr)
             raise SystemExit(1)
         repos = [repository("repo-" + str(index + 1), "one" if index == 0 else "two" if index == 1 else "extra" + str(index + 1))
@@ -436,7 +445,7 @@ if args[:2] == ["api", "graphql"]:
             nodes = [make_node(alias, kind, base + 1, "low quota durable page", "CLOSED" if closed else "OPEN", timestamp)]
             return filter_nodes(alias, nodes), more, "CURSOR_" + alias + "_1" if more else None
 
-        if mode == "asym":
+        if mode in ("asym", "resume-asym"):
             last_page = {"prOpen": 2, "issueOpen": 2, "prClosed": 1, "issueClosed": 2}[alias]
             more = page_number < last_page
         elif mode == "many":
@@ -684,22 +693,24 @@ fn missing_or_mismatched_activity_repository_identity_preserves_cached_data() {
 
 #[test]
 fn transient_graphql_failures_are_retried_before_activity_import_fails() {
-    let root = unique_root("transient-retry");
-    let fake = FakeGh::new("transient-retry", "transient", 1);
-    let repo = repository("repo-1", "one");
-    let (database, database_path) = seed_database(&root, std::slice::from_ref(&repo));
-    let stored = database.repositories().expect("repositories").remove(0);
+    for mode in ["transient", "truncated-cli", "truncated-body"] {
+        let root = unique_root(mode);
+        let fake = FakeGh::new(mode, mode, 1);
+        let repo = repository("repo-1", "one");
+        let (database, database_path) = seed_database(&root, std::slice::from_ref(&repo));
+        let stored = database.repositories().expect("repositories").remove(0);
 
-    let imported = fake.with_path(|| {
-        github_sync::sync_activity(&database, &stored).expect("transient GraphQL failures should be retried")
-    });
-    assert!(imported.2, "activity feeds should finish after transient retries");
-    assert_eq!(pull_requests(&database, stored.id).len(), 4);
-    assert_eq!(issues(&database, stored.id).len(), 4);
-    assert_eq!(fake.calls().matches("api graphql").count(), 4, "the fake should record two retries before the paginated feeds: {}", fake.calls());
+        let imported = fake.with_path(|| {
+            github_sync::sync_activity(&database, &stored).expect("transient GraphQL failures should be retried")
+        });
+        assert!(imported.2, "activity feeds should finish after transient retries");
+        assert_eq!(pull_requests(&database, stored.id).len(), 4);
+        assert_eq!(issues(&database, stored.id).len(), 4);
+        assert_eq!(fake.calls().matches("api graphql").count(), 4, "the fake should record two retries before the paginated feeds: {}", fake.calls());
 
-    let _ = std::fs::remove_dir_all(root);
-    let _ = std::fs::remove_file(database_path);
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_file(database_path);
+    }
 }
 
 #[test]
@@ -1818,4 +1829,132 @@ fn explicit_work_item_sync_does_not_touch_loc_even_when_all_loc_triggers_are_due
 
     let _ = std::fs::remove_dir_all(root);
     let _ = std::fs::remove_file(database_path);
+}
+
+#[test]
+fn repository_refresh_resumes_after_restart_without_repeating_successful_repositories_or_feeds() {
+    let root = unique_root("refresh-job-resume");
+    let mut fake = FakeGh::new("refresh-job-resume", "permission-denied", 2);
+    let (database, path) = seed_database(&root, &[repository("repo-1", "one"), repository("repo-2", "two")]);
+    database.set_metadata("github_discovered_at", &Utc::now().to_rfc3339()).unwrap();
+    let previous = (Utc::now() - Duration::days(2)).to_rfc3339();
+    let repo_one = database.repositories().unwrap().into_iter().find(|repo| repo.github_id == "repo-1").unwrap();
+    let cursor_key = format!("github_activity_v2:{}:pullRequests:true", repo_one.id);
+    database.set_metadata(&cursor_key, &serde_json::json!({"completed_at":previous,"started_at":null,"after":null}).to_string()).unwrap();
+    let app = state(path.clone(), &root);
+    let failed_at = Utc::now();
+    let first = fake.with_path(|| sync::sync_activity(&app)).unwrap();
+    assert!(!first.ok);
+    assert_eq!(first.activity_repositories_synced, 1);
+    assert!(database.metadata(sync::LAST_FULL_REFRESH_METADATA_KEY).unwrap().is_none());
+    assert_eq!(sync::repository_refresh_retry_due(&database, failed_at + Duration::minutes(4)).unwrap(), Some(false));
+    assert_eq!(sync::repository_refresh_retry_due(&database, Utc::now() + Duration::minutes(5)).unwrap(), Some(true));
+    let successful_repo = database.repositories().unwrap().into_iter().find(|repo| repo.github_id == "repo-2").unwrap();
+    let successful_at = successful_repo.last_sync_at.clone();
+
+    // Relaunch and recover the failed repository. The completed repository and
+    // discovery must never appear in the subprocess log of the continuation.
+    fake.scenario = "resume-asym:2".into();
+    fake.clear_calls();
+    let restarted = state(path.clone(), &root);
+    assert_eq!(sync::repository_refresh_retry_due(&restarted.database(), failed_at + Duration::minutes(4)).unwrap(), Some(false));
+    let partial = fake.with_path(|| sync::sync_activity(&restarted)).unwrap();
+    assert!(!partial.ok);
+    let calls = activity_calls(&fake);
+    assert_eq!(calls.len(), 2);
+    assert!(calls.iter().all(|call| call.contains("repositoryId=repo-1")));
+    assert!(!calls[1].contains("prClosed:pullRequests"), "completed feed leaves the next wave");
+    assert!(!fake.calls().contains("viewer{"), "discovery is already complete");
+
+    let mut expired: serde_json::Value = serde_json::from_str(&database.metadata(&cursor_key).unwrap().unwrap()).unwrap();
+    expired["after"] = serde_json::json!("STALE_CURSOR");
+    database.set_metadata(&cursor_key, &expired.to_string()).unwrap();
+    fake.scenario = "cursor-error:2".into();
+    assert!(!fake.with_path(|| sync::sync_activity(&restarted)).unwrap().ok);
+    let reset: serde_json::Value = serde_json::from_str(&database.metadata(&cursor_key).unwrap().unwrap()).unwrap();
+    assert!(reset["after"].is_null());
+    assert_eq!(reset["completed_at"], previous);
+    assert!(reset["started_at"].is_string());
+
+    fake.scenario = "asym:2".into();
+    fake.clear_calls();
+    let resumed = fake.with_path(|| sync::sync_activity(&state(path, &root))).unwrap();
+    assert!(resumed.ok, "{:?}", resumed.errors);
+    let calls = activity_calls(&fake);
+    assert_eq!(calls.len(), 2, "the expired PR feed restarts from its watermark; healthy feeds resume at their cursors");
+    assert!(!calls[0].contains("prClosed:pullRequests"), "completed feeds stay complete across restart");
+    assert!(calls[0].contains("prOpenAfter=null"), "the reset feed must be fetched rather than mistaken for complete");
+    assert!(calls[0].contains("issueOpenAfter=CURSOR_issueOpen_1"), "healthy feeds resume from their saved pages");
+    assert!(calls[1].contains("prOpenAfter=CURSOR_prOpen_1"));
+    assert!(!fake.calls().contains("repositoryId=repo-2"));
+    assert_eq!(database.repository(successful_repo.id).unwrap().unwrap().last_sync_at, successful_at);
+    assert!(database.metadata(sync::LAST_FULL_REFRESH_METADATA_KEY).unwrap().is_some());
+    assert_eq!(sync::repository_refresh_retry_due(&database, Utc::now()).unwrap(), None, "normal cadence resumes after completion");
+    assert!(database.repositories().unwrap().iter().all(|repo| repo.last_error.is_none()));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn repository_refresh_retries_only_line_work_after_activity_succeeds() {
+    let root = unique_root("refresh-loc-resume");
+    let fake = FakeGh::new("refresh-loc-resume", "single", 1);
+    let (database, path) = seed_database(&root, &[repository("repo-1", "one")]);
+    database.set_metadata("github_discovered_at", &Utc::now().to_rfc3339()).unwrap();
+    let sweep = database.metadata(sync::LOC_SWEEP_METADATA_KEY).unwrap();
+    let repo = database.repositories().unwrap().remove(0);
+    database.set_backfill_complete(repo.id, false).unwrap();
+    // The fixture cache marker is deliberately not a valid Git repository, so
+    // LOC fails after the successful activity import has been checkpointed.
+    let first = fake.with_path(|| sync::sync_activity(&state(path.clone(), &root))).unwrap();
+    assert!(!first.ok);
+    assert_eq!(activity_calls(&fake).len(), 1);
+    assert!(database.repository(repo.id).unwrap().unwrap().last_error.is_some());
+    let cache = repo.local_path.as_deref().unwrap();
+    assert!(std::process::Command::new("git").args(["init", "--initial-branch=main", cache]).output().unwrap().status.success());
+    fake.clear_calls();
+    let resumed = fake.with_path(|| sync::sync_activity(&state(path, &root))).unwrap();
+    assert!(resumed.ok, "{:?}", resumed.errors);
+    assert_eq!(resumed.loc_repositories_synced, 1);
+    assert_eq!(database.metadata(sync::LOC_SWEEP_METADATA_KEY).unwrap(), sweep, "a first scan must not postpone the existing sweep cadence");
+    assert!(fake.calls().is_empty(), "successful activity and discovery must not run again: {}", fake.calls());
+    assert!(database.repository(repo.id).unwrap().unwrap().last_error.is_none());
+    assert_eq!(sync::repository_refresh_retry_due(&database, Utc::now()).unwrap(), None);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn repository_refresh_resumes_discovery_at_the_failed_page() {
+    let root = unique_root("refresh-discovery-resume");
+    let mut fake = FakeGh::new("refresh-discovery-resume", "job-discovery-failed", 101);
+    let (database, path) = seed_database(&root, &[repository("repo-1", "one")]);
+    sync::save_app_settings(&database, &AppSettings { excluded_repository_ids: (2..=101).map(|id| format!("repo-{id}")).collect(), ..AppSettings::default() }).unwrap();
+    let first = fake.with_path(|| sync::sync_activity(&state(path.clone(), &root))).unwrap();
+    assert!(!first.ok);
+    assert_eq!(activity_calls(&fake).len(), 2, "cached repository activity still progresses during partial discovery");
+    fake.scenario = "discovery-pages:101".into();
+    fake.clear_calls();
+    let resumed = fake.with_path(|| sync::sync_activity(&state(path, &root))).unwrap();
+    assert!(resumed.ok, "{:?}", resumed.errors);
+    let calls = fake.calls();
+    let graphql: Vec<_> = calls.lines().filter(|call| call.starts_with("api graphql")).collect();
+    assert_eq!(graphql.len(), 1, "completed discovery and activity requests must not be repeated: {calls}");
+    assert!(graphql[0].contains("after=OWNED_100"));
+    assert!(activity_calls(&fake).is_empty());
+    assert_eq!(database.repositories().unwrap().len(), 101, "both discovery pages are published together");
+    assert!(database.metadata(sync::LAST_FULL_REFRESH_METADATA_KEY).unwrap().is_some());
+    fake.scenario = "job-discovery-failed:101".into();
+    database.set_metadata("github_discovered_at", "").unwrap();
+    let app = state(root.join("codetally.sqlite3"), &root);
+    assert!(!fake.with_path(|| sync::sync_activity(&app)).unwrap().ok);
+    fake.scenario = "discovery-cursor-error:101".into();
+    fake.clear_calls();
+    assert!(!fake.with_path(|| sync::sync_activity(&app)).unwrap().ok);
+    assert!(fake.calls().contains("after=OWNED_100"));
+    fake.scenario = "discovery-pages:101".into();
+    fake.clear_calls();
+    assert!(fake.with_path(|| sync::sync_activity(&app)).unwrap().ok, "an expired discovery cursor must not wedge the job");
+    let calls = fake.calls();
+    assert_eq!(calls.lines().filter(|call| call.starts_with("api graphql")).count(), 2, "only the invalidated listing must restart: {calls}");
+    assert!(activity_calls(&fake).is_empty(), "successful repository work stays checkpointed during listing recovery");
+    std::fs::remove_dir_all(root).unwrap();
 }

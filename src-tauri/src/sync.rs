@@ -7,7 +7,8 @@ use crate::github_sync;
 use crate::models::{AppSettings, Repository, Snapshot, SyncProgress, SyncResult};
 use chrono::{DateTime, Duration, Utc};
 use rusqlite::params;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -205,35 +206,59 @@ impl AppState {
     }
 }
 
+#[derive(Clone, Default, Serialize, Deserialize)]
+struct DiscoveryProgress {
+    owned: github_sync::OwnedDiscoveryProgress,
+    organizations: Option<Vec<String>>,
+    completed_organizations: BTreeSet<String>,
+    company_repositories: Vec<Repository>,
+    groups: Option<(bool, bool)>,
+}
+
 pub fn discover(state: &AppState) -> AppResult<Vec<Repository>> {
+    discover_checkpointed(state, &mut DiscoveryProgress::default(), |_| Ok(()))
+}
+
+fn discover_checkpointed(state: &AppState, progress: &mut DiscoveryProgress, mut checkpoint: impl FnMut(&DiscoveryProgress) -> AppResult<()>) -> AppResult<Vec<Repository>> {
     let db = state.database();
     let settings = app_settings(&db)?;
     if !settings.include_personal_repositories && !settings.include_company_repositories { return db.repositories(); }
+    let groups = (settings.include_personal_repositories, settings.include_company_repositories);
+    if progress.groups != Some(groups) { *progress = DiscoveryProgress { groups: Some(groups), ..DiscoveryProgress::default() }; }
     github_sync::ensure_available(&db)?;
-    let (user, mut discovered) = github_sync::discover_owned(&db, settings.include_personal_repositories)?;
+    let mut owned = progress.owned.clone();
+    let (user, mut discovered) = github_sync::discover_owned_checkpointed(&db, settings.include_personal_repositories, &mut owned, |owned| {
+        progress.owned = owned.clone();
+        checkpoint(progress)
+    })?;
     github_sync::ensure_available(&db)?;
     db.set_metadata("github_login", &user.login)?;
     db.set_metadata("org_discovery_errors", "")?;
     let mut org_errors = Vec::new();
     if settings.include_company_repositories {
-        match github_sync::guarded(&db, github::list_organizations) {
-            Ok(organizations) => {
-                for organization in organizations {
-                    if !app_settings(&db)?.include_company_repositories { break; }
-                    match github_sync::guarded(&db, || github::list_repositories_for_owner(&organization)) {
-                        Ok(repositories) => discovered.extend(repositories),
-                        Err(error @ (AppError::RateLimited { .. } | AppError::Authentication)) => return Err(error),
-                        Err(error) => org_errors.push(format!("{organization}: {error}")),
-                    }
-                }
+        if progress.organizations.is_none() {
+            match github_sync::guarded(&db, github::list_organizations) {
+                Ok(organizations) => { progress.organizations = Some(organizations); checkpoint(progress)?; }
+                Err(error @ (AppError::RateLimited { .. } | AppError::Authentication)) => return Err(error),
+                Err(error) => org_errors.push(format!("organization discovery: {error}")),
             }
-            Err(error @ (AppError::RateLimited { .. } | AppError::Authentication)) => return Err(error),
-            Err(error) => org_errors.push(format!("organization discovery: {error}")),
         }
+        for organization in progress.organizations.clone().unwrap_or_default() {
+            if progress.completed_organizations.contains(&organization) { continue; }
+            if !app_settings(&db)?.include_company_repositories { break; }
+            match github_sync::guarded(&db, || github::list_repositories_for_owner(&organization)) {
+                Ok(repositories) => {
+                    progress.company_repositories.extend(repositories);
+                    progress.completed_organizations.insert(organization);
+                    checkpoint(progress)?;
+                }
+                Err(error @ (AppError::RateLimited { .. } | AppError::Authentication)) => return Err(error),
+                Err(error) => org_errors.push(format!("{organization}: {error}")),
+            }
+        }
+        discovered.extend(progress.company_repositories.clone());
     }
-    if !org_errors.is_empty() {
-        db.set_metadata("org_discovery_errors", &org_errors.join("\n"))?;
-    }
+    if !org_errors.is_empty() { db.set_metadata("org_discovery_errors", &org_errors.join("\n"))?; }
     let mut seen = BTreeSet::new();
     let discovered: Vec<_> = discovered.into_iter().filter(|repo| seen.insert(repo.github_id.clone())).collect();
     db.upsert_repositories(&discovered)?;
@@ -242,232 +267,176 @@ pub fn discover(state: &AppState) -> AppResult<Vec<Repository>> {
     db.repositories()
 }
 
-pub fn sync_all(state: &AppState) -> AppResult<SyncResult> {
-    let settings = app_settings(&state.database())?;
-    if !settings.include_personal_repositories && !settings.include_company_repositories {
-        finish_progress(state, None);
-        return Ok(SyncResult { ok: true, message: "No repository groups selected".into(), ..SyncResult::default() });
-    }
-    github_sync::ensure_available(&state.database())?;
-    let mut result = SyncResult { ok: true, message: "Refresh complete".into(), ..SyncResult::default() };
-    state.set_progress(SyncProgress { running: true, phase: "discovering".into(), message: "Discovering repositories".into(), ..SyncProgress::default() });
+const REPOSITORY_REFRESH_JOB_KEY: &str = "repository_refresh_job_v1";
+const REPOSITORY_REFRESH_RETRY_MINUTES: i64 = 5;
 
-    let repos = match discover(state) {
-        Ok(repos) => repos,
-        Err(AppError::Authentication) => {
-            result.errors.push(AppError::Authentication.to_string());
-            return Ok(finish_authentication_failure(state, result));
-        }
-        Err(error) => {
-            result.ok = false;
-            result.errors.push(error.to_string());
-            state.database().repositories()?
-        }
-    };
-    if let Some(org_errors) = state.database().metadata("org_discovery_errors")?.filter(|_| app_settings(&state.database()).map(|settings| settings.include_company_repositories).unwrap_or(false)) {
-        if !org_errors.trim().is_empty() {
-            result.ok = false;
-            result.errors.extend(org_errors.lines().map(|error| format!("Organization discovery: {error}")));
-        }
-    }
-    if let Err(error) = github_sync::ensure_available(&state.database()) {
-        result.ok = false;
-        result.errors.push(error.to_string());
-        result.message = error.to_string();
-        finish_progress(state, Some(error.to_string()));
-        return Ok(result);
-    }
-    let selected_ids: BTreeSet<i64> = state.database().selected_repositories()?.iter().map(|repo| repo.id).collect();
-    let mut active: Vec<Repository> = repos.into_iter().filter(|repo| selected_ids.contains(&repo.id)).collect();
-    let last = state.database().metadata("github_last_attempted_repository")?.and_then(|s| s.parse::<i64>().ok());
-    if let Some(position) = active.iter().position(|repo| Some(repo.id) == last) {
-        let length = active.len();
-        active.rotate_left((position + 1) % length);
-    }
-    let repository_total = active.len() as i64;
-    state.set_progress(SyncProgress { running: true, phase: "syncing".into(), current: 0, total: repository_total, repository_current: 0, repository_total, message: "Refreshing GitHub activity and line counts".into(), ..SyncProgress::default() });
-    for (index, repo) in active.into_iter().enumerate() {
-        if !state.database().repository_enabled(&repo)? { continue; }
-        if let Err(error) = github_sync::ensure_available(&state.database()) {
-            result.ok = false;
-            result.errors.push(error.to_string());
-            break;
-        }
-        state.database().set_metadata("github_last_attempted_repository", &repo.id.to_string())?;
-        state.set_progress(SyncProgress { running: true, phase: "syncing_repository".into(), current: index as i64, total: repository_total, repository_current: index as i64, repository_total, snapshot_current: 0, snapshot_total: 0, repository_name: Some(repo.name_with_owner.clone()), message: format!("Refreshing activity and line counts for {}", repo.name_with_owner), ..SyncProgress::default() });
-        match sync_repo_data(state, &repo, true, true) {
-            Ok(RepoSyncOutcome { prs, issues, snapshots, errors: repo_errors, loc_completed, authentication_failed }) => {
-                if repo_errors.is_empty() {
-                    result.repositories_synced += 1;
-                    result.activity_repositories_synced += 1;
-                }
-                if loc_completed { result.loc_repositories_synced += 1; }
-                result.pull_requests_synced += prs;
-                result.issues_synced += issues;
-                result.snapshots_created += snapshots;
-                if !repo_errors.is_empty() {
-                    result.ok = false;
-                    result.errors.extend(repo_errors.into_iter().map(|error| format!("{}: {}", repo.name_with_owner, error)));
-                }
-                if authentication_failed { return Ok(finish_authentication_failure(state, result)); }
-            }
-            Err(AppError::RepositoryUnavailable) => {
-                if settings.kanban_enabled {
-                    result.ok = false;
-                    result.errors.push(format!("{}: Repository unavailable", repo.name_with_owner));
-                }
-            },
-            Err(error) => {
-                result.ok = false;
-                result.errors.push(format!("{}: {}", repo.name_with_owner, error));
-                let _ = state.database().mark_sync(repo.id, Some(&error.to_string()));
-            }
-        }
-        // `current`/`total` are the legacy overall repository progress fields.
-        // Snapshot progress has its own fields and must never replace them.
-        let mut progress = state.progress();
-        progress.current = index as i64 + 1;
-        progress.total = repository_total;
-        progress.repository_current = index as i64 + 1;
-        progress.repository_total = repository_total;
-        progress.snapshot_current = 0;
-        progress.snapshot_total = 0;
-        progress.message = format!("Completed {}/{} repositories", index + 1, repository_total);
-        state.set_progress(progress);
-    }
-    if !result.errors.is_empty() {
-        result.message = "Refresh completed with some errors".into();
-    }
-    if let Err(error) = if result.ok { state.database().set_metadata(LOC_SWEEP_METADATA_KEY, &Utc::now().to_rfc3339()) } else { Ok(()) } {
-        result.ok = false;
-        result.errors.push(format!("Line-count sweep timestamp: {error}"));
-    }
-    record_refresh_timestamps(&state.database(), &mut result, true);
-    complete_update_refresh(&state.database(), &mut result);
-    finish_progress(state, result.errors.first().cloned());
-    Ok(result)
+#[derive(Serialize, Deserialize)]
+struct RepositoryRefreshJob {
+    started_at: String,
+    last_attempt_at: Option<DateTime<Utc>>,
+    force_full: bool,
+    sweep_due: bool,
+    discovery_complete: bool,
+    discovery: DiscoveryProgress,
+    repositories: BTreeMap<i64, RepositoryRefreshTask>,
 }
 
-/// Scheduled repository refresh, including activity and line-count work for
-/// repositories that are new, incomplete, or due for the periodic sweep.
+#[derive(Clone, Serialize, Deserialize)]
+struct RepositoryRefreshTask {
+    finished: bool,
+    activity_complete: bool,
+    loc_complete: bool,
+    run_loc: bool,
+    force_fetch: bool,
+}
+
+impl RepositoryRefreshJob {
+    fn load(db: &Database) -> AppResult<Option<Self>> {
+        db.metadata(REPOSITORY_REFRESH_JOB_KEY)?.map(|value| serde_json::from_str(&value).map_err(Into::into)).transpose()
+    }
+
+    fn save(&self, db: &Database) -> AppResult<()> {
+        db.set_metadata(REPOSITORY_REFRESH_JOB_KEY, &serde_json::to_string(self)?)
+    }
+}
+
+/// None means there is no unfinished repository job. A pending job owns its
+/// cadence, including across restarts, and must never fall through to a fresh
+/// daily/update pass while its five-minute retry or GitHub cooldown is pending.
+pub fn repository_refresh_retry_due(db: &Database, now: DateTime<Utc>) -> AppResult<Option<bool>> {
+    let Some(job) = RepositoryRefreshJob::load(db)? else { return Ok(None); };
+    let paused = db.metadata(github_sync::PAUSE_KEY)?.and_then(|value| value.parse::<DateTime<Utc>>().ok())
+        .is_some_and(|until| until > now);
+    Ok(Some(!paused && job.last_attempt_at.is_none_or(|last| last > now || now - last >= Duration::minutes(REPOSITORY_REFRESH_RETRY_MINUTES))))
+}
+
+pub fn sync_all(state: &AppState) -> AppResult<SyncResult> {
+    sync_repositories(state, true)
+}
+
+/// Scheduled repository refresh. An unfinished pass is resumed before a new
+/// pass can begin; successful repositories and stages remain checkpointed.
 pub fn sync_activity(state: &AppState) -> AppResult<SyncResult> {
-    let settings = app_settings(&state.database())?;
+    sync_repositories(state, false)
+}
+
+fn sync_repositories(state: &AppState, force_full: bool) -> AppResult<SyncResult> {
+    let db = state.database();
+    let settings = app_settings(&db)?;
     if !settings.include_personal_repositories && !settings.include_company_repositories {
         finish_progress(state, None);
         return Ok(SyncResult { ok: true, message: "No repository groups selected".into(), ..SyncResult::default() });
     }
-    github_sync::ensure_available(&state.database())?;
-    let mut result = SyncResult { ok: true, message: "PR & issue refresh complete".into(), ..SyncResult::default() };
-    state.set_progress(SyncProgress { running: true, phase: "discovering_activity".into(), message: "Discovering repositories".into(), ..SyncProgress::default() });
+    let sweep_due = force_full || loc_sweep_due_with_interval(db.metadata(LOC_SWEEP_METADATA_KEY)?.as_deref(), Utc::now(), settings.activity_refresh_minutes);
+    let mut job = RepositoryRefreshJob::load(&db)?.unwrap_or_else(|| RepositoryRefreshJob {
+        started_at: Utc::now().to_rfc3339(), last_attempt_at: None, force_full, sweep_due,
+        discovery_complete: false, discovery: DiscoveryProgress::default(), repositories: BTreeMap::new(),
+    });
+    // Persist before any network or Git work, so an interrupted attempt can be
+    // resumed without resetting its cadence or losing committed checkpoints.
+    job.last_attempt_at = Some(Utc::now());
+    job.save(&db)?;
+    let outcome = run_repository_refresh(state, &mut job);
+    job.last_attempt_at = Some(Utc::now());
+    if outcome.as_ref().is_ok_and(|result| result.ok) {
+        db.connect()?.execute("DELETE FROM app_metadata WHERE key=?1", [REPOSITORY_REFRESH_JOB_KEY])?;
+    } else {
+        job.save(&db)?;
+    }
+    if let Err(error) = &outcome { finish_progress(state, Some(error.to_string())); }
+    outcome
+}
 
-    let cached = state.database().metadata("github_discovered_at")?.and_then(|s| s.parse::<DateTime<Utc>>().ok()).is_some_and(|t| Utc::now() - t < Duration::hours(1));
-    let repos = match if cached { state.database().repositories() } else { discover(state) } {
-        Ok(repos) => repos,
-        Err(AppError::Authentication) => {
-            result.errors.push(AppError::Authentication.to_string());
-            return Ok(finish_authentication_failure(state, result));
-        }
-        Err(error) => {
-            result.ok = false;
-            result.errors.push(error.to_string());
-            state.database().repositories()?
-        }
-    };
-    if let Some(org_errors) = state.database().metadata("org_discovery_errors")?.filter(|_| app_settings(&state.database()).map(|settings| settings.include_company_repositories).unwrap_or(false)) {
-        if !org_errors.trim().is_empty() {
-            result.ok = false;
-            result.errors.extend(org_errors.lines().map(|error| format!("Organization discovery: {error}")));
-        }
-    }
-    if let Err(error) = github_sync::ensure_available(&state.database()) {
-        result.ok = false;
-        result.errors.push(error.to_string());
-        result.message = error.to_string();
-        finish_progress(state, Some(error.to_string()));
-        return Ok(result);
-    }
-    let selected_ids: BTreeSet<i64> = state.database().selected_repositories()?.iter().map(|repo| repo.id).collect();
-    let mut active: Vec<Repository> = repos.into_iter().filter(|repo| selected_ids.contains(&repo.id)).collect();
-    let last = state.database().metadata("github_last_attempted_repository")?.and_then(|s| s.parse::<i64>().ok());
-    if let Some(position) = active.iter().position(|repo| Some(repo.id) == last) {
-        let length = active.len();
-        active.rotate_left((position + 1) % length);
-    }
-    let repository_total = active.len() as i64;
-    let now = Utc::now();
+fn run_repository_refresh(state: &AppState, job: &mut RepositoryRefreshJob) -> AppResult<SyncResult> {
     let db = state.database();
+    github_sync::ensure_available(&db)?;
     let settings = app_settings(&db)?;
-    let last_sweep_at = db.metadata(LOC_SWEEP_METADATA_KEY)?;
-    let sweep_due = loc_sweep_due_with_interval(last_sweep_at.as_deref(), now, settings.activity_refresh_minutes);
-    state.set_progress(SyncProgress { running: true, phase: "syncing_activity".into(), current: 0, total: repository_total, repository_current: 0, repository_total, snapshot_current: 0, snapshot_total: 0, message: if sweep_due { "Refreshing PRs, issues, and due line-count checks".into() } else { "Refreshing PRs and issues".into() }, ..SyncProgress::default() });
-
-    for (index, repo) in active.into_iter().enumerate() {
-        if !state.database().repository_enabled(&repo)? { continue; }
-        if let Err(error) = github_sync::ensure_available(&state.database()) {
-            result.ok = false;
-            result.errors.push(error.to_string());
-            break;
+    let mut result = SyncResult { ok: true, message: "Repository refresh complete".into(), ..SyncResult::default() };
+    state.set_progress(SyncProgress { running: true, phase: "discovering_activity".into(), message: "Continuing repository refresh".into(), ..SyncProgress::default() });
+    if !job.discovery_complete {
+        let cached = !job.force_full && db.metadata("github_discovered_at")?.and_then(|s| s.parse::<DateTime<Utc>>().ok())
+            .is_some_and(|t| Utc::now() - t < Duration::hours(1));
+        let mut discovery = job.discovery.clone();
+        match if cached { db.repositories() } else { discover_checkpointed(state, &mut discovery, |progress| {
+            job.discovery = progress.clone();
+            job.save(&db)
+        }) } {
+            Ok(_) => job.discovery_complete = true,
+            Err(AppError::Authentication) => {
+                result.errors.push(AppError::Authentication.to_string());
+                return Ok(finish_authentication_failure(state, result));
+            }
+            Err(error) => { result.ok = false; result.errors.push(error.to_string()); }
         }
-        state.database().set_metadata("github_last_attempted_repository", &repo.id.to_string())?;
-        let decision = decide_loc_sync_with_settings(&repo, now, last_sweep_at.as_deref(), false, &settings);
-        if !decision.run {
-            result.loc_repositories_skipped += 1;
+        if let Some(errors) = db.metadata("org_discovery_errors")?.filter(|_| settings.include_company_repositories) {
+            if !errors.trim().is_empty() {
+                job.discovery_complete = false;
+                result.ok = false;
+                result.errors.extend(errors.lines().map(|error| format!("Organization discovery: {error}")));
+            }
         }
-        state.set_progress(SyncProgress { running: true, phase: if decision.run { "syncing_repository" } else { "syncing_activity" }.into(), current: index as i64, total: repository_total, repository_current: index as i64, repository_total, snapshot_current: 0, snapshot_total: 0, repository_name: Some(repo.name_with_owner.clone()), message: if decision.run { format!("Refreshing PRs, issues, and line counts for {}", repo.name_with_owner) } else { format!("Refreshing PRs and issues for {}", repo.name_with_owner) }, ..SyncProgress::default() });
-        match sync_repo_data(state, &repo, decision.run, decision.force_fetch) {
-            Ok(RepoSyncOutcome { prs, issues, snapshots, errors: repo_errors, loc_completed, authentication_failed }) => {
-                if repo_errors.is_empty() {
-                    result.repositories_synced += 1;
-                    result.activity_repositories_synced += 1;
-                }
-                if loc_completed {
-                    result.loc_repositories_synced += 1;
-                }
-                result.pull_requests_synced += prs;
-                result.issues_synced += issues;
-                result.snapshots_created += snapshots;
-                if !repo_errors.is_empty() {
-                    result.ok = false;
-                    result.errors.extend(repo_errors.into_iter().map(|error| format!("{}: {}", repo.name_with_owner, error)));
-                }
+        let last_sweep = db.metadata(LOC_SWEEP_METADATA_KEY)?;
+        for repo in db.selected_repositories()? {
+            let decision = decide_loc_sync_with_settings(&repo, Utc::now(), last_sweep.as_deref(), job.force_full, &settings);
+            job.repositories.entry(repo.id).or_insert(RepositoryRefreshTask {
+                finished: false, activity_complete: false, loc_complete: !decision.run, run_loc: decision.run, force_fetch: decision.force_fetch,
+            });
+        }
+        job.save(&db)?;
+    }
+    // A repository disabled or removed while a job was pending is no longer
+    // part of its work. Reenabling it is picked up by the next fresh pass.
+    let selected: BTreeMap<_, _> = db.selected_repositories()?.into_iter().map(|repo| (repo.id, repo)).collect();
+    job.repositories.retain(|id, _| selected.contains_key(id));
+    job.save(&db)?;
+    let total = job.repositories.len() as i64;
+    let mut completed = job.repositories.values().filter(|task| task.finished).count() as i64;
+    let pending: Vec<_> = job.repositories.iter().filter(|(_, task)| !task.finished).map(|(id, _)| *id).collect();
+    for id in pending {
+        let repo = &selected[&id];
+        if !db.repository_enabled(repo)? { job.repositories.remove(&id); job.save(&db)?; continue; }
+        if let Err(error) = github_sync::ensure_available(&db) {
+            result.ok = false; result.errors.push(error.to_string()); break;
+        }
+        db.set_metadata("github_last_attempted_repository", &id.to_string())?;
+        state.set_progress(SyncProgress { running: true, phase: "syncing_repository".into(), current: completed, total,
+            repository_current: completed, repository_total: total, repository_name: Some(repo.name_with_owner.clone()),
+            message: format!("Continuing refresh for {}", repo.name_with_owner), ..SyncProgress::default() });
+        let mut task = job.repositories[&id].clone();
+        let refresh_id = job.started_at.clone();
+        match sync_repo_data_checkpointed(state, repo, &mut task, Some(&refresh_id), |task| {
+            job.repositories.insert(id, task.clone());
+            job.save(&db)
+        }) {
+            Ok(RepoSyncOutcome { prs, issues, snapshots, errors, loc_completed, authentication_failed }) => {
+                if errors.is_empty() { result.repositories_synced += 1; result.activity_repositories_synced += 1; }
+                if loc_completed { result.loc_repositories_synced += 1; }
+                result.pull_requests_synced += prs; result.issues_synced += issues; result.snapshots_created += snapshots;
+                if !task.run_loc { result.loc_repositories_skipped += 1; }
+                if !errors.is_empty() { result.ok = false; result.errors.extend(errors.into_iter().map(|error| format!("{}: {error}", repo.name_with_owner))); }
                 if authentication_failed { return Ok(finish_authentication_failure(state, result)); }
             }
-            Err(AppError::RepositoryUnavailable) => {
-                if settings.kanban_enabled {
-                    result.ok = false;
-                    result.errors.push(format!("{}: Repository unavailable", repo.name_with_owner));
-                }
-            },
+            Err(AppError::RepositoryUnavailable) if !settings.kanban_enabled => { job.repositories.remove(&id); }
             Err(error) => {
-                result.ok = false;
-                result.errors.push(format!("{}: {}", repo.name_with_owner, error));
-                let _ = state.database().mark_sync(repo.id, Some(&error.to_string()));
+                result.ok = false; result.errors.push(format!("{}: {error}", repo.name_with_owner));
+                let _ = db.mark_sync(id, Some(&error.to_string()));
             }
         }
+        job.save(&db)?;
+        if task.finished { completed += 1; }
         let mut progress = state.progress();
-        progress.current = index as i64 + 1;
-        progress.total = repository_total;
-        progress.repository_current = index as i64 + 1;
-        progress.repository_total = repository_total;
-        progress.snapshot_current = 0;
-        progress.snapshot_total = 0;
-        progress.message = format!("Completed {}/{} repositories", index + 1, repository_total);
+        progress.current = completed; progress.total = total;
+        progress.repository_current = completed; progress.repository_total = total;
+        progress.snapshot_current = 0; progress.snapshot_total = 0;
+        progress.message = format!("Completed {completed}/{total} repositories");
         state.set_progress(progress);
     }
-    if sweep_due && result.ok {
-        if let Err(error) = state.database().set_metadata(LOC_SWEEP_METADATA_KEY, &now.to_rfc3339()) {
-            result.ok = false;
-            result.errors.push(format!("Line-count sweep timestamp: {error}"));
-        }
-    }
-    if !result.errors.is_empty() {
-        result.message = "PR & issue refresh completed with some errors".into();
-    } else if result.loc_repositories_synced > 0 {
-        result.message = format!("PR & issue refresh complete; line counts checked for {} repositories", result.loc_repositories_synced);
-    }
-    // A completed Repo Refresh covers repository activity and every line-count
-    // check due on this cadence, so it is the broad refresh shown in the header.
-    record_refresh_timestamps(&state.database(), &mut result, true);
+    result.ok &= job.discovery_complete && job.repositories.values().all(|task| task.finished);
+    if result.ok {
+        if job.sweep_due { db.set_metadata(LOC_SWEEP_METADATA_KEY, &Utc::now().to_rfc3339())?; }
+    } else { result.message = "Repository refresh will continue in five minutes".into(); }
+    record_refresh_timestamps(&db, &mut result, true);
+    if job.force_full { complete_update_refresh(&db, &mut result); }
     finish_progress(state, result.errors.first().cloned());
     Ok(result)
 }
@@ -766,15 +735,21 @@ struct RepoSyncOutcome {
 }
 
 fn sync_repo_data(state: &AppState, repo: &Repository, run_loc: bool, force_fetch: bool) -> AppResult<RepoSyncOutcome> {
+    let mut task = RepositoryRefreshTask { finished: false, activity_complete: false, loc_complete: !run_loc, run_loc, force_fetch };
+    sync_repo_data_checkpointed(state, repo, &mut task, None, |_| Ok(()))
+}
+
+fn sync_repo_data_checkpointed(state: &AppState, repo: &Repository, task: &mut RepositoryRefreshTask, refresh_id: Option<&str>, mut checkpoint: impl FnMut(&RepositoryRefreshTask) -> AppResult<()>) -> AppResult<RepoSyncOutcome> {
     let db = state.database();
     github_sync::ensure_available(&db)?;
     let mut counts = [0, 0];
     let mut errors = Vec::new();
     let mut authentication_failed = false;
-    let activity_fetched = match github_sync::sync_activity_reporting(&db, repo, &mut counts) {
+    let activity_fetched = if task.activity_complete { true } else { match github_sync::sync_activity_reporting_for_refresh(&db, repo, &mut counts, refresh_id) {
         Ok((_, _, complete)) => {
             if app_settings(&db)?.kanban_enabled { crate::kanban::record_activity(&db, &repo.github_id, complete, None)?; }
             if !complete { errors.push("Activity import is continuing next cycle".into()); }
+            if complete { task.activity_complete = true; checkpoint(task)?; }
             true
         }
         Err(error @ AppError::RepositoryUnavailable) => {
@@ -790,17 +765,20 @@ fn sync_repo_data(state: &AppState, repo: &Repository, run_loc: bool, force_fetc
             authentication_failed = matches!(error, AppError::Authentication);
             errors.push(error.to_string()); false
         }
-    };
+    }};
     let mut loc_completed = false;
     let mut snapshots = 0;
-    if activity_fetched {
+    if activity_fetched && task.run_loc && !task.loc_complete {
         match github_sync::ensure_available(&db) {
             Err(error) => errors.push(error.to_string()),
-            Ok(()) if run_loc => match db.repository(repo.id).and_then(|updated| {
+            Ok(()) if task.run_loc && !task.loc_complete => match db.repository(repo.id).and_then(|updated| {
                 let updated = updated.ok_or(AppError::RepositoryNotFound(repo.id))?;
-                sync_loc(state, &updated, force_fetch)
+                sync_loc_checkpointed(state, &updated, task.force_fetch, || {
+                    task.force_fetch = false;
+                    checkpoint(task)
+                })
             }) {
-                Ok(created) => { snapshots = created; loc_completed = true; }
+                Ok(created) => { snapshots = created; loc_completed = true; task.loc_complete = true; checkpoint(task)?; }
                 Err(error) => errors.push(error.to_string()),
             },
             Ok(()) => {},
@@ -808,10 +786,11 @@ fn sync_repo_data(state: &AppState, repo: &Repository, run_loc: bool, force_fetc
     }
     let error_text = if errors.is_empty() { None } else { Some(errors.join("; ")) };
     db.mark_sync(repo.id, error_text.as_deref())?;
+    if task.activity_complete && task.loc_complete { task.finished = true; checkpoint(task)?; }
     Ok(RepoSyncOutcome { prs: counts[0], issues: counts[1], snapshots, errors, loc_completed, authentication_failed })
 }
 
-fn sync_loc(state: &AppState, repo: &Repository, force_fetch: bool) -> AppResult<i64> {
+fn sync_loc_checkpointed(state: &AppState, repo: &Repository, force_fetch: bool, mut fetched: impl FnMut() -> AppResult<()>) -> AppResult<i64> {
     let db = state.database();
     let cached_path = repo.local_path.as_deref().map(Path::new).filter(|path| path.join(".git").is_dir()).map(Path::to_path_buf);
     let needs_fetch = force_fetch || cached_path.is_none() || repo.last_fetched_pushed_at.as_deref() != repo.pushed_at.as_deref();
@@ -819,6 +798,7 @@ fn sync_loc(state: &AppState, repo: &Repository, force_fetch: bool) -> AppResult
         let path = ensure_clone(repo, &state.cache_dir)?;
         db.set_local_path(repo.id, &path.to_string_lossy())?;
         db.set_fetched_pushed_at(repo.id, repo.pushed_at.as_deref())?;
+        fetched()?;
         path
     } else {
         cached_path.expect("cached path checked above")
@@ -1010,6 +990,27 @@ fn finish_progress(state: &AppState, error: Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unfinished_repository_jobs_keep_their_retry_deadline_and_honor_api_pauses() {
+        let path = std::env::temp_dir().join(format!("codetally-refresh-retry-{}-{}.sqlite3", std::process::id(), Utc::now().timestamp_nanos_opt().unwrap()));
+        let db = Database::new(&path);
+        db.init().unwrap();
+        let now = Utc::now();
+        let job = RepositoryRefreshJob { started_at: now.to_rfc3339(), last_attempt_at: Some(now), force_full: false, sweep_due: false,
+            discovery_complete: false, discovery: DiscoveryProgress::default(), repositories: BTreeMap::new() };
+        job.save(&db).unwrap();
+        let reopened = Database::new(&path);
+        assert_eq!(repository_refresh_retry_due(&reopened, now + Duration::minutes(5) - Duration::milliseconds(1)).unwrap(), Some(false));
+        assert_eq!(repository_refresh_retry_due(&reopened, now + Duration::minutes(5)).unwrap(), Some(true));
+        assert_eq!(repository_refresh_retry_due(&reopened, now - Duration::hours(1)).unwrap(), Some(true), "a clock adjustment must not wedge the pending job");
+        db.set_metadata(github_sync::PAUSE_KEY, &(now + Duration::minutes(20)).to_rfc3339()).unwrap();
+        assert_eq!(repository_refresh_retry_due(&reopened, now + Duration::minutes(5)).unwrap(), Some(false));
+        assert_eq!(repository_refresh_retry_due(&reopened, now + Duration::minutes(20)).unwrap(), Some(true));
+        std::fs::remove_file(&path).unwrap();
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
 
     #[test]
     fn update_refresh_survives_failure_and_restart_and_finishes_once_per_version() {

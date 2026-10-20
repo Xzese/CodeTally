@@ -89,6 +89,8 @@ fn transient_network_failure(error: &AppError, stdout: &str, stderr: &str) -> bo
         .and_then(|line| line.split_whitespace().nth(1)).and_then(|code| code.parse::<u16>().ok());
     matches!(status, Some(500 | 502 | 503 | 504))
         || [500, 502, 503, 504].iter().any(|code| message.contains(&format!("http {code}")))
+        || matches!(error, AppError::Json(error) if error.is_eof())
+        || message.contains("unexpected end of json input") || message.contains("unexpected eof")
         || message.contains("reset by peer") || message.contains("operation timed out") || message.contains("i/o timeout")
 }
 
@@ -142,42 +144,66 @@ pub fn parse_response(db: &Database, success: bool, stdout: &str, stderr: &str) 
 
 /// Identity, quota and the first owned-repository page share a request.
 /// Accumulate complete metadata before discovery publishes it to SQLite.
-pub(crate) fn discover_owned(db: &Database, include_owned: bool) -> AppResult<(crate::models::GithubUser, Vec<Repository>)> {
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub(crate) struct OwnedDiscoveryProgress {
+    after: Option<String>,
+    login: Option<String>,
+    repositories: Vec<Repository>,
+    pages: usize,
+    complete: bool,
+}
+
+pub(crate) fn discover_owned_checkpointed(db: &Database, include_owned: bool, progress: &mut OwnedDiscoveryProgress, mut checkpoint: impl FnMut(&OwnedDiscoveryProgress) -> AppResult<()>) -> AppResult<(crate::models::GithubUser, Vec<Repository>)> {
     let fields = REPOSITORY_FIELDS;
     let query = if include_owned {
         format!("query($after:String){{rateLimit{{remaining resetAt}} viewer{{login repositories(first:100,after:$after,ownerAffiliations:[OWNER]){{nodes{{{fields}}} pageInfo{{hasNextPage endCursor}}}}}}}}")
     } else {
         "query{rateLimit{remaining resetAt} viewer{login}}".into()
     };
-    let mut after: Option<String> = None;
-    let mut login: Option<String> = None;
-    let mut repositories = Vec::new();
-    for _ in 0..100 {
-        let response = graphql(db, &query, if include_owned { json!({"after": after}) } else { json!({}) })?;
+    while !progress.complete && progress.pages < 100 {
+        let response = match graphql(db, &query, if include_owned { json!({"after": progress.after}) } else { json!({}) }) {
+            Ok(response) => response,
+            Err(error) if progress.after.is_some() && cursor_error(&error) => {
+                // A server-rejected checkpoint cannot make forward progress.
+                // Restart this listing only, retaining the account guard and
+                // other completed discovery stages; never publish partial rows.
+                let reset = OwnedDiscoveryProgress { login: progress.login.clone(), ..OwnedDiscoveryProgress::default() };
+                checkpoint(&reset)?;
+                *progress = reset;
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
         let viewer = &response["data"]["viewer"];
         let current_login = viewer["login"].as_str().map(str::trim).filter(|login| !login.is_empty())
             .ok_or_else(|| AppError::InvalidArgument("GitHub did not return the authenticated login".into()))?;
-        if login.as_deref().is_some_and(|login| login != current_login) {
+        if progress.login.as_deref().is_some_and(|login| login != current_login) {
             return Err(AppError::InvalidArgument("GitHub account changed during repository discovery; cached repositories retained".into()));
         }
-        login = Some(current_login.to_owned());
-        if !include_owned { return Ok((crate::models::GithubUser { login: current_login.to_owned() }, repositories)); }
-        let page = &viewer["repositories"];
-        let nodes = page["nodes"].as_array().ok_or_else(|| AppError::InvalidArgument("GitHub response missing owned repositories".into()))?;
-        for node in nodes {
-            repositories.push(github::repository_from_json(serde_json::from_value(node.clone())?));
-        }
-        if repositories.len() >= 10000 {
-            return Err(AppError::InvalidArgument("Repository discovery reached its 10,000 repository limit; cached repositories retained".into()));
-        }
-        let more = page["pageInfo"]["hasNextPage"].as_bool().ok_or_else(|| AppError::InvalidArgument("GitHub response missing repository pageInfo".into()))?;
-        if !more { return Ok((crate::models::GithubUser { login: login.expect("validated login") }, repositories)); }
-        let next = page["pageInfo"]["endCursor"].as_str().filter(|cursor| !cursor.is_empty())
-            .ok_or_else(|| AppError::InvalidArgument("GitHub response missing repository endCursor".into()))?;
-        if after.as_deref() == Some(next) { return Err(AppError::InvalidArgument("GitHub repository pagination cursor did not advance".into())); }
-        after = Some(next.to_owned());
+        let mut next = progress.clone();
+        next.login = Some(current_login.to_owned());
+        next.pages += 1;
+        if include_owned {
+            let page = &viewer["repositories"];
+            let nodes = page["nodes"].as_array().ok_or_else(|| AppError::InvalidArgument("GitHub response missing owned repositories".into()))?;
+            for node in nodes { next.repositories.push(github::repository_from_json(serde_json::from_value(node.clone())?)); }
+            if next.repositories.len() >= 10000 {
+                return Err(AppError::InvalidArgument("Repository discovery reached its 10,000 repository limit; cached repositories retained".into()));
+            }
+            let more = page["pageInfo"]["hasNextPage"].as_bool().ok_or_else(|| AppError::InvalidArgument("GitHub response missing repository pageInfo".into()))?;
+            next.complete = !more;
+            if more {
+                let after = page["pageInfo"]["endCursor"].as_str().filter(|s| !s.is_empty())
+                    .ok_or_else(|| AppError::InvalidArgument("GitHub response missing repository endCursor".into()))?;
+                if progress.after.as_deref() == Some(after) { return Err(AppError::InvalidArgument("GitHub repository pagination cursor did not advance".into())); }
+                next.after = Some(after.to_owned());
+            }
+        } else { next.complete = true; }
+        checkpoint(&next)?;
+        *progress = next;
     }
-    Err(AppError::InvalidArgument("Repository discovery exceeded its 100-page limit; cached repositories retained".into()))
+    if !progress.complete { return Err(AppError::InvalidArgument("Repository discovery exceeded its 100-page limit; cached repositories retained".into())); }
+    Ok((crate::models::GithubUser { login: progress.login.clone().expect("validated login") }, progress.repositories.clone()))
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -187,6 +213,8 @@ struct Cursor {
     after: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     since: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    refresh_id: Option<String>,
 }
 
 const PR_FIELDS: &str = "number title state isDraft createdAt updatedAt mergedAt closedAt url author{login} assignees(first:100){nodes{login}} additions deletions changedFiles commits(last:1){nodes{commit{statusCheckRollup{state}}}}";
@@ -234,6 +262,7 @@ fn cursor_error(error: &AppError) -> bool {
 
 fn reset_cursor(db: &Database, feed: &mut Feed) -> AppResult<()> {
     feed.cursor.after = None;
+    feed.cursor.started_at = Some(feed.started.clone());
     // Retain the original overlap watermark and cycle start on recovery.
     db.set_metadata(&feed.key, &serde_json::to_string(&feed.cursor)?)
 }
@@ -301,11 +330,11 @@ fn publish_feed_page(db: &Database, repo: &Repository, feed: &mut Feed, reposito
     let more = page["pageInfo"]["hasNextPage"].as_bool().ok_or_else(|| AppError::InvalidArgument("GitHub response missing pageInfo".into()))?;
     let done = !more || reached_cutoff;
     let next_cursor = if done {
-        Cursor { completed_at:Some(feed.started.clone()), ..Cursor::default() }
+        Cursor { completed_at:Some(feed.started.clone()), refresh_id:feed.cursor.refresh_id.clone(), ..Cursor::default() }
     } else {
         let after = page["pageInfo"]["endCursor"].as_str().filter(|s| !s.is_empty()).ok_or_else(|| AppError::InvalidArgument("GitHub response missing endCursor".into()))?;
         if feed.cursor.after.as_deref() == Some(after) { return Err(AppError::InvalidArgument("GitHub pagination cursor did not advance".into())); }
-        Cursor { after:Some(after.into()), started_at:Some(feed.started.clone()), completed_at:feed.cursor.completed_at.clone(), since:feed.cursor.since.clone() }
+        Cursor { after:Some(after.into()), started_at:Some(feed.started.clone()), completed_at:feed.cursor.completed_at.clone(), since:feed.cursor.since.clone(), refresh_id:feed.cursor.refresh_id.clone() }
     };
     db.apply_activity_page_with_identities(&prs, &issues, repo.id, pr_total, issue_total, &feed.key, &serde_json::to_string(&next_cursor)?, |conn| {
         for (kind, number, node_id, reason) in &identities {
@@ -327,6 +356,10 @@ pub fn sync_activity(db: &Database, repo: &Repository) -> AppResult<(i64, i64, b
 }
 
 pub(crate) fn sync_activity_reporting(db: &Database, repo: &Repository, counts: &mut [i64; 2]) -> AppResult<(i64, i64, bool)> {
+    sync_activity_reporting_for_refresh(db, repo, counts, None)
+}
+
+pub(crate) fn sync_activity_reporting_for_refresh(db: &Database, repo: &Repository, counts: &mut [i64; 2], refresh_id: Option<&str>) -> AppResult<(i64, i64, bool)> {
     let mut canonical_repo = repo.clone();
     let cycle_started = Utc::now().to_rfc3339();
     let board_enabled = crate::sync::app_settings(db)?.kanban_enabled;
@@ -335,6 +368,8 @@ pub(crate) fn sync_activity_reporting(db: &Database, repo: &Repository, counts: 
         let connection = if kind == 0 { "pullRequests" } else { "issues" };
         let key = format!("github_activity_v2:{}:{connection}:{open}", repo.id);
         let mut cursor: Cursor = db.metadata(&key)?.map(|s| serde_json::from_str(&s)).transpose()?.unwrap_or_default();
+        let done = refresh_id.is_some() && cursor.refresh_id.as_deref() == refresh_id && cursor.after.is_none() && cursor.started_at.is_none() && cursor.completed_at.is_some();
+        cursor.refresh_id = refresh_id.map(str::to_owned);
         let started = cursor.started_at.clone().unwrap_or_else(|| cycle_started.clone());
         let cutoff = cursor.completed_at.as_deref().and_then(|s| s.parse::<DateTime<Utc>>().ok()).map(|t| t - Duration::minutes(5)).unwrap_or_else(|| started.parse::<DateTime<Utc>>().unwrap_or_else(|_| Utc::now()) - Duration::days(30));
         // Server-side issue filtering avoids retransmitting older closed rows.
@@ -343,7 +378,7 @@ pub(crate) fn sync_activity_reporting(db: &Database, repo: &Repository, counts: 
         if kind == 1 && !open && cursor.after.is_none() && cursor.since.is_none() {
             cursor.since = Some(cutoff.to_rfc3339());
         }
-        feeds.push(Feed { alias, kind, open, key, cursor, started, cutoff, done: false });
+        feeds.push(Feed { alias, kind, open, key, cursor, started, cutoff, done });
     }
     for _ in 0..5 {
         let requested: Vec<_> = feeds.iter().enumerate().filter_map(|(index, feed)| (!feed.done).then_some(index)).collect();

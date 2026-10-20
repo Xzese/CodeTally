@@ -429,21 +429,24 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
             std::thread::sleep(Duration::from_secs(5));
             let db = state.database();
             let Ok(settings) = sync::app_settings(&db) else { continue; };
-            let update_due = (settings.include_personal_repositories || settings.include_company_repositories)
+            let now = Utc::now();
+            let Ok(retry_due) = sync::repository_refresh_retry_due(&db, now) else { continue; };
+            let groups_enabled = settings.include_personal_repositories || settings.include_company_repositories;
+            let update_due = retry_due.is_none() && groups_enabled
                 && sync::update_refresh_pending(&db).unwrap_or(false)
                 && last_update_attempt.is_none_or(|attempt| attempt.elapsed() >= Duration::from_secs(60));
-            let now = Utc::now();
             let Ok(repo_refreshed_at) = db.metadata(sync::LAST_FULL_REFRESH_METADATA_KEY) else { continue; };
             let Ok(personal_refreshed_at) = db.metadata(sync::LAST_PERSONAL_REFRESH_METADATA_KEY) else { continue; };
-            let repo_due = update_due || refresh_due(repo_refreshed_at.as_deref(), last_repo_attempt, now, settings.activity_refresh_minutes);
+            let repo_due = groups_enabled && retry_due.unwrap_or_else(|| update_due || refresh_due(repo_refreshed_at.as_deref(), last_repo_attempt, now, settings.activity_refresh_minutes));
             let personal_due = refresh_due(personal_refreshed_at.as_deref(), last_personal_attempt, now, settings.personal_refresh_minutes);
             if !repo_due && !personal_due { continue; }
             // Never queue an automatic refresh behind an active manual job.
             let Ok(_job) = state.job_lock.try_lock() else {
                 continue;
             };
-            // First import remains an explicit user action.
-            if !db.repositories().is_ok_and(|repos| !repos.is_empty()) {
+            // First import remains explicit; once a user starts it, its saved
+            // job can resume even if discovery has not published any rows yet.
+            if retry_due.is_none() && !db.repositories().is_ok_and(|repos| !repos.is_empty()) {
                 continue;
             }
             // One scheduler coordinates the broad repository pass and the fast
